@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Media artifacts (generated during local testing)
+*.mp4
+*.avi
+*.wav
+*.mp3
+*.mkv
+*.webm
+
+# Secrets — never commit
+cookies.txt
+
+# Local test output
+downloads/

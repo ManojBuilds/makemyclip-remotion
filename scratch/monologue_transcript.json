@@ -1,0 +1,233 @@
+{
+  "success": true,
+  "fullText": "\u0939\u093e\u0930\u094d\u091f \u0915\u093e \u0908\u0938\u0940\u091c\u0940 \u092a\u091a\u0940\u0938 \u0930\u0941\u092a\u090f \u092e\u0947\u0902 \u0939\u094b\u0924\u093e \u0939\u0948 \u0924\u094b \u0915\u094d\u092f\u093e \u0939\u094b\u0917\u093e \u0915\u0940 \u0915\u0908 \u0906\u0926\u092e\u0940 \u092e\u091c\u093e\u0915 \u092e\u091c\u093e\u0915 \u092e\u0947\u0902 \u0906\u0915\u0947 \u0908\u0938\u0940\u091c\u0940 \u0915\u0930\u093e \u0932\u0947 \u0924\u094b 1 \u0906\u0926\u092e\u0940 \u092e\u093e \u092e\u0941\u0902\u0939 \u092e\u0947\u0902 \u0917\u0941\u091f\u0915\u0947 \u0915\u0947 \u0938\u0940\u091c \u0915\u0930\u093e \u0932\u0947\u0924\u0947\u0964",
+  "words": [
+    {
+      "word": "\u0939\u093e\u0930\u094d\u091f",
+      "start": 0.38,
+      "end": 0.58,
+      "confidence": 0.87460196,
+      "speaker": 0
+    },
+    {
+      "word": "\u0915\u093e",
+      "start": 0.62,
+      "end": 0.68,
+      "confidence": 0.88409567,
+      "speaker": 0
+    },
+    {
+      "word": "\u0908\u0938\u0940\u091c\u0940",
+      "start": 0.74,
+      "end": 1.0,
+      "confidence": 0.869583,
+      "speaker": 0
+    },
+    {
+      "word": "\u092a\u091a\u0940\u0938",
+      "start": 1.1,
+      "end": 1.38,
+      "confidence": 0.9848088,
+      "speaker": 0
+    },
+    {
+      "word": "\u0930\u0941\u092a\u090f",
+      "start": 1.44,
+      "end": 1.62,
+      "confidence": 0.91463554,
+      "speaker": 0
+    },
+    {
+      "word": "\u092e\u0947\u0902",
+      "start": 1.66,
+      "end": 1.74,
+      "confidence": 0.91148084,
+      "speaker": 0
+    },
+    {
+      "word": "\u0939\u094b\u0924\u093e",
+      "start": 1.78,
+      "end": 1.94,
+      "confidence": 0.9963237,
+      "speaker": 0
+    },
+    {
+      "word": "\u0939\u0948",
+      "start": 2.0,
+      "end": 2.04,
+      "confidence": 0.9046369,
+      "speaker": 0
+    },
+    {
+      "word": "\u0924\u094b",
+      "start": 2.42,
+      "end": 2.48,
+      "confidence": 0.9922941,
+      "speaker": 0
+    },
+    {
+      "word": "\u0915\u094d\u092f\u093e",
+      "start": 2.72,
+      "end": 2.82,
+      "confidence": 0.97062093,
+      "speaker": 0
+    },
+    {
+      "word": "\u0939\u094b\u0917\u093e",
+      "start": 2.88,
+      "end": 3.0,
+      "confidence": 0.9858262,
+      "speaker": 0
+    },
+    {
+      "word": "\u0915\u0940",
+      "start": 3.08,
+      "end": 3.14,
+      "confidence": 0.9434512,
+      "speaker": 0
+    },
+    {
+      "word": "\u0915\u0908",
+      "start": 3.22,
+      "end": 3.32,
+      "confidence": 0.96061265,
+      "speaker": 0
+    },
+    {
+      "word": "\u0906\u0926\u092e\u0940",
+      "start": 3.38,
+      "end": 3.52,
+      "confidence": 0.8780199,
+      "speaker": 0
+    },
+    {
+      "word": "\u092e\u091c\u093e\u0915",
+      "start": 3.62,
+      "end": 3.86,
+      "confidence": 0.9983537,
+      "speaker": 0
+    },
+    {
+      "word": "\u092e\u091c\u093e\u0915",
+      "start": 3.94,
+      "end": 4.16,
+      "confidence": 0.99156183,
+      "speaker": 0
+    },
+    {
+      "word": "\u092e\u0947\u0902",
+      "start": 4.22,
+      "end": 4.3,
+      "confidence": 0.98352534,
+      "speaker": 0
+    },
+    {
+      "word": "\u0906\u0915\u0947",
+      "start": 4.34,
+      "end": 4.48,
+      "confidence": 0.972093,
+      "speaker": 0
+    },
+    {
+      "word": "\u0908\u0938\u0940\u091c\u0940",
+      "start": 4.58,
+      "end": 4.86,
+      "confidence": 0.8967857,
+      "speaker": 0
+    },
+    {
+      "word": "\u0915\u0930\u093e",
+      "start": 4.94,
+      "end": 5.04,
+      "confidence": 0.9866351,
+      "speaker": 0
+    },
+    {
+      "word": "\u0932\u0947",
+      "start": 5.12,
+      "end": 5.22,
+      "confidence": 0.8025776,
+      "speaker": 0
+    },
+    {
+      "word": "\u0924\u094b",
+      "start": 5.28,
+      "end": 5.32,
+      "confidence": 0.6911652,
+      "speaker": 0
+    },
+    {
+      "word": "1",
+      "start": 5.36,
+      "end": 5.44,
+      "confidence": 0.98,
+      "speaker": 0
+    },
+    {
+      "word": "\u0906\u0926\u092e\u0940",
+      "start": 5.5,
+      "end": 5.68,
+      "confidence": 0.91614914,
+      "speaker": 0
+    },
+    {
+      "word": "\u092e\u093e",
+      "start": 6.04,
+      "end": 6.14,
+      "confidence": 0.9560214,
+      "speaker": 0
+    },
+    {
+      "word": "\u092e\u0941\u0902\u0939",
+      "start": 6.34,
+      "end": 6.46,
+      "confidence": 0.8033173,
+      "speaker": 0
+    },
+    {
+      "word": "\u092e\u0947\u0902",
+      "start": 6.52,
+      "end": 6.58,
+      "confidence": 0.7557044,
+      "speaker": 0
+    },
+    {
+      "word": "\u0917\u0941\u091f\u0915\u0947",
+      "start": 6.66,
+      "end": 7.04,
+      "confidence": 0.9031104,
+      "speaker": 0
+    },
+    {
+      "word": "\u0915\u0947",
+      "start": 7.1,
+      "end": 7.16,
+      "confidence": 0.6857619,
+      "speaker": 0
+    },
+    {
+      "word": "\u0938\u0940\u091c",
+      "start": 8.94,
+      "end": 9.08,
+      "confidence": 0.82268,
+      "speaker": 0
+    },
+    {
+      "word": "\u0915\u0930\u093e",
+      "start": 9.18,
+      "end": 9.34,
+      "confidence": 0.96578264,
+      "speaker": 0
+    },
+    {
+      "word": "\u0932\u0947\u0924\u0947\u0964",
+      "start": 9.4,
+      "end": 9.54,
+      "confidence": 0.9200455,
+      "speaker": 0
+    }
+  ],
+  "paragraphs": [
+    "\u0939\u093e\u0930\u094d\u091f \u0915\u093e \u0908\u0938\u0940\u091c\u0940 \u092a\u091a\u0940\u0938 \u0930\u0941\u092a\u090f \u092e\u0947\u0902 \u0939\u094b\u0924\u093e \u0939\u0948 \u0924\u094b \u0915\u094d\u092f\u093e \u0939\u094b\u0917\u093e \u0915\u0940 \u0915\u0908 \u0906\u0926\u092e\u0940 \u092e\u091c\u093e\u0915 \u092e\u091c\u093e\u0915 \u092e\u0947\u0902 \u0906\u0915\u0947 \u0908\u0938\u0940\u091c\u0940 \u0915\u0930\u093e \u0932\u0947 \u0924\u094b 1 \u0906\u0926\u092e\u0940 \u092e\u093e \u092e\u0941\u0902\u0939 \u092e\u0947\u0902 \u0917\u0941\u091f\u0915\u0947 \u0915\u0947 \u0938\u0940\u091c \u0915\u0930\u093e \u0932\u0947\u0924\u0947\u0964"
+  ]
+}

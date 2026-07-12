@@ -1,0 +1,261 @@
+{
+  "success": true,
+  "fullText": "If an ECG of the heart costs twenty-five rupees, what will happen is that many people will come and get an ECG done jokingly, and one person will get it done with gutka in their mouth. ",
+  "words": [
+    {
+      "word": "If",
+      "start": 0.38,
+      "end": 0.6344444444444444,
+      "confidence": 0.99,
+      "speaker": 0
+    },
+    {
+      "word": "an",
+      "start": 0.6344444444444444,
+      "end": 0.8888888888888888,
+      "confidence": 0.99,
+      "speaker": 0
+    },
+    {
+      "word": "ECG",
+      "start": 0.8888888888888888,
+      "end": 1.1433333333333333,
+      "confidence": 0.99,
+      "speaker": 0
+    },
+    {
+      "word": "of",
+      "start": 1.143333333333333,
+      "end": 1.3977777777777776,
+      "confidence": 0.99,
+      "speaker": 0
+    },
+    {
+      "word": "the",
+      "start": 1.3977777777777778,
+      "end": 1.6522222222222223,
+      "confidence": 0.99,
+      "speaker": 0
+    },
+    {
+      "word": "heart",
+      "start": 1.652222222222222,
+      "end": 1.9066666666666665,
+      "confidence": 0.99,
+      "speaker": 0
+    },
+    {
+      "word": "costs",
+      "start": 1.9066666666666663,
+      "end": 2.1611111111111105,
+      "confidence": 0.99,
+      "speaker": 0
+    },
+    {
+      "word": "twenty-five",
+      "start": 2.161111111111111,
+      "end": 2.4155555555555552,
+      "confidence": 0.99,
+      "speaker": 0
+    },
+    {
+      "word": "rupees,",
+      "start": 2.4155555555555552,
+      "end": 2.6699999999999995,
+      "confidence": 0.99,
+      "speaker": 0
+    },
+    {
+      "word": "what",
+      "start": 2.6699999999999995,
+      "end": 2.9244444444444437,
+      "confidence": 0.99,
+      "speaker": 0
+    },
+    {
+      "word": "will",
+      "start": 2.924444444444444,
+      "end": 3.1788888888888884,
+      "confidence": 0.99,
+      "speaker": 0
+    },
+    {
+      "word": "happen",
+      "start": 3.1788888888888884,
+      "end": 3.4333333333333327,
+      "confidence": 0.99,
+      "speaker": 0
+    },
+    {
+      "word": "is",
+      "start": 3.4333333333333327,
+      "end": 3.687777777777777,
+      "confidence": 0.99,
+      "speaker": 0
+    },
+    {
+      "word": "that",
+      "start": 3.6877777777777774,
+      "end": 3.9422222222222216,
+      "confidence": 0.99,
+      "speaker": 0
+    },
+    {
+      "word": "many",
+      "start": 3.9422222222222216,
+      "end": 4.196666666666666,
+      "confidence": 0.99,
+      "speaker": 0
+    },
+    {
+      "word": "people",
+      "start": 4.196666666666666,
+      "end": 4.451111111111111,
+      "confidence": 0.99,
+      "speaker": 0
+    },
+    {
+      "word": "will",
+      "start": 4.451111111111111,
+      "end": 4.705555555555555,
+      "confidence": 0.99,
+      "speaker": 0
+    },
+    {
+      "word": "come",
+      "start": 4.705555555555555,
+      "end": 4.959999999999999,
+      "confidence": 0.99,
+      "speaker": 0
+    },
+    {
+      "word": "and",
+      "start": 4.959999999999999,
+      "end": 5.214444444444443,
+      "confidence": 0.99,
+      "speaker": 0
+    },
+    {
+      "word": "get",
+      "start": 5.214444444444444,
+      "end": 5.4688888888888885,
+      "confidence": 0.99,
+      "speaker": 0
+    },
+    {
+      "word": "an",
+      "start": 5.4688888888888885,
+      "end": 5.723333333333333,
+      "confidence": 0.99,
+      "speaker": 0
+    },
+    {
+      "word": "ECG",
+      "start": 5.723333333333333,
+      "end": 5.977777777777777,
+      "confidence": 0.99,
+      "speaker": 0
+    },
+    {
+      "word": "done",
+      "start": 5.977777777777777,
+      "end": 6.232222222222221,
+      "confidence": 0.99,
+      "speaker": 0
+    },
+    {
+      "word": "jokingly,",
+      "start": 6.232222222222221,
+      "end": 6.4866666666666655,
+      "confidence": 0.99,
+      "speaker": 0
+    },
+    {
+      "word": "and",
+      "start": 6.4866666666666655,
+      "end": 6.74111111111111,
+      "confidence": 0.99,
+      "speaker": 0
+    },
+    {
+      "word": "one",
+      "start": 6.741111111111111,
+      "end": 6.995555555555555,
+      "confidence": 0.99,
+      "speaker": 0
+    },
+    {
+      "word": "person",
+      "start": 6.995555555555555,
+      "end": 7.249999999999999,
+      "confidence": 0.99,
+      "speaker": 0
+    },
+    {
+      "word": "will",
+      "start": 7.249999999999999,
+      "end": 7.504444444444443,
+      "confidence": 0.99,
+      "speaker": 0
+    },
+    {
+      "word": "get",
+      "start": 7.504444444444443,
+      "end": 7.758888888888888,
+      "confidence": 0.99,
+      "speaker": 0
+    },
+    {
+      "word": "it",
+      "start": 7.758888888888888,
+      "end": 8.013333333333332,
+      "confidence": 0.99,
+      "speaker": 0
+    },
+    {
+      "word": "done",
+      "start": 8.013333333333334,
+      "end": 8.267777777777779,
+      "confidence": 0.99,
+      "speaker": 0
+    },
+    {
+      "word": "with",
+      "start": 8.267777777777777,
+      "end": 8.522222222222222,
+      "confidence": 0.99,
+      "speaker": 0
+    },
+    {
+      "word": "gutka",
+      "start": 8.522222222222222,
+      "end": 8.776666666666667,
+      "confidence": 0.99,
+      "speaker": 0
+    },
+    {
+      "word": "in",
+      "start": 8.776666666666667,
+      "end": 9.031111111111112,
+      "confidence": 0.99,
+      "speaker": 0
+    },
+    {
+      "word": "their",
+      "start": 9.03111111111111,
+      "end": 9.285555555555556,
+      "confidence": 0.99,
+      "speaker": 0
+    },
+    {
+      "word": "mouth.",
+      "start": 9.285555555555556,
+      "end": 9.540000000000001,
+      "confidence": 0.99,
+      "speaker": 0
+    }
+  ],
+  "paragraphs": [
+    "If an ECG of the heart costs twenty-five rupees, what will happen is that many people will come and get an ECG done jokingly, and one person will get it done with gutka in their mouth."
+  ]
+}

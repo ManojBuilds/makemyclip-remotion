@@ -1,0 +1,178 @@
+{
+  "success": true,
+  "fullText": "competitive now. Why? Kids. Yeah. Yeah. I think maybe being competitive is genetic, because my kids are like, they, they're competitive too, and it's",
+  "words": [
+    {
+      "word": "competitive",
+      "start": 0.1,
+      "end": 0.919,
+      "confidence": 0.31488606,
+      "speaker": 0
+    },
+    {
+      "word": "now.",
+      "start": 0.919,
+      "end": 1.94,
+      "confidence": 0.9017444,
+      "speaker": 0
+    },
+    {
+      "word": "Why?",
+      "start": 1.94,
+      "end": 2.76,
+      "confidence": 0.95401645,
+      "speaker": 0
+    },
+    {
+      "word": "Kids.",
+      "start": 2.76,
+      "end": 2.96,
+      "confidence": 0.88984877,
+      "speaker": 0
+    },
+    {
+      "word": "Yeah.",
+      "start": 2.96,
+      "end": 4.42,
+      "confidence": 0.50916344,
+      "speaker": 0
+    },
+    {
+      "word": "Yeah.",
+      "start": 4.42,
+      "end": 4.42,
+      "confidence": 0.7314804,
+      "speaker": 0
+    },
+    {
+      "word": "I",
+      "start": 4.42,
+      "end": 4.42,
+      "confidence": 0.9077839,
+      "speaker": 0
+    },
+    {
+      "word": "think",
+      "start": 4.42,
+      "end": 5.159,
+      "confidence": 0.99870837,
+      "speaker": 0
+    },
+    {
+      "word": "maybe",
+      "start": 5.159,
+      "end": 5.199,
+      "confidence": 0.99586546,
+      "speaker": 0
+    },
+    {
+      "word": "being",
+      "start": 5.199,
+      "end": 5.659,
+      "confidence": 0.99390984,
+      "speaker": 0
+    },
+    {
+      "word": "competitive",
+      "start": 5.659,
+      "end": 6.1,
+      "confidence": 0.99949825,
+      "speaker": 0
+    },
+    {
+      "word": "is",
+      "start": 6.1,
+      "end": 6.26,
+      "confidence": 0.9971609,
+      "speaker": 0
+    },
+    {
+      "word": "genetic,",
+      "start": 6.26,
+      "end": 6.699,
+      "confidence": 0.40442577,
+      "speaker": 0
+    },
+    {
+      "word": "because",
+      "start": 6.699,
+      "end": 6.8,
+      "confidence": 0.6006375,
+      "speaker": 0
+    },
+    {
+      "word": "my",
+      "start": 6.8,
+      "end": 6.939,
+      "confidence": 0.99918205,
+      "speaker": 0
+    },
+    {
+      "word": "kids",
+      "start": 6.939,
+      "end": 7.18,
+      "confidence": 0.99994004,
+      "speaker": 0
+    },
+    {
+      "word": "are",
+      "start": 7.18,
+      "end": 7.319,
+      "confidence": 0.9537814,
+      "speaker": 0
+    },
+    {
+      "word": "like,",
+      "start": 7.319,
+      "end": 7.67,
+      "confidence": 0.49060568,
+      "speaker": 0
+    },
+    {
+      "word": "they,",
+      "start": 7.84,
+      "end": 8.139,
+      "confidence": 0.79032433,
+      "speaker": 0
+    },
+    {
+      "word": "they're",
+      "start": 8.139,
+      "end": 8.7,
+      "confidence": 0.5467708,
+      "speaker": 0
+    },
+    {
+      "word": "competitive",
+      "start": 8.7,
+      "end": 9.08,
+      "confidence": 0.99977463,
+      "speaker": 0
+    },
+    {
+      "word": "too,",
+      "start": 9.08,
+      "end": 9.86,
+      "confidence": 0.47300398,
+      "speaker": 0
+    },
+    {
+      "word": "and",
+      "start": 9.86,
+      "end": 9.98,
+      "confidence": 0.9926755,
+      "speaker": 0
+    },
+    {
+      "word": "it's",
+      "start": 9.98,
+      "end": 10.12,
+      "confidence": 0.32057124,
+      "speaker": 0
+    }
+  ],
+  "paragraphs": [
+    "Competitive now. Why? Kids. Yeah. Yeah.",
+    "I think maybe being competitive is genetic, because my kids are like, they, they're competitive too, and it's."
+  ]
+}

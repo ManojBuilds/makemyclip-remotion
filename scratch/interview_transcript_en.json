@@ -1,0 +1,268 @@
+{
+  "success": true,
+  "fullText": "creator as well, because we don't talk about it a lot, just like we don't talk about TCP/IP and how we're, you know, email works and things like that. I think people are kind of just using",
+  "words": [
+    {
+      "word": "creator",
+      "start": 0.1,
+      "end": 0.28,
+      "confidence": 0.550558,
+      "speaker": 0
+    },
+    {
+      "word": "as",
+      "start": 0.28,
+      "end": 0.5,
+      "confidence": 0.97461593,
+      "speaker": 0
+    },
+    {
+      "word": "well,",
+      "start": 0.5,
+      "end": 1.05,
+      "confidence": 0.63589215,
+      "speaker": 0
+    },
+    {
+      "word": "because",
+      "start": 1.1,
+      "end": 1.1,
+      "confidence": 0.9993807,
+      "speaker": 0
+    },
+    {
+      "word": "we",
+      "start": 1.1,
+      "end": 1.24,
+      "confidence": 0.96944493,
+      "speaker": 0
+    },
+    {
+      "word": "don't",
+      "start": 1.24,
+      "end": 1.44,
+      "confidence": 0.99899584,
+      "speaker": 0
+    },
+    {
+      "word": "talk",
+      "start": 1.44,
+      "end": 1.72,
+      "confidence": 0.9997365,
+      "speaker": 0
+    },
+    {
+      "word": "about",
+      "start": 1.72,
+      "end": 1.92,
+      "confidence": 0.99808,
+      "speaker": 0
+    },
+    {
+      "word": "it",
+      "start": 1.92,
+      "end": 2.08,
+      "confidence": 0.890373,
+      "speaker": 0
+    },
+    {
+      "word": "a",
+      "start": 2.08,
+      "end": 2.28,
+      "confidence": 0.9978523,
+      "speaker": 0
+    },
+    {
+      "word": "lot,",
+      "start": 2.28,
+      "end": 2.78,
+      "confidence": 0.48876643,
+      "speaker": 0
+    },
+    {
+      "word": "just",
+      "start": 2.98,
+      "end": 2.98,
+      "confidence": 0.9961039,
+      "speaker": 0
+    },
+    {
+      "word": "like",
+      "start": 2.98,
+      "end": 3.16,
+      "confidence": 0.99824715,
+      "speaker": 0
+    },
+    {
+      "word": "we",
+      "start": 3.16,
+      "end": 3.16,
+      "confidence": 0.99931204,
+      "speaker": 0
+    },
+    {
+      "word": "don't",
+      "start": 3.16,
+      "end": 3.3,
+      "confidence": 0.999603,
+      "speaker": 0
+    },
+    {
+      "word": "talk",
+      "start": 3.3,
+      "end": 3.46,
+      "confidence": 0.9998671,
+      "speaker": 0
+    },
+    {
+      "word": "about",
+      "start": 3.46,
+      "end": 3.6,
+      "confidence": 0.9998665,
+      "speaker": 0
+    },
+    {
+      "word": "TCP/IP",
+      "start": 3.6,
+      "end": 4.46,
+      "confidence": 0.94490623,
+      "speaker": 0
+    },
+    {
+      "word": "and",
+      "start": 4.46,
+      "end": 4.6,
+      "confidence": 0.9939078,
+      "speaker": 0
+    },
+    {
+      "word": "how",
+      "start": 4.6,
+      "end": 4.979,
+      "confidence": 0.99861693,
+      "speaker": 0
+    },
+    {
+      "word": "we're,",
+      "start": 4.979,
+      "end": 5.38,
+      "confidence": 0.60317016,
+      "speaker": 0
+    },
+    {
+      "word": "you",
+      "start": 6.02,
+      "end": 6.04,
+      "confidence": 0.9927004,
+      "speaker": 0
+    },
+    {
+      "word": "know,",
+      "start": 6.04,
+      "end": 6.279,
+      "confidence": 0.9993046,
+      "speaker": 0
+    },
+    {
+      "word": "email",
+      "start": 6.279,
+      "end": 6.56,
+      "confidence": 0.995593,
+      "speaker": 0
+    },
+    {
+      "word": "works",
+      "start": 6.56,
+      "end": 6.859,
+      "confidence": 0.99962115,
+      "speaker": 0
+    },
+    {
+      "word": "and",
+      "start": 6.859,
+      "end": 6.979,
+      "confidence": 0.99791485,
+      "speaker": 0
+    },
+    {
+      "word": "things",
+      "start": 6.979,
+      "end": 7.14,
+      "confidence": 0.9999131,
+      "speaker": 0
+    },
+    {
+      "word": "like",
+      "start": 7.14,
+      "end": 7.34,
+      "confidence": 0.99968946,
+      "speaker": 0
+    },
+    {
+      "word": "that.",
+      "start": 7.34,
+      "end": 7.859,
+      "confidence": 0.987509,
+      "speaker": 0
+    },
+    {
+      "word": "I",
+      "start": 7.859,
+      "end": 7.859,
+      "confidence": 0.9944536,
+      "speaker": 0
+    },
+    {
+      "word": "think",
+      "start": 7.859,
+      "end": 8.0,
+      "confidence": 0.9996855,
+      "speaker": 0
+    },
+    {
+      "word": "people",
+      "start": 8.0,
+      "end": 8.28,
+      "confidence": 0.99933404,
+      "speaker": 0
+    },
+    {
+      "word": "are",
+      "start": 8.28,
+      "end": 8.78,
+      "confidence": 0.9917602,
+      "speaker": 0
+    },
+    {
+      "word": "kind",
+      "start": 8.78,
+      "end": 9.04,
+      "confidence": 0.99449134,
+      "speaker": 0
+    },
+    {
+      "word": "of",
+      "start": 9.04,
+      "end": 9.139,
+      "confidence": 0.99888295,
+      "speaker": 0
+    },
+    {
+      "word": "just",
+      "start": 9.139,
+      "end": 9.36,
+      "confidence": 0.992837,
+      "speaker": 0
+    },
+    {
+      "word": "using",
+      "start": 9.36,
+      "end": 9.86,
+      "confidence": 0.98611766,
+      "speaker": 0
+    }
+  ],
+  "paragraphs": [
+    "Creator as well, because we don't talk about it a lot, just like we don't talk about TCP/IP and how we're, you know, email works and things like that. I think people are kind of just using."
+  ]
+}

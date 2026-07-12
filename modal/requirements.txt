@@ -1,0 +1,39 @@
+# Core ML / Computer Vision
+torch
+torchvision
+opencv-python
+numpy
+scipy
+scikit-learn
+transformers
+accelerate
+datasets
+pandas
+
+# Audio / Speech
+python_speech_features
+
+# Video processing
+ffmpegcv
+scenedetect==0.6.4
+
+# Subtitle generation
+pysubs2
+
+# Transcription
+assemblyai
+
+# YouTube downloads
+yt-dlp
+
+# Cloud storage
+boto3
+
+# API server
+fastapi[standard]
+
+# Progress bars
+tqdm
+
+# Google Drive model download
+gdown==4.4.0
