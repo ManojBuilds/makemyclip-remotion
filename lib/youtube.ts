@@ -123,8 +123,6 @@ async function fetchYouTubeMetadataDirect(
     throw new Error("That doesn't look like a valid YouTube URL.")
   }
 
-  let apiErrorDetails: string | null = null
-
   // 1. Try YouTube Data API v3 (most reliable for production)
   const ytApiKey = process.env.YOUTUBE_DATA_API_KEY
   if (ytApiKey) {
@@ -167,21 +165,16 @@ async function fetchYouTubeMetadataDirect(
           console.warn(
             `[fetchYouTubeMetadata] YouTube Data API returned no items — video may be private or deleted`
           )
-          apiErrorDetails = "API returned no items (video may be private, deleted, or region-restricted)"
         }
       } else {
         const errBody = await apiRes.text()
         console.warn(
           `[fetchYouTubeMetadata] YouTube Data API returned status ${apiRes.status}: ${errBody}`
         )
-        apiErrorDetails = `API returned status ${apiRes.status}: ${errBody}`
       }
     } catch (apiErr) {
       console.error(`[fetchYouTubeMetadata] YouTube Data API failed:`, apiErr)
-      apiErrorDetails = `API request failed: ${apiErr instanceof Error ? apiErr.message : String(apiErr)}`
     }
-  } else {
-    apiErrorDetails = "YOUTUBE_DATA_API_KEY environment variable is not configured."
   }
 
   // 2. Try Modal yt-downloader-metadata endpoint as fallback
@@ -259,11 +252,9 @@ async function fetchYouTubeMetadataDirect(
   // `"lengthSeconds":"123"` lives inside `videoDetails` in ytInitialPlayerResponse.
   const lengthMatch = html.match(/"lengthSeconds":"(\d+)"/)
   if (!lengthMatch) {
-    let errorMsg = "Couldn't read this video's duration. The video may be private, age-restricted, region-locked, or direct YouTube scraping is blocked by YouTube on your hosting provider."
-    if (apiErrorDetails) {
-      errorMsg += ` (YouTube API Key Error: ${apiErrorDetails})`
-    }
-    throw new Error(errorMsg)
+    throw new Error(
+      "Couldn't read this video's duration. It may be private, age-restricted, or region-locked."
+    )
   }
   const duration = parseInt(lengthMatch[1], 10)
   if (!Number.isFinite(duration) || duration <= 0) {
