@@ -37,6 +37,7 @@ _LOCAL_SOURCES = (
     "burner",
     "reframer",
     "transcriber",
+    "analyzer",
     "utils",
     "errors",
 )
@@ -65,20 +66,18 @@ image = (
     )
     .pip_install_from_requirements("requirements.txt")
     .pip_install(
-        "boto3", "pysubs2", "requests", "assemblyai", "bgutil-ytdlp-pot-provider"
+        "setuptools", "boto3", "pysubs2", "requests", "assemblyai", "fastapi"
     )
     # Upgrade yt-dlp to nightly for SABR protocol support (required for YouTube HD)
     .run_commands("pip install -U --pre 'yt-dlp[default]'")
-    # Clone and prepare bgutil-ytdlp-pot-provider HTTP server (v1.3.1)
-    .run_commands(
-        "git clone --single-branch --branch 1.3.1 https://github.com/Brainicism/bgutil-ytdlp-pot-provider.git /root/bgutil-ytdlp-pot-provider",
-        "cd /root/bgutil-ytdlp-pot-provider/server && deno install --allow-scripts=npm:canvas --frozen",
-        "cd /root/bgutil-ytdlp-pot-provider/server && deno cache main.js || true",
-    )
     .run_commands(
         "yt-dlp --remote-components ejs:github -o /dev/null --skip-download 'https://www.youtube.com/watch?v=jNQXAC9IVRw' || true",
     )
     .add_local_dir("asd", "/root/asd", copy=True)
+    # Pre-download S3FD face detector model weight using wget directly to bypass gdown/pkg_resources issues
+    .run_commands(
+        "mkdir -p /root/asd/model/faceDetector/s3fd && wget --no-check-certificate 'https://docs.google.com/uc?export=download&id=1KafnHz7ccT-3IyddBsL5yi2xGtxAKypt' -O /root/asd/model/faceDetector/s3fd/sfd_face.pth || curl -L 'https://drive.google.com/uc?id=1KafnHz7ccT-3IyddBsL5yi2xGtxAKypt' -o /root/asd/model/faceDetector/s3fd/sfd_face.pth"
+    )
     .run_commands("mkdir -p /usr/share/fonts/truetype/custom")
     .add_local_dir("../fonts", "/usr/share/fonts/truetype/custom", copy=True)
     .run_commands("fc-cache -f -v")

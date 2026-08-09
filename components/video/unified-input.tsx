@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { cn } from "@/lib/utils"
 import { toast } from "sonner"
-import { useSession } from "@/lib/auth-client"
+import { useAuth } from "@clerk/nextjs"
 import { useDashboardUser } from "@/components/dashboard-context"
 import { getPlanLimit } from "@/lib/config"
 import { ConfirmDialog } from "./confirm-dialog"
@@ -51,10 +51,10 @@ export function UnifiedInput({
   onFileSelect,
   isSubmitting = false,
   className,
-  placeholder = "Paste YouTube link or drop a file",
+  placeholder = "Drop a video link",
 }: UnifiedInputProps) {
   const router = useRouter()
-  const { data: session } = useSession()
+  const { isSignedIn } = useAuth()
   const { user } = useDashboardUser()
   const [youtubeUrl, setYoutubeUrl] = useState("")
   const [isDragging, setIsDragging] = useState(false)
@@ -77,6 +77,7 @@ export function UnifiedInput({
       setTimeout(() => fileInputRef.current?.click(), 300)
     }
   }, [])
+
 
   const isSubmittingState = isSubmitting || localSubmitting
 
@@ -106,7 +107,7 @@ export function UnifiedInput({
     // eslint-disable-next-line react-hooks/set-state-in-effect
     if (id) setThumbnail(`https://img.youtube.com/vi/${id}/mqdefault.jpg`)
 
-    if (session) {
+    if (isSignedIn) {
       // eslint-disable-next-line react-hooks/set-state-in-effect
       setFetchingMetadata(true)
       fetch("/api/video/metadata", {
@@ -124,7 +125,7 @@ export function UnifiedInput({
         .catch((err) => console.error("Error fetching metadata:", err))
         .finally(() => setFetchingMetadata(false))
     }
-  }, [youtubeUrl, session])
+  }, [youtubeUrl, isSignedIn])
 
   // Auto-open dialog when a valid YouTube URL is entered
   useEffect(() => {
@@ -149,13 +150,13 @@ export function UnifiedInput({
   }, [youtubeUrl, dialogOpen, isSubmittingState, pendingFile])
 
   const requireAuth = (action: () => void) => {
-    if (!session) {
+    if (!isSignedIn) {
       toast.error("Please log in to continue", {
         description: "You need to be logged in to generate viral clips.",
       })
       try {
         sessionStorage.setItem("pending_youtube_url", youtubeUrl)
-      } catch {}
+      } catch { }
       router.push("/login")
       return
     }
@@ -261,6 +262,17 @@ export function UnifiedInput({
   return (
     <>
       <div className="mx-auto w-full max-w-4xl">
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept="video/*"
+          className="hidden"
+          onChange={(e) => {
+            const f = e.target.files?.[0]
+            if (f) processFile(f)
+          }}
+        />
+
         <div
           onDragOver={(e) => {
             e.preventDefault()
@@ -277,82 +289,58 @@ export function UnifiedInput({
             if (file) processFile(file)
           }}
           className={cn(
-            "relative flex w-full flex-col gap-2 rounded-xl border bg-white p-2 shadow-[0_15px_30px_-5px_rgba(0,0,0,0.05),0_8px_15px_-5px_rgba(0,0,0,0.03)] transition-all duration-300 focus-within:border-primary/50 focus-within:ring-4 focus-within:ring-primary/5 sm:flex-row sm:items-center sm:gap-0 sm:p-2 sm:pl-6",
-            isDragging
-              ? "scale-[1.01] border-dashed border-primary bg-primary/5"
-              : "border-hairline hover:border-slate-300",
+            "flex flex-col items-center gap-4 w-full sm:flex-row sm:gap-6",
             className
           )}
         >
-          <Input
-            ref={fileInputRef}
-            type="file"
-            accept="video/*"
-            className="hidden"
-            onChange={(e) => {
-              const f = e.target.files?.[0]
-              if (f) processFile(f)
+          {/* Main URL Input Capsule Wrapper */}
+          <div
+            className="w-full sm:flex-1 rounded-full bg-white transition-all duration-300"
+            style={{
+              border: '6px solid #0075de33',
+              padding: '1px'
             }}
-          />
+          >
+            <div
+              className={cn(
+                "relative flex w-full items-center rounded-full border border-primary bg-white p-1.5 transition-all duration-300 pl-4 sm:pl-6",
+                isDragging
+                  ? "border-dashed border-primary bg-primary/5 scale-[1.01]"
+                  : "focus-within:border-primary-active focus-within:ring-[3px] focus-within:ring-primary/20"
+              )}
+            >
+              <Input
+                type="text"
+                placeholder={placeholder}
+                className="h-auto w-full flex-1 border-0 bg-transparent px-1 py-2 sm:py-3 text-[14px] sm:text-[15px] text-slate-700 shadow-none placeholder:text-slate-400 focus:outline-none focus-visible:ring-0 focus-visible:ring-offset-0"
+                value={youtubeUrl}
+                onChange={(e) => setYoutubeUrl(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && isUrlValid && !isSubmittingState)
+                    requireAuth(openDialogForUrl)
+                }}
+              />
 
-          <div className="flex w-full flex-1 items-center pl-2 sm:pl-0">
-            <Upload
-              className="mr-3 h-5 w-5 flex-shrink-0 cursor-pointer text-slate-400/80 transition-colors hover:text-primary"
-              onClick={() => fileInputRef.current?.click()}
-            />
-
-            <Input
-              type="text"
-              placeholder={placeholder}
-              className="h-auto w-full flex-1 border-0 bg-transparent px-1 py-3.5 text-[15px] text-slate-700 shadow-none placeholder:text-slate-400 focus:outline-none focus-visible:ring-0 focus-visible:ring-offset-0"
-              value={youtubeUrl}
-              onChange={(e) => setYoutubeUrl(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" && isUrlValid && !isSubmittingState)
-                  requireAuth(openDialogForUrl)
-              }}
-            />
-
-            <TooltipProvider>
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="icon"
-                    className="mr-1 h-7 w-7 flex-shrink-0 rounded-full p-0 text-slate-400 transition-colors hover:bg-transparent hover:text-slate-600 focus-visible:ring-0"
-                  >
-                    <Info className="h-4 w-4" />
-                  </Button>
-                </TooltipTrigger>
-                <TooltipContent
-                  side="top"
-                  align="center"
-                  className="max-w-[240px] rounded-lg border-none bg-slate-900 px-3 py-2 text-xs text-white shadow-md"
-                >
-                  <div className="space-y-1">
-                    <p className="font-semibold text-slate-300">
-                      Supported Links:
-                    </p>
-                    <ul className="list-disc pl-4 font-medium text-slate-100">
-                      <li>YouTube (Videos, Shorts, Streams)</li>
-                    </ul>
-                    <p className="mt-1 text-[10px] text-slate-400">
-                      Or upload MP4, MOV, WebM, AVI, MKV files directly.
-                    </p>
-                  </div>
-                </TooltipContent>
-              </Tooltip>
-            </TooltipProvider>
+              <Button
+                onClick={() => requireAuth(openDialogForUrl)}
+                disabled={isSubmittingState || !isUrlValid}
+                className="flex h-9 sm:h-11 items-center justify-center rounded-full border-0 bg-primary px-4 sm:px-7 font-semibold text-white shadow-sm transition-all duration-200 hover:bg-primary-active active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50 text-xs sm:text-sm"
+              >
+                <span>{isSubmittingState ? "Generating…" : "Get free clips"}</span>
+              </Button>
+            </div>
           </div>
 
+          {/* Separator */}
+          <span className="text-[14px] sm:text-[15px] font-medium text-slate-400/90">or</span>
+
+          {/* Upload Button */}
           <Button
-            onClick={() => requireAuth(openDialogForUrl)}
-            disabled={isSubmittingState || !isUrlValid}
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-lg border-0 bg-primary px-6 font-semibold text-white shadow-sm transition-all duration-200 hover:bg-primary-active active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50 sm:ml-2 sm:w-auto"
+            type="button"
+            onClick={() => fileInputRef.current?.click()}
+            className="flex h-12 sm:h-14 w-full sm:w-auto items-center justify-center rounded-full border border-slate-200 bg-white px-8 font-semibold text-slate-800 shadow-[0_4px_12px_rgba(0,0,0,0.03)] transition-all duration-200 hover:bg-slate-50 hover:border-slate-300 hover:shadow-[0_6px_16px_rgba(0,0,0,0.06)] active:scale-[0.98] text-sm sm:text-base"
           >
-            <Sparkles className="h-4 w-4" />
-            <span>{isSubmittingState ? "Generating…" : "Generate"}</span>
+            <span>Upload files</span>
           </Button>
         </div>
       </div>

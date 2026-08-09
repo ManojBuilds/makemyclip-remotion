@@ -5,6 +5,7 @@ import { projects, user } from "@/lib/db/schema"
 import { inngest } from "@/lib/inngest/client"
 import { getServerSession } from "@/lib/auth-server"
 import { fetchYouTubeMetadata } from "@/lib/youtube"
+import { getPlanLimit } from "@/lib/config"
 
 export async function POST(req: Request) {
   try {
@@ -61,10 +62,12 @@ export async function POST(req: Request) {
     }
 
     // 2. Credit + plan checks (mirrors /api/upload/presign).
-    const [dbUser] = await db
-      .select()
-      .from(user)
-      .where(eq(user.id, session.user.id))
+    const { getOrCreateUser } = require("@/lib/user")
+    const dbUser = await getOrCreateUser({
+      id: session.user.id,
+      email: session.user.email,
+      name: session.user.name,
+    })
 
     if (!dbUser) {
       return NextResponse.json({ error: "User not found" }, { status: 404 })
@@ -72,14 +75,13 @@ export async function POST(req: Request) {
 
     const durationInMinutes = Math.ceil(duration / 60)
     const availableCredits = dbUser.credits ?? 0
-    const isFree = dbUser.plan === "free"
+    const planConfig = getPlanLimit(dbUser.plan)
 
-    if (isFree && durationInMinutes > 30) {
+    if (duration > planConfig.maxUploadDurationSeconds) {
       return NextResponse.json(
         {
-          error: "Free plan limit",
-          message:
-            "Videos on the free plan are limited to 30 minutes. Please upgrade for longer videos.",
+          error: "Plan upload limit exceeded",
+          message: `Videos on your ${planConfig.name} plan are limited to ${planConfig.label}. Please upgrade for longer videos.`,
         },
         { status: 403 }
       )
@@ -109,7 +111,7 @@ export async function POST(req: Request) {
         translateLanguage: translateLanguage || "none",
         ...(styling
           ? {
-              captionStyle: styling.preset || styling.name || "hormozi",
+              captionStyle: styling.preset || styling.name || "impact",
             }
           : {}),
       })

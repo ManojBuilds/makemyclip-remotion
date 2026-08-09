@@ -36,6 +36,47 @@ _FFMPEG_BURN_TIMEOUT_S = 480  # 8 minutes
 # Path to the watermark PNG baked into the Modal container image.
 _WATERMARK_PATH = "/root/watermark.png"
 
+
+def get_watermark_path() -> str:
+    """Return absolute path to watermark PNG image (Modal environment or local workspace)."""
+    if os.path.exists(_WATERMARK_PATH):
+        return _WATERMARK_PATH
+    local_wm = os.path.abspath(os.path.join(os.path.dirname(__file__), "watermark.png"))
+    if os.path.exists(local_wm):
+        return local_wm
+    return _WATERMARK_PATH
+
+
+def probe_video_dimensions(video_path: str) -> tuple[int, int]:
+    """Probe input video (width, height). Returns (1080, 1920) default on error."""
+    try:
+        cmd = [
+            "ffprobe",
+            "-v", "error",
+            "-select_streams", "v:0",
+            "-show_entries", "stream=width,height",
+            "-of", "csv=s=x:p=0",
+            video_path,
+        ]
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        w, h = map(int, res.stdout.strip().split("x"))
+        return w, h
+    except Exception:
+        return 1080, 1920
+
+
+def get_watermark_config(video_width: int, video_height: int) -> tuple[int, int, int]:
+    """Calculates watermark sizing and positioning margins proportional to video width.
+    - Sizing: 35% of video width (~126px on 360p, ~378px on 1080p, ~756px on 4K)
+    - Position: Top-left corner (unobstructed by TikTok/Reels UI) with safe margins
+    """
+    wm_width = max(120, int(video_width * 0.35))
+    margin_left = max(16, int(video_width * 0.04))
+    margin_top = max(24, int(video_height * 0.04))
+
+    return wm_width, margin_left, margin_top
+
+
 # Quality presets
 _QUALITY_PRESETS = {
     "preview": {
@@ -46,15 +87,37 @@ _QUALITY_PRESETS = {
         "file_prefix": "prev",
         "audio": ["-c:a", "copy"],
     },
+    "export_free": {
+        "scale": "scale=-2:720",
+        "preset": "fast",
+        "crf": "28",
+        "r2_prefix": "renders",
+        "file_prefix": "cap",
+        "audio": ["-c:a", "aac", "-b:a", "128k"],
+    },
     "export": {
         "scale": None,
         "preset": "fast",
-        "crf": "23",
+        "crf": "22",
         "r2_prefix": "renders",
         "file_prefix": "cap",
         "audio": ["-c:a", "aac", "-b:a", "128k"],
     },
 }
+
+
+def _resolve_export_key(quality: str, plan: str) -> str:
+    """Map (quality, plan) to the correct _QUALITY_PRESETS key.
+
+    - preview → always "preview"
+    - export + free → "export_free" (720p, watermarked)
+    - export + creator/power → "export" (1080p)
+    """
+    if quality == "preview":
+        return "preview"
+    if plan == "free":
+        return "export_free"
+    return "export"
 
 
 def burn_captions_local(
@@ -65,6 +128,7 @@ def burn_captions_local(
     show_watermark: bool = False,
     crop_mode: str = "reframe",
     quality: str = "export",
+    plan: str = "free",
     tmpdir: str = None,
 ) -> tuple[str, str | None]:
     """Burns captions locally onto an existing video file, uploads to R2,
@@ -74,7 +138,9 @@ def burn_captions_local(
     if isinstance(styling, dict):
         styling = CaptionStyle(**styling)
 
-    qp = _QUALITY_PRESETS.get(quality, _QUALITY_PRESETS["export"])
+    preset_key = _resolve_export_key(quality, plan)
+    qp = _QUALITY_PRESETS[preset_key]
+    logger.info("Resolved quality preset: %s (quality=%s, plan=%s)", preset_key, quality, plan)
 
     local_ass = os.path.join(tmpdir, f"subs_{uuid.uuid4()}.ass")
 
@@ -86,24 +152,44 @@ def burn_captions_local(
     with StageTimer("ffmpeg_burn"):
         logger.info("Burning captions [%s] with FFmpeg...", quality)
 
-        if show_watermark:
-            video_chain_parts = []
-            if qp["scale"]:
-                video_chain_parts.append(qp["scale"])
-            video_chain_parts.append(f"ass='{local_ass}'")
-            video_chain = ",".join(video_chain_parts)
+        watermark_path = get_watermark_path()
+        watermark_exists = os.path.exists(watermark_path)
+        has_subs = bool(
+            os.path.exists(local_ass) and os.path.getsize(local_ass) > 0
+        )
 
-            fc = (
-                f"[0:v]{video_chain}[captioned];"
-                f"[1:v]scale=-1:'main_h*0.025'[wm];"
-                f"[captioned][wm]overlay=main_w-overlay_w-main_w*0.04:main_h*0.30[out]"
+        if show_watermark and watermark_exists:
+            w, h = probe_video_dimensions(local_video)
+            if qp["scale"]:
+                scale_factor = 360.0 / float(h) if h > 0 else 0.3333
+                effective_w = int(w * scale_factor)
+                effective_h = 360
+            else:
+                effective_w, effective_h = w, h
+
+            wm_width, margin_left, margin_top = get_watermark_config(
+                effective_w, effective_h
             )
+
+            # High quality alpha compositing (70% opacity, anti-aliased bicubic scaling)
+            # Watermark is rendered in TOP-LEFT corner (safe from Reels/TikTok UI), BELOW subtitles/captions layer
+            wm_filter = f"[1:v]scale={wm_width}:-1:flags=bicubic,format=rgba,colorchannelmixer=aa=0.7[wm]"
+
+            if qp["scale"]:
+                v_prep = f"[0:v]{qp['scale']}[v_base];[v_base][wm]overlay={margin_left}:{margin_top}[v_wm]"
+            else:
+                v_prep = f"[0:v][wm]overlay={margin_left}:{margin_top}[v_wm]"
+
+            if has_subs:
+                fc = f"{wm_filter};{v_prep};[v_wm]ass='{local_ass}'[out]"
+            else:
+                fc = f"{wm_filter};{v_prep}[out]"
 
             cmd = [
                 "ffmpeg",
                 "-y",
                 "-i", local_video,
-                "-i", _WATERMARK_PATH,
+                "-i", watermark_path,
                 "-filter_complex", fc,
                 "-map", "[out]",
                 "-map", "0:a?",
@@ -121,8 +207,10 @@ def burn_captions_local(
             filters = []
             if qp["scale"]:
                 filters.append(qp["scale"])
-            filters.append(f"ass='{local_ass}'")
-            vf_str = ",".join(filters)
+            if has_subs:
+                filters.append(f"ass='{local_ass}'")
+
+            vf_str = ",".join(filters) if filters else "null"
 
             cmd = [
                 "ffmpeg",
@@ -159,12 +247,16 @@ def burn_captions_local(
         if result.returncode != 0:
             raise RenderError(f"FFmpeg failed: {result.stderr[-500:]}")
 
-    # 4. Upload to R2
-    with StageTimer("upload_r2"):
-        filename = f"{qp['file_prefix']}_{uuid.uuid4()}.mp4"
-        caption_video_url = upload_to_r2(
-            local_output, f"{qp['r2_prefix']}/{filename}"
-        )
+    # 4. Upload to R2 (best-effort when running in local dev environments)
+    caption_video_url = local_output
+    try:
+        with StageTimer("upload_r2"):
+            filename = f"{qp['file_prefix']}_{uuid.uuid4()}.mp4"
+            caption_video_url = upload_to_r2(
+                local_output, f"{qp['r2_prefix']}/{filename}"
+            )
+    except Exception as e:
+        logger.warning("R2 upload skipped or failed (returning local file path): %s", e)
 
     # 5. Extract thumbnail (only for preview)
     thumbnail_url = None
@@ -214,7 +306,7 @@ def burn_captions_local(
     return caption_video_url, thumbnail_url
 
 
-@app.cls(image=image, timeout=600, secrets=[ai_secret], max_containers=10)
+@app.cls(image=image, timeout=1200, secrets=[ai_secret], max_containers=10)
 @modal.concurrent(max_inputs=2)
 class CaptionBurner:
     @modal.method()
@@ -226,6 +318,7 @@ class CaptionBurner:
         show_watermark: bool = False,
         crop_mode: str = "reframe",
         quality: str = "export",
+        plan: str = "free",
     ) -> dict:
         """Download video, generate ASS captions, burn with FFmpeg, upload to R2."""
         import requests
@@ -275,6 +368,7 @@ class CaptionBurner:
                 show_watermark=show_watermark,
                 crop_mode=crop_mode,
                 quality=quality,
+                plan=plan,
                 tmpdir=tmpdir,
             )
 
@@ -299,6 +393,7 @@ class CaptionBurner:
             show_watermark=req.show_watermark,
             crop_mode=req.crop_mode,
             quality=req.quality,
+            plan=req.plan,
         )
         logger.info("Endpoint returned: %s", res)
         return {

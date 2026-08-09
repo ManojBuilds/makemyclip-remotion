@@ -83,6 +83,29 @@
   --color-accent-teal: #2a9d99;
   --color-accent-green: #1aae39;
   --color-accent-brown: #523410;
+
+  --animate-marquee: marquee 10s linear infinite;
+  --animate-marquee-reverse: marquee-reverse 10s linear infinite;
+}
+
+@keyframes marquee {
+  from {
+    transform: translateX(0);
+  }
+
+  to {
+    transform: translateX(-50%);
+  }
+}
+
+@keyframes marquee-reverse {
+  from {
+    transform: translateX(-50%);
+  }
+
+  to {
+    transform: translateX(0);
+  }
 }
 
 :root {
@@ -158,25 +181,4 @@
   html {
     @apply font-sans;
   }
-}
-
-/* Infinite Marquee Animation for Landing Hero */
-@keyframes marquee {
-  0% {
-    transform: translateX(0);
-  }
-
-  100% {
-    transform: translateX(-50%);
-  }
-}
-
-.animate-marquee {
-  display: flex;
-  width: max-content;
-  animation: marquee 30s linear infinite;
-}
-
-.animate-marquee-paused:hover .animate-marquee {
-  animation-play-state: paused;
 }

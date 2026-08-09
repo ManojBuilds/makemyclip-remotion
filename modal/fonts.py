@@ -34,6 +34,13 @@ FONT_NAME_MAP: dict[str, str] = {
     "Anton-Regular": "Anton",
     "Anton": "Anton",
 
+    # Inter
+    "Inter": "Inter",
+    "Inter SemiBold": "Inter",
+    "Inter-SemiBold": "Inter",
+    "Inter Medium": "Inter",
+    "Inter-Medium": "Inter",
+
     # Bangers
     "Bangers-Regular": "Bangers",
     "Bangers": "Bangers",
@@ -69,11 +76,24 @@ FONT_NAME_MAP: dict[str, str] = {
     "Impact": "Impact",
     "impact": "Impact",
 
+    # Bebas Neue
+    "Bebas Neue": "Bebas Neue",
+    "Bebas-Neue": "Bebas Neue",
+    "Bebas": "Bebas Neue",
+
     # Roxborough CF (Note: Metatags in this font specify family as "ø")
     "Roxborough CF": "ø",
     "Roxborough-CF": "ø",
     "Roxborough": "ø",
     "roxborough-cf-regular WebFont": "ø",
+
+    # Playfair Display
+    "Playfair Display": "Playfair Display",
+    "Playfair-Display": "Playfair Display",
+    "PlayfairDisplay": "Playfair Display",
+    "Playfair Display Bold": "Playfair Display",
+    "Playfair-Display-Bold": "Playfair Display",
+    "Playfair": "Playfair Display",
 }
 
 

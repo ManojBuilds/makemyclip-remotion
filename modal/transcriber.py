@@ -25,7 +25,7 @@ logger = logging.getLogger("makemyclip.transcriber")
 
 @app.cls(
     image=image,
-    timeout=600,
+    timeout=1800,
     secrets=[ai_secret, youtube_cookies_secret],
 )
 class AudioTranscriber:

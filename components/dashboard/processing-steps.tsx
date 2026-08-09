@@ -9,10 +9,10 @@ import { toast } from "sonner"
 import type { Project } from "@/lib/types"
 
 const displaySteps = [
-  { id: "uploading", title: "Uploading video" },
-  { id: "processing", title: "Generating captions" },
-  { id: "analyzing", title: "Finding the best moments" },
-  { id: "ready", title: "Creating your clips" },
+  { id: "uploading", title: "Uploading" },
+  { id: "processing", title: "Transcribing" },
+  { id: "analyzing", title: "Finding highlights" },
+  { id: "ready", title: "Creating clips" },
 ]
 
 function getYouTubeId(url?: string | null) {
@@ -53,7 +53,7 @@ export function ProcessingSteps({ project }: { project: Project }) {
         toast.success(
           "Browser notifications active! We will alert you when your clips are ready."
         )
-        new Notification("MakeMyClip", {
+        new Notification("Kivio", {
           body: "Browser notifications enabled! We'll alert you here when your clips are ready.",
           icon: "/favicon.ico",
         })
@@ -109,15 +109,15 @@ export function ProcessingSteps({ project }: { project: Project }) {
   const getSubheading = () => {
     switch (status) {
       case "uploading":
-        return "Uploading content and setting up environment."
+        return "Uploading video..."
       case "processing":
-        return "Extracting audio and generating transcript."
+        return "Transcribing audio..."
       case "analyzing":
-        return "Analyzing content and finding clips."
+        return "Finding clips..."
       case "ready":
-        return "Clips are generated and ready."
+        return "Clips ready!"
       default:
-        return "Analyzing content and finding clips."
+        return "Finding clips..."
     }
   }
 
@@ -183,8 +183,7 @@ export function ProcessingSteps({ project }: { project: Project }) {
                   </span>
                 </div>
                 <p className="text-[10px] leading-normal font-medium text-slate-400">
-                  We only surface moments strong enough to post — we skip the
-                  rest so every clip is worth your time.
+                  We only keep the most engaging moments and skip the rest to save you editing time.
                 </p>
               </div>
             )
@@ -195,7 +194,7 @@ export function ProcessingSteps({ project }: { project: Project }) {
 
 
       <h2 className="text-left text-xl leading-snug font-bold tracking-tight text-slate-900 sm:text-2xl mt-6">
-        You can safely leave this page. We&apos;ll notify you when clips are ready
+        You can close this tab. We&apos;ll notify you when your clips are ready.
       </h2>
 
       {/* 4. Subheading with Notification link */}

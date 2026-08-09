@@ -1,68 +1,63 @@
 import os
 import requests
+import time
 from dotenv import load_dotenv
 
 # Load local environment variables
 load_dotenv()
 
-MODAL_ENDPOINT = os.getenv(
-    "MODAL_REFRAME_ENDPOINT",
-    "https://ms8460149--makemyclip-ai-rendering-aireframe-reframe.modal.run",
-)
-# public_url = "https://pub-dab84dec13074258806f788a00943c46.r2.dev/trimmed_video.webm"
-public_url = (
-    "https://pub-dab84dec13074258806f788a00943c46.r2.dev/clip2.mp4"  # letterbox
-)
-output_local_path = (
-    "/home/manoj-kumar/Developer/makemyclip-remotion/downloads/letterbox_output.mp4"
-)
+MODAL_ENDPOINT = "https://ms8460149--makemyclip-ai-rendering-aireframe-reframe.modal.run"
 
-print("--- MakeMyClip AI Reframe Direct Tester ---")
-print(f"Using video URL: {public_url}")
+video_name = "input_5s"
+public_url = "https://www.youtube.com/watch?v=M-ZH3psUbfU"
 
-# Call Modal AI Reframe Endpoint
+downloads_dir = os.path.join(os.path.dirname(__file__), "..", "downloads")
+os.makedirs(downloads_dir, exist_ok=True)
+
+output_local_path = os.path.join(downloads_dir, f"{video_name}_output.mp4")
+
+print(f"--- MakeMyClip AI Reframe Tester for {video_name} ---")
+print(f"URL: {public_url}")
+
 payload = {
     "video_url": public_url,
-    "start_time": 0.0,
-    "end_time": 10.0,
+    "start_time": 335.47,
+    "end_time": 387.241,
     "fps": 25,
     "styling": None,
     "transcript": None,
     "show_watermark": False,
-    "crop_mode": "letterbox",
+    "crop_mode": "reframe",
 }
 
-print(f"Sending reframe request to Modal endpoint: {MODAL_ENDPOINT}...")
-print(f"Payload: {payload}")
-
+start_time = time.time()
 try:
     response = requests.post(MODAL_ENDPOINT, json=payload, timeout=600)
 except Exception as e:
-    print(f"Connection failed: {e}")
+    print(f"[{video_name}] Connection failed: {e}")
     exit(1)
 
+duration = time.time() - start_time
 if response.status_code != 200:
-    print(f"Error calling Modal! Status code: {response.status_code}")
+    print(f"[{video_name}] Error calling Modal! Status code: {response.status_code}")
     print(response.text)
     exit(1)
 
 result = response.json()
-print("Modal Response:")
-print(result)
-
 if not result.get("success"):
-    print("Reframe failed according to Modal response.")
+    print(f"[{video_name}] Reframe failed according to Modal response: {result}")
     exit(1)
 
 reframed_url = result.get("original_video_url")
-print(f"Reframed Video URL: {reframed_url}")
+print(f"[{video_name}] Reframed Video URL: {reframed_url}")
+print(f"[{video_name}] Downloading reframed video to {output_local_path} (Took {duration:.2f}s)...")
 
-# Download reframed video
-print(f"Downloading reframed vertical video from {reframed_url}...")
-r = requests.get(reframed_url, stream=True)
-with open(output_local_path, "wb") as f:
-    for chunk in r.iter_content(chunk_size=8192):
-        if chunk:
-            f.write(chunk)
-
-print(f"Success! Reframed vertical video saved to: {output_local_path}")
+try:
+    r = requests.get(reframed_url, stream=True)
+    with open(output_local_path, "wb") as f:
+        for chunk in r.iter_content(chunk_size=8192):
+            if chunk:
+                f.write(chunk)
+    print(f"[{video_name}] Success! Saved to: {output_local_path}")
+except Exception as e:
+    print(f"[{video_name}] Failed to download output file: {e}")

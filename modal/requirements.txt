@@ -18,6 +18,7 @@ ffmpegcv
 scenedetect==0.6.4
 
 # Subtitle generation
+# pysubs2 is also pip_install'd in config.py — listed here for documentation
 pysubs2
 
 # Transcription
@@ -35,5 +36,6 @@ fastapi[standard]
 # Progress bars
 tqdm
 
-# Google Drive model download
+# Google Drive model download (gdown depends on pkg_resources from setuptools)
+setuptools
 gdown==4.4.0

@@ -85,6 +85,8 @@ def download_youtube_audio(vurl: str, tmpdir: str) -> str:
         "3",
         "--fragment-retries",
         "3",
+        "--concurrent-fragments",
+        "8",
         "--no-warnings",
         "--remote-components",
         "ejs:github",
@@ -282,6 +284,7 @@ def download_youtube_video(
         "socket_timeout": 30,
         "retries": 3,
         "fragment_retries": 3,
+        "concurrent_fragment_downloads": 8,
         "js_runtimes": {"deno": {"path": "/usr/local/bin/deno"}},
         "remote_components": ["ejs:github"],
         "format": f"bestvideo[height<={max_height}]+bestaudio/best[height<={max_height}]/best",
@@ -289,6 +292,8 @@ def download_youtube_video(
         "format_sort": ["res", "vcodec:h264", "ext:mp4:m4a", "acodec:aac"],
         "postprocessors": [{"key": "FFmpegVideoRemuxer", "preferedformat": "mp4"}],
     }
+
+    actual_segment_offset = 0.0
 
     # Segment download: fetch only the needed portion instead of the full video.
     # 10s padding on each side ensures the segment extends past the nearest
@@ -302,6 +307,7 @@ def download_youtube_video(
         ydl_opts["download_ranges"] = download_range_func(
             None, [(seg_start, seg_end)]
         )
+        actual_segment_offset = seg_start
         logger.info(
             "Segment download enabled: %.1f–%.1f (padded from %.1f–%.1f)",
             seg_start,
@@ -359,7 +365,7 @@ def download_youtube_video(
                         )
                     local_path = str(max(files, key=lambda f: f.stat().st_size))
 
-        return local_path
+        return local_path, actual_segment_offset
     finally:
         if cookies_path and os.path.exists(cookies_path):
             try:
@@ -433,3 +439,33 @@ def _log_download_result(info: dict, local_path: str) -> None:
         info.get("ext", "?"),
         local_path,
     )
+
+
+def get_youtube_info(vurl: str) -> dict:
+    """Extract metadata (duration, fps, width, height) without downloading the video."""
+    import tempfile
+    import yt_dlp
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cookies_path = write_cookies_file(tmpdir)
+        ydl_opts = {
+            "quiet": True,
+            "no_warnings": True,
+            "skip_download": True,
+        }
+        if cookies_path:
+            ydl_opts["cookiefile"] = cookies_path
+
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(vurl, download=False)
+                return {
+                    "duration": info.get("duration"),
+                    "fps": info.get("fps") or 25.0,
+                    "width": info.get("width") or 1280,
+                    "height": info.get("height") or 720,
+                    "title": info.get("title"),
+                }
+        except Exception as e:
+            logger.warning("Failed to extract YouTube info via yt_dlp: %s", e)
+            return {"fps": 25.0, "width": 1280, "height": 720}

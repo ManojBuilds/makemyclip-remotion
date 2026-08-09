@@ -63,7 +63,7 @@ export const processVideo = inngest.createFunction(
 
         // Read styling preset from the project record (saved during upload)
         const styling = {
-          preset: projectData.captionStyle || "hormozi",
+          preset: projectData.captionStyle || "impact",
         }
 
         console.log(
@@ -82,6 +82,56 @@ export const processVideo = inngest.createFunction(
       console.log(
         `[processVideo] Step: transcribe-video for project: ${projectId}`
       )
+
+      // Check if transcription already exists
+      const existing = await db
+        .select()
+        .from(transcriptions)
+        .where(eq(transcriptions.projectId, projectId))
+        .limit(1)
+
+      if (existing.length > 0) {
+        console.log(
+          `[processVideo] Transcription already exists for project ${projectId}. Skipping transcribeFromUrl.`
+        )
+        return {
+          fullText: existing[0].fullText,
+          words: existing[0].words as WordTimestamp[],
+          paragraphs: existing[0].paragraphs,
+        }
+      }
+
+      // Check if transcription exists for any other project with the same key
+      if (key) {
+        const [existingForSameKey] = await db
+          .select({
+            fullText: transcriptions.fullText,
+            words: transcriptions.words,
+            paragraphs: transcriptions.paragraphs,
+          })
+          .from(transcriptions)
+          .innerJoin(projects, eq(transcriptions.projectId, projects.id))
+          .where(eq(projects.sourceVideoKey, key))
+          .limit(1)
+
+        if (existingForSameKey) {
+          console.log(
+            `[processVideo] Transcription found in another project with the same key: ${key}. Reusing it.`
+          )
+          await db.insert(transcriptions).values({
+            projectId,
+            fullText: existingForSameKey.fullText,
+            words: existingForSameKey.words,
+            paragraphs: existingForSameKey.paragraphs,
+          })
+          return {
+            fullText: existingForSameKey.fullText,
+            words: existingForSameKey.words as WordTimestamp[],
+            paragraphs: existingForSameKey.paragraphs,
+          }
+        }
+      }
+
       // Generate a presigned URL so Deepgram can fetch the video from R2
       // Use a generous 1-hour expiry for large files
       const presignedUrl =
@@ -115,6 +165,86 @@ export const processVideo = inngest.createFunction(
       }
     })
 
+    // Step 2.5: Full-video Analysis Pass on Modal (5fps face tracking, TalkNet ASD, Scene Detection)
+    const videoAnalysis = await step.run("analyze-video-modal", async () => {
+      const analyzerEndpoint = process.env.MODAL_ANALYZER_ENDPOINT || "https://ms8460149--makemyclip-ai-rendering-videoanalyzer-analyze.modal.run"
+      console.log(`[processVideo] Step: analyze-video-modal calling endpoint: ${analyzerEndpoint}`)
+
+      // Check if analysis path already exists
+      const [proj] = await db
+        .select({ analysisPath: projects.analysisPath })
+        .from(projects)
+        .where(eq(projects.id, projectId))
+
+      if (proj?.analysisPath) {
+        console.log(`[processVideo] Analysis path already exists for project ${projectId}: ${proj.analysisPath}. Skipping analyze-video-modal.`)
+        return { success: true, analysisUrl: proj.analysisPath }
+      }
+
+      // Check if analysis path exists for any other project with the same key
+      if (key) {
+        const [existingAnalysis] = await db
+          .select({ analysisPath: projects.analysisPath })
+          .from(projects)
+          .where(eq(projects.sourceVideoKey, key))
+          .limit(1)
+
+        if (existingAnalysis?.analysisPath) {
+          console.log(`[processVideo] Analysis path found in another project with the same key: ${key}. Reusing it.`)
+          await db
+            .update(projects)
+            .set({
+              analysisPath: existingAnalysis.analysisPath,
+              status: "analysis_complete",
+            })
+            .where(eq(projects.id, projectId))
+          return { success: true, analysisUrl: existingAnalysis.analysisPath }
+        }
+      }
+
+      const presignedUrl = videoUrl || (await getDownloadPresignedUrl(key, 3600))
+      const videoDuration = duration || 600
+
+      try {
+        const response = await fetch(analyzerEndpoint, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            video_url: presignedUrl,
+            project_id: projectId,
+            duration: videoDuration,
+            detect_skip: 5,
+          }),
+        })
+
+        if (!response.ok) {
+          const errText = await response.text()
+          console.error(`[processVideo] Modal VideoAnalyzer failed with status ${response.status}: ${errText}`)
+          await db.update(projects).set({ status: "error" }).where(eq(projects.id, projectId))
+          throw new Error(`VideoAnalyzer failed with status ${response.status}: ${errText}`)
+        }
+
+        const resJson = await response.json()
+        if (resJson.success && resJson.analysis_url) {
+          console.log(`[processVideo] Saved analysis.json to R2: ${resJson.analysis_url}`)
+          await db
+            .update(projects)
+            .set({
+              analysisPath: resJson.analysis_url,
+              status: "analysis_complete",
+            })
+            .where(eq(projects.id, projectId))
+          return { success: true, analysisUrl: resJson.analysis_url }
+        }
+
+        await db.update(projects).set({ status: "error" }).where(eq(projects.id, projectId))
+        throw new Error(resJson.error || "Modal VideoAnalyzer failed to produce analysis.json")
+      } catch (error) {
+        await db.update(projects).set({ status: "error" }).where(eq(projects.id, projectId))
+        throw error
+      }
+    })
+
     // Step 3: Analyze and extract viral clips using Gemini 2.5 Flash
     const aiClips = await step.run("analyze-moments", async () => {
       console.log(`[processVideo] Step: analyze-moments using Gemini...`)
@@ -130,7 +260,7 @@ export const processVideo = inngest.createFunction(
 
       // Extract clips using Gemini
       let identifiedClips = await analyzeViralMoments(
-        transcription.fullText,
+        transcription.fullText || "",
         transcription.words
       )
       console.log(
@@ -157,6 +287,8 @@ export const processVideo = inngest.createFunction(
             viralScore: 75,
             viralReason:
               "This clip covers the key segment of the video, optimized to ensure successful rendering.",
+            description: "A hand-picked featured highlight from the video.",
+            hashtags: "#highlight #viral",
             clipType: "aha_moment",
             speakerDynamic: "Key takeaway from the video.",
             cropMode: "auto",
@@ -208,14 +340,16 @@ export const processVideo = inngest.createFunction(
                     hookText: clip.hookText,
                     startTime: clip.startTime,
                     endTime: clip.endTime,
-                    viralScore: clip.viralScore,
+                    viralScore: Math.round(clip.viralScore || 0),
                     viralReason: clip.viralReason,
+                    description: clip.description,
+                    hashtags: clip.hashtags,
                     clipType: clip.clipType,
                     speakerDynamic: clip.speakerDynamic,
                     cropMode: clip.cropMode,
                     status: "rendering" as const,
                     captions,
-                    captionStyle: projectStyling?.preset || "hormozi",
+                    captionStyle: projectStyling?.preset || "impact",
                   }
                 })
               )
@@ -379,7 +513,7 @@ export const renderClip = inngest.createFunction(
 
         // Resolve styling payload to send to Modal
         const stylingPayload = styling || {
-          preset: clip.captionStyle || "hormozi",
+          preset: clip.captionStyle || "impact",
         }
 
         console.log(
@@ -513,20 +647,27 @@ export const batchReframeProject = inngest.createFunction(
 
     try {
       // Step 1: Fetch project and user plan
-      const { project, userPlan } = await step.run(
+      const { project, userPlan, userEmail, userName } = await step.run(
         "fetch-project-data",
         async () => {
           const [data] = await db
             .select({
               project: projects,
               userPlan: user.plan,
+              userEmail: user.email,
+              userName: user.name,
             })
             .from(projects)
             .innerJoin(user, eq(projects.userId, user.id))
             .where(eq(projects.id, projectId))
 
           if (!data) throw new Error("Project or user not found")
-          return data
+          return {
+            project: data.project,
+            userPlan: data.userPlan,
+            userEmail: data.userEmail,
+            userName: data.userName,
+          }
         }
       )
 
@@ -552,7 +693,7 @@ export const batchReframeProject = inngest.createFunction(
       const batchResult = await step.run("call-modal-batch-reframer", async () => {
         const clipsPayload = projectClips.map((clip) => {
           const stylingPayload = {
-            preset: clip.captionStyle || "hormozi",
+            preset: clip.captionStyle || "impact",
           }
 
           return {
@@ -570,6 +711,7 @@ export const batchReframeProject = inngest.createFunction(
           video_url: sourceVideoUrl,
           clips: clipsPayload,
           quality: "preview",
+          analysis_url: project.analysisPath || null,
         }
 
         const batchEndpoint = process.env.MODAL_REFRAME_ENDPOINT || "https://ms8460149--makemyclip-ai-rendering-aireframe-batch-reframe.modal.run"
@@ -621,6 +763,27 @@ export const batchReframeProject = inngest.createFunction(
         }
       })
 
+      // Step 6: Send email notification via Resend that clips are ready
+      await step.run("send-clips-ready-email", async () => {
+        const successfulClipsCount = batchResult.results.filter(
+          (res: { success: boolean }) => res.success
+        ).length
+
+        if (successfulClipsCount > 0 && userEmail) {
+          console.log(
+            `[batchReframeProject] Sending clips ready email to ${userEmail} for project ${projectId}...`
+          )
+          const { sendClipsReadyEmail } = await import("@/lib/email")
+          await sendClipsReadyEmail({
+            toEmail: userEmail,
+            userName: userName || undefined,
+            projectTitle: project.title,
+            projectId: project.id,
+            clipCount: successfulClipsCount,
+          })
+        }
+      })
+
       return { success: true, processed: batchResult.results.length }
     } catch (error) {
       console.error("[batchReframeProject] Process level failure:", error)
@@ -649,7 +812,7 @@ export const exportClip = inngest.createFunction(
     },
   },
   async ({ event, step }) => {
-    const { clipId } = event.data
+    const { clipId, plan: eventPlan } = event.data
     console.log(`[exportClip] Starting HD export for clipId: ${clipId}`)
 
     try {
@@ -678,22 +841,27 @@ export const exportClip = inngest.createFunction(
         }
       )
 
-      // Step 3: Call Modal burner with quality="export"
+      // Use plan from event data (set by /api/export) with DB fallback
+      const plan = eventPlan || userPlan || "free"
+      console.log(`[exportClip] Resolved plan: ${plan}`)
+
+      // Step 3: Call Modal burner with quality="export" and plan
       const exportResult = await step.run("export-on-modal", async () => {
         const stylingPayload = {
-          preset: clip.captionStyle || "hormozi",
+          preset: clip.captionStyle || "impact",
         }
 
         const requestBody = {
           video_url: clip.originalVideoUrl,
           transcript: clip.captions,
           styling: stylingPayload,
-          show_watermark: userPlan === "free",
+          show_watermark: plan === "free",
           crop_mode: clip.cropMode || project.videoFormat || "reframe",
           quality: "export",
+          plan,
         }
 
-        console.log(`[exportClip] Calling Modal burner with quality=export`)
+        console.log(`[exportClip] Calling Modal burner with quality=export, plan=${plan}`)
 
         const response = await fetch(`${process.env.MODAL_BURNER_ENDPOINT}`, {
           method: "POST",

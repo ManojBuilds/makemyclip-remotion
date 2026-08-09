@@ -7,6 +7,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../modal")))
 
 from ass_builder import generate_ass
+from burner import burn_captions_local
 from presets import PRESET_STYLES, ALWAYS_UPPERCASE
 
 # ----------------------------------------------------------------------
@@ -62,36 +63,6 @@ def generate_black_video(output_video):
     )
 
 
-def burn_caption(input_video, output_video, ass_path):
-    """Burn ASS subtitles onto the video."""
-
-    cmd = [
-        "ffmpeg",
-        "-y",
-        "-i",
-        input_video,
-        "-vf",
-        f"ass='{ass_path}'",
-        "-c:v",
-        "libx264",
-        "-preset",
-        "fast",
-        "-crf",
-        "20",
-        "-c:a",
-        "copy",
-        output_video,
-    ]
-
-    result = subprocess.run(cmd, capture_output=True, text=True)
-
-    if result.returncode != 0:
-        print(result.stderr[-1000:])
-        return False
-
-    return True
-
-
 # ----------------------------------------------------------------------
 # Preset → Styling conversion
 # ----------------------------------------------------------------------
@@ -107,10 +78,13 @@ def preset_to_styling(name: str, preset: dict) -> dict:
         "font_family": preset["fontname"],
         "font_size": preset["fontsize"],
         "text_color": preset["primary"],
+        "highlight_color": preset["highlightcolor"],
         "stroke_color": preset["outlinecolor"],
         "stroke_width": preset["outline"],
         "shadow_depth": preset["shadow"],
         "text_transform": ("uppercase" if name in ALWAYS_UPPERCASE else "none"),
+        # Enable word-level active highlighting by default
+        "word_highlight": True,
         # Approximate vertical position from margin
         "position_y": 0.5,
     }
@@ -134,10 +108,15 @@ def main():
     output_dir = "test_outputs"
     os.makedirs(output_dir, exist_ok=True)
 
-    black_video = os.path.join(output_dir, "black_3s.mp4")
+    black_video = os.path.join(output_dir, "video_for_caption_testing.mp4")
     generate_black_video(black_video)
 
+    # Target a single preset (change to any preset name, e.g. "hormozi")
+    target_preset = "cinema"
+
     for preset_name, preset in PRESET_STYLES.items():
+        if preset_name != target_preset:
+            continue
 
         print(f"\n{'=' * 60}")
         print(f"Testing preset: {preset_name}")
@@ -148,33 +127,25 @@ def main():
             preset,
         )
 
-        ass_path = os.path.join(
-            output_dir,
-            f"{preset_name}.ass",
-        )
-
         out_video = os.path.join(
             output_dir,
             f"{preset_name}.mp4",
         )
 
-        generate_ass(
-            CUSTOM_TRANSCRIPT,
-            styling,
-            ass_path,
-            crop_mode="split",
-        )
-
-        success = burn_caption(
-            black_video,
-            out_video,
-            ass_path,
-        )
-
-        if success:
+        try:
+            video_url, _ = burn_captions_local(
+                local_video=black_video,
+                local_output=out_video,
+                transcript=CUSTOM_TRANSCRIPT,
+                styling=styling,
+                show_watermark=True,
+                crop_mode="reframe",
+                quality="export",
+                tmpdir=output_dir,
+            )
             print(f"✅ {out_video}")
-        else:
-            print(f"❌ Failed: {preset_name}")
+        except Exception as e:
+            print(f"❌ Failed: {preset_name}: {e}")
 
 
 if __name__ == "__main__":

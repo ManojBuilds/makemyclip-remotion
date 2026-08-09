@@ -1,26 +1,76 @@
 export const PLAN_LIMITS = {
   free: {
-    maxDurationSeconds: 600, // 10 minutes
-    label: "10 minutes",
-    monthlyCreditsMinutes: 10,
+    name: "Free",
+    price: "$0",
+    priceAmount: 0,
+    maxUploadDurationSeconds: 600,
+    monthlyProcessingMinutes: 30,
+    exportMaxHeight: 720,
+    label: "10 min/video",
+    features: [
+      "Upload videos up to 10 minutes",
+      "AI viral clip detection",
+      "Smart AI reframing",
+      "Auto captions",
+      "Watermarked exports",
+      "720p exports",
+      "Basic caption styles",
+      "3-day video storage",
+    ],
   },
   creator: {
-    maxDurationSeconds: 3600, // 60 minutes (1 hour)
-    label: "60 minutes",
-    monthlyCreditsMinutes: 600,
+    name: "Creator",
+    price: "$19",
+    priceAmount: 19,
+    maxUploadDurationSeconds: 3600,
+    monthlyProcessingMinutes: 300,
+    exportMaxHeight: 1080,
+    label: "1 hour/video",
+    popular: true,
+    features: [
+      "Upload videos up to 1 hour",
+      "No watermark",
+      "1080p exports",
+      "Premium caption styles",
+      "AI viral clip detection",
+      "Smart AI reframing",
+      "Unlimited clips from processed videos",
+      "Permanent video storage",
+      "Faster processing queue",
+    ],
   },
   power: {
-    maxDurationSeconds: 7200, // 120 minutes (2 hours)
-    label: "2 hours",
-    monthlyCreditsMinutes: 2000,
+    name: "Power",
+    price: "$49",
+    priceAmount: 49,
+    maxUploadDurationSeconds: 7200,
+    monthlyProcessingMinutes: 600,
+    exportMaxHeight: 1080,
+    label: "2 hours/video",
+    features: [
+      "Upload videos up to 2 hours",
+      "No watermark",
+      "1080p HD exports",
+      "Premium caption styles",
+      "Advanced AI reframing",
+      "Unlimited clips from processed videos",
+      "Permanent video storage",
+      "Priority processing queue",
+    ],
   },
 } as const;
 
 export type PlanName = keyof typeof PLAN_LIMITS;
 
-export function getPlanLimit(planName?: string) {
-  const normalized = (planName || "free").trim().toLowerCase() as PlanName;
-  return PLAN_LIMITS[normalized] || PLAN_LIMITS.free;
+export function getPlanLimit(planName?: string | null) {
+  let normalized = (planName || "free").trim().toLowerCase();
+  if (normalized.includes("power")) {
+    normalized = "power";
+  } else if (normalized.includes("creator")) {
+    normalized = "creator";
+  }
+  const key = normalized as PlanName;
+  return PLAN_LIMITS[key] || PLAN_LIMITS.free;
 }
 
 export const LANGUAGES = [
@@ -115,21 +165,30 @@ export const LANGUAGES = [
   { name: "Yoruba", code: "yo" },
 ]
 
-// Animated WebP preview paths from R2 (3s loops on black background)
+// Preview asset paths from R2 (3s loops on black background)
 export const PREVIEW_IMAGES: Record<string, string> = {
-  simple:
-    "https://pub-dab84dec13074258806f788a00943c46.r2.dev/previews/black_template_simple.webp",
-  beast:
-    "https://pub-dab84dec13074258806f788a00943c46.r2.dev/previews/black_template_beast.webp",
-  popline:
-    "https://pub-dab84dec13074258806f788a00943c46.r2.dev/previews/black_template_popline.webp",
-  hormozi:
-    "https://pub-dab84dec13074258806f788a00943c46.r2.dev/previews/black_template_hormozi.webp",
-  "box-highlight":
-    "https://pub-dab84dec13074258806f788a00943c46.r2.dev/previews/black_template_box-highlight.webp",
-  "neon-glow":
-    "https://pub-dab84dec13074258806f788a00943c46.r2.dev/previews/black_template_neon-glow.webp",
-  opus: "https://pub-dab84dec13074258806f788a00943c46.r2.dev/previews/black_template_opus.webp",
-  sticker:
-    "https://pub-dab84dec13074258806f788a00943c46.r2.dev/previews/black_template_sticker.webp",
+  impact:
+    "https://pub-dab84dec13074258806f788a00943c46.r2.dev/previews/black_template_impact.webp",
+  creator:
+    "https://pub-dab84dec13074258806f788a00943c46.r2.dev/previews/black_template_creator.webp",
+  cinema:
+    "https://pub-dab84dec13074258806f788a00943c46.r2.dev/previews/black_template_cinema.webp",
+  focus:
+    "https://pub-dab84dec13074258806f788a00943c46.r2.dev/previews/black_template_focus.webp",
+  neon:
+    "https://pub-dab84dec13074258806f788a00943c46.r2.dev/previews/black_template_neon.webp",
+}
+
+// Ultra-lightweight optimized MP4 preview paths from R2 (~8KB per clip)
+export const PREVIEW_VIDEOS: Record<string, string> = {
+  impact:
+    "https://pub-dab84dec13074258806f788a00943c46.r2.dev/previews/black_template_impact.mp4",
+  creator:
+    "https://pub-dab84dec13074258806f788a00943c46.r2.dev/previews/black_template_creator.mp4",
+  cinema:
+    "https://pub-dab84dec13074258806f788a00943c46.r2.dev/previews/black_template_cinema.mp4",
+  focus:
+    "https://pub-dab84dec13074258806f788a00943c46.r2.dev/previews/black_template_focus.mp4",
+  neon:
+    "https://pub-dab84dec13074258806f788a00943c46.r2.dev/previews/black_template_neon.mp4",
 }

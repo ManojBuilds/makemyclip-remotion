@@ -32,3 +32,5 @@ from config import app  # noqa: F401  – Modal CLI discovers the app via this i
 from burner import CaptionBurner  # noqa: F401
 from reframer import AIReframe  # noqa: F401
 from transcriber import AudioTranscriber  # noqa: F401
+from analyzer import VideoAnalyzer  # noqa: F401
+

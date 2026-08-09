@@ -12,7 +12,7 @@ import { ProcessingSteps } from "@/components/dashboard/processing-steps"
 import type { Project, Clip } from "@/lib/types"
 import { triggerHDExport } from "@/lib/actions/export"
 
-import { useUserStore } from "@/lib/store/useUserStore"
+import { useUser } from "@clerk/nextjs"
 
 export function ProjectDetailClient({
   initialProject,
@@ -27,6 +27,7 @@ export function ProjectDetailClient({
     plan: string
   }
 }) {
+  const { user: clerkUser } = useUser()
   const router = useRouter()
   const [project, setProject] = useState<Project>(initialProject)
   const [clips, setClips] = useState<Clip[]>(initialClips)
@@ -93,11 +94,59 @@ export function ProjectDetailClient({
 
   // const handleDownloadZip = async () => {};
 
-  const handleDownloadClick = async (clip: Clip) => {
-    // If HD export already exists, open in new tab immediately
+  const triggerDirectDownload = async (url: string, clipTitle?: string) => {
+    try {
+      const response = await fetch(url)
+      if (!response.ok) throw new Error("Fetch failed")
+      const blob = await response.blob()
+      const blobUrl = window.URL.createObjectURL(blob)
+      const link = document.createElement("a")
+      link.href = blobUrl
+
+      const safeTitle = (project.title || "video").replace(/[^a-z0-9]/gi, "_").toLowerCase()
+      const safeClipTitle = (clipTitle || "clip").replace(/[^a-z0-9]/gi, "_").toLowerCase()
+      link.download = `${safeTitle}_${safeClipTitle}.mp4`
+
+      document.body.appendChild(link)
+      link.click()
+      document.body.removeChild(link)
+      window.URL.revokeObjectURL(blobUrl)
+      return true
+    } catch (err) {
+      console.error("Direct download failed, using fallback:", err)
+      window.open(url, "_blank", "noopener,noreferrer")
+      return false
+    }
+  }
+
+  const handleDownloadClick = async (clip: Clip, options?: { withoutCaptions?: boolean }) => {
+    // If download without captions is requested
+    if (options?.withoutCaptions && clip.originalVideoUrl) {
+      setDownloadingClipId(clip.id)
+      const toastId = toast.loading("Downloading video...")
+      const success = await triggerDirectDownload(clip.originalVideoUrl, `${clip.title}_original`)
+      toast.dismiss(toastId)
+      if (success) {
+        toast.success("Download started.")
+      } else {
+        toast.success("Opening video in new tab.")
+      }
+      setDownloadingClipId(null)
+      return
+    }
+
+    // If HD export already exists, download directly
     if (clip.captionVideoUrl) {
-      window.open(clip.captionVideoUrl, "_blank", "noopener,noreferrer")
-      toast.success("Opening clip in new tab!")
+      setDownloadingClipId(clip.id)
+      const toastId = toast.loading("Downloading video directly...")
+      const success = await triggerDirectDownload(clip.captionVideoUrl, clip.title)
+      toast.dismiss(toastId)
+      if (success) {
+        toast.success("Download started!")
+      } else {
+        toast.success("Opening clip in new tab (fallback)!")
+      }
+      setDownloadingClipId(null)
       return
     }
 
@@ -106,11 +155,19 @@ export function ProjectDetailClient({
     try {
       const data = await triggerHDExport(clip.id)
 
-      // If the export was already done, open in new tab immediately
+      // If the export was already done, download directly
       if (data.alreadyExported && data.url) {
         toast.dismiss(loadingToastId)
-        window.open(data.url, "_blank", "noopener,noreferrer")
-        toast.success("Opening clip in new tab!")
+        setDownloadingClipId(clip.id)
+        const toastId = toast.loading("Downloading video directly...")
+        const success = await triggerDirectDownload(data.url, clip.title)
+        toast.dismiss(toastId)
+        if (success) {
+          toast.success("Download started!")
+        } else {
+          toast.success("Opening clip in new tab (fallback)!")
+        }
+        setDownloadingClipId(null)
         return
       }
 
@@ -173,12 +230,8 @@ export function ProjectDetailClient({
               return updated
             })
 
-            toast.success(`Export ready! Opening: ${oldClip.title}`)
-            window.open(
-              newClip.captionVideoUrl!,
-              "_blank",
-              "noopener,noreferrer"
-            )
+            toast.success("Export ready! Downloading...")
+            void triggerDirectDownload(newClip.captionVideoUrl!, oldClip.title)
           }
         })
 
@@ -186,13 +239,13 @@ export function ProjectDetailClient({
         setProject((prev) => {
           if (prev.status !== "ready" && finalData.project.status === "ready") {
             // Fetch updated credits/user info when processing completes
-            useUserStore.getState().fetchUser(true)
+            clerkUser?.reload()
             if (
               typeof window !== "undefined" &&
               "Notification" in window &&
               Notification.permission === "granted"
             ) {
-              new Notification("MakeMyClip", {
+              new Notification("Kivio", {
                 body: `Your clips for "${prev.title || "video"}" are ready!`,
                 icon: "/favicon.ico",
               })
@@ -281,8 +334,7 @@ export function ProjectDetailClient({
             Something went wrong
           </h2>
           <p className="mx-auto max-w-md text-base text-slate-500">
-            We encountered an issue while processing your video. Our team has
-            been notified.
+            We couldn&apos;t process this video. If credits were deducted, they have been refunded.
           </p>
         </div>
         <Button
@@ -299,18 +351,10 @@ export function ProjectDetailClient({
 
   if (shouldShowClipsView) {
     return (
-      <div className="mx-auto w-full max-w-5xl space-y-6 sm:px-6 sm:py-8 md:space-y-10 md:py-10">
+      <div className="mx-auto w-full max-w-4xl space-y-4 sm:px-4 sm:py-4 md:space-y-6 md:py-6">
         {/* HEADER — minimal */}
-        <div className="flex flex-col justify-between gap-5 border-b border-slate-100 pb-5 md:flex-row md:items-center md:gap-6 md:pb-6">
-          <div className="flex min-w-0 items-start gap-3 sm:items-center sm:gap-4">
-            <Button
-              variant="ghost"
-              size="icon"
-              onClick={() => router.push("/projects")}
-              className="hidden h-10 w-10 shrink-0 rounded-xl hover:bg-slate-100 sm:inline-flex"
-            >
-              <ArrowLeft className="h-5 w-5 text-slate-600" />
-            </Button>
+        <div className="flex flex-col justify-between gap-3 pb-1 md:flex-row md:items-center">
+          <div className="flex min-w-0 items-start gap-1">
             <div className="min-w-0 space-y-1">
               <div className="flex flex-wrap items-center gap-2">
                 <EditableTitle
@@ -325,7 +369,7 @@ export function ProjectDetailClient({
                     href={project.sourceUrl}
                     target="_blank"
                     rel="noopener noreferrer"
-                    className="inline-flex items-center gap-1.5 rounded-full border border-rose-100 bg-rose-50 px-2.5 py-1 text-[11px] font-semibold text-rose-600 transition-colors hover:bg-rose-100"
+                    className="inline-flex items-center gap-1 rounded-full border border-rose-100 bg-rose-50 px-2 py-0.5 text-[10px] font-semibold text-rose-600 transition-colors hover:bg-rose-100"
                     title="Open original on YouTube"
                   >
                     <ExternalLink className="h-3 w-3" />
@@ -333,41 +377,9 @@ export function ProjectDetailClient({
                   </a>
                 )}
               </div>
-              <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs font-medium text-slate-400">
-                <span>
-                  {new Date(project.createdAt).toLocaleDateString("en-US", {
-                    month: "long",
-                    day: "numeric",
-                    year: "numeric",
-                  })}
-                </span>
-                <span className="h-1 w-1 rounded-full bg-slate-200" />
-                <span>
-                  {clips.length} {clips.length === 1 ? "clip" : "clips"}
-                </span>
-              </div>
             </div>
           </div>
         </div>
-
-        {/* Quality precision banner for low clip counts */}
-        {clips.length < 5 && clips.length > 0 && (
-          <div className="flex max-w-4xl items-start gap-3.5 rounded-2xl border border-[#0075de]/10 bg-[#e8f4fd]/30 px-5 py-4 shadow-sm">
-            <div className="mt-0.5 flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full bg-[#0075de]/10 text-[#0075de]">
-              <Sparkles className="h-4 w-4" />
-            </div>
-            <div className="space-y-1">
-              <h4 className="text-sm leading-tight font-bold text-slate-900">
-                Curated Viral Moments
-              </h4>
-              <p className="text-xs leading-relaxed font-medium text-slate-600">
-                We found {clips.length} clip{clips.length === 1 ? "" : "s"} with
-                strong viral potential — we skip the rest so every clip you get
-                is worth posting.
-              </p>
-            </div>
-          </div>
-        )}
 
         {/* CLIPS LIST — horizontal cards */}
         <div className="flex flex-col gap-4">
@@ -388,7 +400,7 @@ export function ProjectDetailClient({
                   }))
                 }
                 onEdit={(c) => setActiveEditClip(c)}
-                onDownload={(c) => handleDownloadClick(c)}
+                onDownload={(c, opts) => handleDownloadClick(c, opts)}
                 isPlaying={activePlayingId === clip.id}
                 onPlay={() =>
                   setActivePlayingId(

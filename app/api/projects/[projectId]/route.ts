@@ -72,6 +72,8 @@ export async function GET(
           endTime: clips.endTime,
           viralScore: clips.viralScore,
           viralReason: clips.viralReason,
+          description: clips.description,
+          hashtags: clips.hashtags,
           clipType: clips.clipType,
           status: clips.status,
           renderStatus: clips.renderStatus,

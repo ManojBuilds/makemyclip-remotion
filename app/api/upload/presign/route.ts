@@ -5,6 +5,7 @@ import { createId } from "@paralleldrive/cuid2"
 import { db } from "@/lib/db"
 import { user } from "@/lib/db/schema"
 import { eq } from "drizzle-orm"
+import { getPlanLimit } from "@/lib/config"
 
 const ALLOWED_VIDEO_TYPES = [
   "video/mp4",
@@ -33,10 +34,12 @@ export async function POST(request: Request) {
     }
 
     // Check user credits
-    const [dbUser] = await db
-      .select()
-      .from(user)
-      .where(eq(user.id, session.user.id))
+    const { getOrCreateUser } = require("@/lib/user")
+    const dbUser = await getOrCreateUser({
+      id: session.user.id,
+      email: session.user.email,
+      name: session.user.name,
+    })
 
     if (!dbUser) {
       return NextResponse.json({ error: "User not found" }, { status: 404 })
@@ -44,20 +47,20 @@ export async function POST(request: Request) {
 
     const durationInMinutes = Math.ceil(duration / 60)
     const availableCredits = dbUser.credits ?? 0
-    const isFree = dbUser.plan === "free"
+    const planConfig = getPlanLimit(dbUser.plan)
 
-    // Enforce Free Plan Limits
-    if (isFree) {
-      if (durationInMinutes > 30) {
-        return NextResponse.json(
-          {
-            error: "Free plan limit",
-            message:
-              "Videos on the free plan are limited to 30 minutes. Please upgrade for longer videos.",
-          },
-          { status: 403 }
-        )
-      }
+    // Enforce Plan Duration Limits
+    if (duration > planConfig.maxUploadDurationSeconds) {
+      return NextResponse.json(
+        {
+          error: "Plan upload limit exceeded",
+          message: `Videos on your ${planConfig.name} plan are limited to ${planConfig.label}. Please upgrade to process longer videos.`,
+        },
+        { status: 403 }
+      )
+    }
+
+    if (dbUser.plan === "free") {
       const MAX_FREE_SIZE = 500 * 1024 * 1024 // 500MB
       if (fileSize && fileSize > MAX_FREE_SIZE) {
         return NextResponse.json(

@@ -35,6 +35,8 @@ export type AIClipSuggestion = {
   durationSeconds: number
   viralScore: number
   viralReason: string
+  description: string
+  hashtags: string
   clipType: LongFormClipType
   speakerDynamic: string
   cropMode?: "reframe" | "letterbox" | "split" | "course" | "auto"
@@ -50,6 +52,7 @@ export interface Sentence {
 
 const MIN_CLIP_SECONDS = 10
 const MAX_CLIP_SECONDS = 60
+// YouTube Shorts now supports clips up to 3 minutes; this cap is currently tuned for short punchy clips. Revisit deliberately if longer story-arc clips (e.g. storytelling clipType) are desired — this would need a per-clipType max rather than one global constant.
 
 // Cooldown to avoid hitting rate-limited or unavailable models repeatedly
 const modelCooldowns = new Map<string, number>()
@@ -67,6 +70,8 @@ const MODELS = [
   "gemini-flash-latest",
   "gemini-flash-lite-latest",
 ]
+
+const CHUNKED_EXTRACTION_THRESHOLD_MINUTES = 25
 
 // ─── Transcript helpers ────────────────────────────────────────────────────
 
@@ -220,6 +225,26 @@ function normalizeClip(
   return { ...clip, startTime: s, endTime: e, durationSeconds: dur }
 }
 
+// ─── Deduplication pass ───────────────────────────────────────────────────
+
+function dedupeOverlappingClips(
+  clips: AIClipSuggestion[],
+  maxOverlapRatio = 0.5
+): AIClipSuggestion[] {
+  const kept: AIClipSuggestion[] = []
+  for (const clip of clips) {
+    const overlapsExisting = kept.some((k) => {
+      const overlapStart = Math.max(k.startTime, clip.startTime)
+      const overlapEnd = Math.min(k.endTime, clip.endTime)
+      const overlap = Math.max(0, overlapEnd - overlapStart)
+      const shorterDur = Math.min(k.durationSeconds, clip.durationSeconds)
+      return shorterDur > 0 && overlap / shorterDur > maxOverlapRatio
+    })
+    if (!overlapsExisting) kept.push(clip)
+  }
+  return kept
+}
+
 // ─── Response schema ───────────────────────────────────────────────────────
 
 const responseSchema: Schema = {
@@ -272,15 +297,36 @@ const responseSchema: Schema = {
         description:
           "Bold on-screen hook caption (1–3 words) to capture attention in the first 3 seconds.",
       },
-      viralScore: {
+      hookStrength: {
         type: Type.INTEGER,
-        description:
-          "Predicted virality 1–100 based on emotional resonance, debate, or educational value.",
+        description: "Score from 1 to 10 evaluating the opening sentence hook strength.",
+      },
+      quotability: {
+        type: Type.INTEGER,
+        description: "Score from 1 to 10 evaluating how memorable/shareable the quotes are.",
+      },
+      emotionalIntensity: {
+        type: Type.INTEGER,
+        description: "Score from 1 to 10 on the level of emotional response (shock, laughter, empathy, curiosity).",
+      },
+      standaloneClarity: {
+        type: Type.INTEGER,
+        description: "Score from 1 to 10 on how well this clip functions as a self-contained story/thought.",
       },
       viralReason: {
         type: Type.STRING,
         description:
           "Why this clip has viral potential — the psychological trigger.",
+      },
+      description: {
+        type: Type.STRING,
+        description:
+          "A detailed and engaging description of this clip to be used as a social media caption.",
+      },
+      hashtags: {
+        type: Type.STRING,
+        description:
+          "Recommended hashtags for the clip, separated by spaces (e.g. #podcast #insight #viral).",
       },
       clipType: {
         type: Type.STRING,
@@ -312,75 +358,66 @@ const responseSchema: Schema = {
       "endSentenceIndex",
       "title",
       "hookText",
-      "viralScore",
+      "hookStrength",
+      "quotability",
+      "emotionalIntensity",
+      "standaloneClarity",
       "viralReason",
+      "description",
+      "hashtags",
       "clipType",
       "speakerDynamic",
     ],
   },
 }
 
-// ─── Main export ───────────────────────────────────────────────────────────
+// ─── Extraction Helper ────────────────────────────────────────────────────
 
-/**
- * Analyzes a transcript and returns ranked viral clip suggestions.
- */
-export async function analyzeViralMoments(
-  fullText: string,
+async function extractClipsInternal(
+  sliceSentences: Sentence[],
   words: WordTimestamp[],
-  videoContext?: string
+  globalSentences: Sentence[],
+  clipCount: { min: number; target: number; max: number },
+  totalDuration: number,
+  videoContext?: string,
+  windowLabel = ""
 ): Promise<AIClipSuggestion[]> {
-  const sentences = groupWordsIntoSentences(words)
-  const totalDuration =
-    words.length > 0 ? words[words.length - 1].end - words[0].start : 0
-  const clipCount = getTargetClipCount(totalDuration)
-
-  console.log(
-    `[analyzeViralMoments] Duration: ${totalDuration.toFixed(1)}s | Sentences: ${sentences.length} | Target clips: ${clipCount.target}`
-  )
-
-  const formattedTranscript = sentences
+  const formattedTranscript = sliceSentences
     .map(
-      (s) =>
-        `[#${s.index}] [${formatTime(s.start)} / ${s.start.toFixed(2)}s] Speaker ${s.speaker ?? "?"}: ${s.text}`
+      (s, idx) =>
+        `[#${idx + 1}] [${formatTime(s.start)}] 🗣️ Speaker ${s.speaker !== null && s.speaker !== undefined ? s.speaker : "0"}: "${s.text.trim()}"`
     )
     .join("\n")
 
-  const buildPrompt = (isRetry: boolean) =>
+  const buildPrompt = (isRetry: boolean, isUnderTargetRetry: boolean) =>
     `
-You are an expert short-form video editor. Your job is to scan a video transcript and extract the most engaging, shareable clips optimized for TikTok, YouTube Shorts, and Instagram Reels.
+You are a world-class viral short-form content curator (TikTok, YouTube Shorts, Instagram Reels). Your goal is to extract the top ${clipCount.target} most high-performing, engaging clip candidates from this video transcript screenplay.
 
-This works for ANY video type — podcasts, interviews, tutorials, vlogs, lectures, commentary, product reviews, or any spoken content.
+This works for ANY video type — podcasts, interviews, vlogs, commentary, product reviews, or long-form discussions.
 ${videoContext ? `\nVIDEO CONTEXT: ${videoContext}` : ""}
 Total Duration: ${totalDuration.toFixed(1)}s (${(totalDuration / 60).toFixed(1)} min)
-${isRetry ? `\n⚠️ RETRY: Previous attempt returned 0 clips. You MUST return at least ${clipCount.min} clip(s). Relax quality standards if needed.\n` : ""}
+${isRetry ? (isUnderTargetRetry ? `\n⚠️ RETRY: Your previous attempt returned fewer clips than the target — look more carefully across the FULL transcript for additional distinct, high-quality moments you may have missed, especially outside the regions you already selected.\n` : `\n⚠️ RETRY: Previous attempt returned 0 clips. You MUST return at least ${clipCount.min} clip(s). Relax quality standards if needed.\n`) : ""}
 OBJECTIVE: Extract exactly ${clipCount.target} clips (min ${clipCount.min}, max ${clipCount.max}) distributed across the full transcript.
 
-EDITORIAL RULES FOR BOUNDARIES & QUALITY:
-1. **Complete thought**: Every clip must stand alone — it needs a clear beginning (hook/setup), middle (development), and end (conclusion, payoff, or mic-drop). Never cut off mid-idea.
-2. **Never Cut Off Setup & Pre-Context (Pre-Context Rule)**:
-   - If the starting sentence refers to something, someone, or an event mentioned immediately prior (e.g., using pronouns like "he", "she", "it", "that", "them", or referring to "the Hulk", "that joke"), you MUST pull the starting sentence back to the beginning of the setup or question. Starting mid-topic is a failure.
-3. **Handle Fumbles & False Starts Intentionally (Comedy Setup Rule)**:
-   - In podcasts/interviews, if a speaker fumbles a joke, says "cut that shit", "I said it backwards", or has a false start, do not start the clip AFTER the fumble if it leaves a confusing/awkward fragment of the recovery. Either include the entire fumble/recovery sequence (which is highly engaging and funny), or start BEFORE the setup began.
-4. **Capture the Full Mic-Drop/Resolution (Resolution Rule)**:
-   - Never end a clip right before a satisfying final reaction, laugh, or punchline. Check the subsequent sentences: if they contain a strong, natural concluding statement or a hilarious reaction that wraps up the topic (e.g. "the middle finger brings out the best in people" and the follow-up examples like Curtis Blades), you MUST include them by extending the endSentenceIndex to cover that payload fully.
-   - **Energy Honesty**: Be accurate about the energy level. Do not exaggerate or label a quiet, awkward, or ambiguous ending line as a "mic-drop" or "high-energy payoff" in the viralReason description. If the payoff is a quiet/awkward button, describe it as a quiet/awkward payoff.
-5. **Clean Sentence Entrances & Unanswered Questions**:
-   - Ensure the starting sentence is a grammatically clean entrance. Do not start on a prompt question if the guest immediately deflects it, cuts it off, or asks to switch characters. If the question goes unanswered, do NOT use it as the starting sentence or claim it as the hook — start instead directly on the deflection/character switch sentence.
-6. **Duration**: ${MIN_CLIP_SECONDS}–${MAX_CLIP_SECONDS} seconds. If the core idea is short, expand the range to include the setup and payoff.
-7. **Boundaries**: Start and end exactly on sentence boundaries from the transcript.
-8. **Spread**: Distribute clips across the full video — don't cluster them all in the first or last 10 minutes.
-9. **Clip types to look for** (not exhaustive — use your judgment):
-   - A surprising or controversial opinion
-   - A relatable insight or "aha" moment  
-   - A compelling story or anecdote
-   - A shocking statistic or fact
-   - Emotional vulnerability or honest admission
-   - A clear, quotable one-liner
-   - Debate, disagreement, or pushback
-   - A step-by-step explanation of something valuable
-   
-TRANSCRIPT:
+VIRAL CRITERIA & EDITORIAL RULES:
+
+1. **SCROLL-STOPPING HOOK (First 3 Seconds)**:
+   - The first sentence MUST be an immediate curiosity gap, bold statement, controversial take, or engaging question.
+   - REJECT clips starting with filler ("Um", "So basically", "Well", "Like I said").
+   - **Pre-Context Rule**: If sentence #1 uses unexplained pronouns ("he", "she", "it", "that guy"), you MUST pull the start index back to include the setup. Starting mid-thought is invalid.
+
+2. **HIGH-ENERGY SPEAKER DYNAMICS**:
+   - Prioritize moments with **active speaker exchanges** (debates, banter, quick back-and-forth reactions) over long static monologues.
+   - Look for clear emotional shifts (excitement, laughter, disagreement, realization).
+
+3. **CLEAN MIC-DROP RESOLUTION**:
+   - Every clip must conclude cleanly on a strong punchline, resolution, or mic-drop line. Never cut off mid-thought or before the natural emotional reaction ends.
+
+4. **DURATION & DENSITY**:
+   - Clip length: ${MIN_CLIP_SECONDS}–${MAX_CLIP_SECONDS} seconds.
+   - Each clip must be 100% self-contained so a viewer scrolling past understands the context instantly.
+
+TRANSCRIPT SCREENPLAY:
 """
 ${formattedTranscript}
 """
@@ -389,9 +426,10 @@ Return ONLY a raw JSON array matching the schema. No markdown wrapper.
 `.trim()
 
   let lastError: unknown = null
+  let isUnderTargetRetry = false
 
   for (let attempt = 1; attempt <= 2; attempt++) {
-    const prompt = buildPrompt(attempt > 1)
+    const prompt = buildPrompt(attempt > 1, isUnderTargetRetry)
 
     for (const model of MODELS) {
       const now = Date.now()
@@ -400,14 +438,14 @@ Return ONLY a raw JSON array matching the schema. No markdown wrapper.
         now - modelCooldowns.get(model)! < COOLDOWN_DURATION_MS
       ) {
         console.log(
-          `[analyzeViralMoments] Skipping ${model} due to recent failure (cooldown)`
+          `[analyzeViralMoments]${windowLabel ? ` ${windowLabel}` : ""} Skipping ${model} due to recent failure (cooldown)`
         )
         continue
       }
 
       try {
         console.log(
-          `[analyzeViralMoments] Attempt ${attempt} — model: ${model}`
+          `[analyzeViralMoments]${windowLabel ? ` ${windowLabel}` : ""} Attempt ${attempt} — model: ${model}`
         )
 
         const response = await ai.models.generateContent({
@@ -432,8 +470,13 @@ Return ONLY a raw JSON array matching the schema. No markdown wrapper.
           endSentenceIndex: number
           title: string
           hookText: string
-          viralScore: number
+          hookStrength: number
+          quotability: number
+          emotionalIntensity: number
+          standaloneClarity: number
           viralReason: string
+          description: string
+          hashtags: string
           clipType: LongFormClipType
           speakerDynamic: string
         }>
@@ -443,21 +486,34 @@ Return ONLY a raw JSON array matching the schema. No markdown wrapper.
         const mappedClips: AIClipSuggestion[] = []
 
         for (const raw of rawClips) {
-          const sIdx = Number(raw.startSentenceIndex)
-          const eIdx = Number(raw.endSentenceIndex)
+          const localSi = Number(raw.startSentenceIndex)
+          const localEi = Number(raw.endSentenceIndex)
 
-          if (isNaN(sIdx) || isNaN(eIdx)) {
+          if (isNaN(localSi) || isNaN(localEi)) {
             console.warn(
-              `[analyzeViralMoments] Invalid indices: start=${raw.startSentenceIndex}, end=${raw.endSentenceIndex}`
+              `[analyzeViralMoments]${windowLabel ? ` ${windowLabel}` : ""} Invalid indices: start=${raw.startSentenceIndex}, end=${raw.endSentenceIndex}`
             )
             continue
           }
 
-          const si = Math.max(0, Math.min(sentences.length - 1, sIdx - 1))
-          const ei = Math.max(si, Math.min(sentences.length - 1, eIdx - 1))
+          const sliceSi = Math.max(0, Math.min(sliceSentences.length - 1, localSi - 1))
+          const sliceEi = Math.max(sliceSi, Math.min(sliceSentences.length - 1, localEi - 1))
+
+          const globalStartSent = sliceSentences[sliceSi]
+          const globalEndSent = sliceSentences[sliceEi]
+
+          const si = globalSentences.indexOf(globalStartSent)
+          const ei = globalSentences.indexOf(globalEndSent)
+
+          if (si === -1 || ei === -1) {
+            console.warn(
+              `[analyzeViralMoments]${windowLabel ? ` ${windowLabel}` : ""} Could not map local indices to global index list`
+            )
+            continue
+          }
 
           const guarded = applyBoundaryGuardrails(
-            sentences,
+            globalSentences,
             si,
             ei,
             raw.resolutionEvaluation,
@@ -494,52 +550,86 @@ Return ONLY a raw JSON array matching the schema. No markdown wrapper.
             )
           }
 
+          const rawHook = Number(raw.hookStrength) || 5
+          const rawQuot = Number(raw.quotability) || 5
+          const rawEmot = Number(raw.emotionalIntensity) || 5
+          const rawClar = Number(raw.standaloneClarity) || 5
+          const computedViralScore = Number(
+            Math.min(
+              10,
+              Math.max(
+                0,
+                rawHook * 0.35 + rawQuot * 0.25 + rawEmot * 0.20 + rawClar * 0.20
+              )
+            ).toFixed(1)
+          )
+
           mappedClips.push({
             title: raw.title,
             hookText: raw.hookText,
-            startTime: sentences[finalSi].start,
-            endTime: sentences[finalEi].end,
-            durationSeconds: sentences[finalEi].end - sentences[finalSi].start,
-            viralScore: raw.viralScore,
+            startTime: globalSentences[finalSi].start,
+            endTime: globalSentences[finalEi].end,
+            durationSeconds: globalSentences[finalEi].end - globalSentences[finalSi].start,
+            viralScore: computedViralScore,
             viralReason: viralReasonText,
+            description: raw.description,
+            hashtags: raw.hashtags,
             clipType: raw.clipType,
             speakerDynamic: raw.speakerDynamic,
           })
         }
 
         const validClips = mappedClips
-          .map((clip) => normalizeClip(clip, words, totalDuration, sentences))
+          .map((clip) => normalizeClip(clip, words, totalDuration, globalSentences))
           .filter((clip): clip is AIClipSuggestion => {
             if (!clip) return false
             if (clip.endTime - clip.startTime < MIN_CLIP_SECONDS) {
               console.warn(
-                `[analyzeViralMoments] Discarding "${clip.title}" — too short after normalization`
+                `[analyzeViralMoments]${windowLabel ? ` ${windowLabel}` : ""} Discarding "${clip.title}" — too short after normalization`
               )
               return false
             }
             return true
           })
 
-        const finalClips = validClips
+        const sortedValid = validClips.sort((a, b) => b.viralScore - a.viralScore)
+        const finalClips = dedupeOverlappingClips(sortedValid)
+        const droppedCount = sortedValid.length - finalClips.length
+        if (droppedCount > 0) {
+          console.log(
+            `[analyzeViralMoments]${windowLabel ? ` ${windowLabel}` : ""} Dedupe removed ${droppedCount} duplicate clips.`
+          )
+        }
 
         if (finalClips.length === 0)
           throw new Error("All clips invalid after normalization.")
+
+        // Soft-threshold check
+        const targetThreshold = Math.round(clipCount.target * 0.7)
+        if (finalClips.length < targetThreshold) {
+          const warningMsg = `Got ${finalClips.length} clips, target was ${clipCount.target} (min acceptable: ${targetThreshold})`
+          console.warn(`[analyzeViralMoments]${windowLabel ? ` ${windowLabel}` : ""} ${warningMsg}`)
+          if (attempt === 1) {
+            isUnderTargetRetry = true
+            throw new Error(warningMsg)
+          }
+        }
+
         if (finalClips.length < clipCount.min)
           throw new Error(
             `Only ${finalClips.length} valid clip(s) (min: ${clipCount.min}).`
           )
 
         console.log(
-          `[analyzeViralMoments] ✅ ${finalClips.length} clips from ${model}`
+          `[analyzeViralMoments]${windowLabel ? ` ${windowLabel}` : ""} ✅ ${finalClips.length} clips from ${model}`
         )
-        return finalClips.sort((a, b) => b.viralScore - a.viralScore)
+        return finalClips
       } catch (err) {
         lastError = err
         const msg = err instanceof Error ? err.message : String(err)
         console.warn(
-          `⚠️ [analyzeViralMoments] Attempt ${attempt}, ${model}: ${msg}`
+          `⚠️ [analyzeViralMoments]${windowLabel ? ` ${windowLabel}` : ""} Attempt ${attempt}, ${model}: ${msg}`
         )
-        // If rate limited or unavailable, put on cooldown
         if (
           msg.includes("429") ||
           msg.includes("503") ||
@@ -548,7 +638,7 @@ Return ONLY a raw JSON array matching the schema. No markdown wrapper.
           msg.includes("quota")
         ) {
           console.log(
-            `[analyzeViralMoments] Putting ${model} on cooldown for 5 minutes.`
+            `[analyzeViralMoments]${windowLabel ? ` ${windowLabel}` : ""} Putting ${model} on cooldown for 5 minutes.`
           )
           modelCooldowns.set(model, Date.now())
         }
@@ -557,10 +647,126 @@ Return ONLY a raw JSON array matching the schema. No markdown wrapper.
     }
   }
 
+  throw lastError || new Error("Failed to extract clips")
+}
+
+// ─── Main export ───────────────────────────────────────────────────────────
+
+/**
+ * Analyzes a transcript and returns ranked viral clip suggestions.
+ */
+export async function analyzeViralMoments(
+  fullText: string,
+  words: WordTimestamp[],
+  videoContext?: string
+): Promise<AIClipSuggestion[]> {
+  const sentences = groupWordsIntoSentences(words)
+  const totalDuration =
+    words.length > 0 ? words[words.length - 1].end - words[0].start : 0
+  const clipCount = getTargetClipCount(totalDuration)
+
+  console.log(
+    `[analyzeViralMoments] Duration: ${totalDuration.toFixed(1)}s | Sentences: ${sentences.length} | Target clips: ${clipCount.target}`
+  )
+
+  const isLongVideo = totalDuration / 60 >= CHUNKED_EXTRACTION_THRESHOLD_MINUTES
+
+  if (isLongVideo) {
+    const windowSizeSec = 35 * 60
+    const overlapSec = 2.5 * 60
+    const windows: Sentence[][] = []
+    let currentStart = sentences[0]?.start ?? 0
+    const overallEnd = sentences[sentences.length - 1]?.end ?? 0
+
+    while (currentStart < overallEnd) {
+      const currentEnd = currentStart + windowSizeSec
+      const slice = sentences.filter((s) => s.start >= currentStart && s.start < currentEnd)
+      if (slice.length > 0) {
+        windows.push(slice)
+      } else {
+        break
+      }
+      currentStart = currentEnd - overlapSec
+    }
+
+    console.log(
+      `[analyzeViralMoments] Running parallel windowed extraction across ${windows.length} windows simultaneously...`
+    )
+
+    const windowPromises = windows.map(async (windowSentences, wIdx) => {
+      const windowDuration =
+        windowSentences[windowSentences.length - 1].end - windowSentences[0].start
+      const windowClipCount = getTargetClipCount(windowDuration)
+
+      console.log(
+        `[analyzeViralMoments] Launching window ${wIdx + 1}/${windows.length} | Duration: ${windowDuration.toFixed(1)}s | Target: ${windowClipCount.target}`
+      )
+
+      return await extractClipsInternal(
+        windowSentences,
+        words,
+        sentences,
+        windowClipCount,
+        totalDuration,
+        videoContext,
+        `[Window ${wIdx + 1}/${windows.length}]`
+      )
+    })
+
+    const results = await Promise.allSettled(windowPromises)
+    const allClips: AIClipSuggestion[] = []
+
+    results.forEach((res, idx) => {
+      if (res.status === "fulfilled") {
+        allClips.push(...res.value)
+      } else {
+        console.warn(
+          `[analyzeViralMoments] Window ${idx + 1}/${windows.length} extraction failed:`,
+          res.reason
+        )
+      }
+    })
+
+    // Merge, deduplicate, sort, trim
+    const sortedClips = allClips.sort((a, b) => b.viralScore - a.viralScore)
+    const dedupedClips = dedupeOverlappingClips(sortedClips)
+    const droppedCount = sortedClips.length - dedupedClips.length
+    if (droppedCount > 0) {
+      console.log(
+        `[analyzeViralMoments] Deduped ${droppedCount} overlapping clips across all windows.`
+      )
+    }
+
+    const finalClips = dedupedClips.slice(0, clipCount.max)
+    console.log(
+      `[analyzeViralMoments] Chunked extraction finished. Returned ${finalClips.length} clips (max allowed: ${clipCount.max}).`
+    )
+
+    if (finalClips.length > 0) {
+      return finalClips
+    }
+  } else {
+    // Single-call path
+    try {
+      return await extractClipsInternal(
+        sentences,
+        words,
+        sentences,
+        clipCount,
+        totalDuration,
+        videoContext
+      )
+    } catch (err) {
+      console.warn(
+        `[analyzeViralMoments] Single-call extraction failed, using fallback. Error:`,
+        err
+      )
+    }
+  }
+
   // Last-resort fallback: return the whole video as a single clip
   console.warn(
-    "⚠️ [analyzeViralMoments] All attempts failed. Returning fallback clip. Error:",
-    lastError
+    "⚠️ [analyzeViralMoments] All attempts/windows failed. Returning fallback clip."
   )
 
   const s = words[0]?.start ?? 0
@@ -573,8 +779,10 @@ Return ONLY a raw JSON array matching the schema. No markdown wrapper.
       startTime: s,
       endTime: e,
       durationSeconds: Math.max(0, e - s),
-      viralScore: 75,
+      viralScore: 7.5,
       viralReason: "Covers the key segment of the video.",
+      description: "A hand-picked featured highlight from the video.",
+      hashtags: "#highlight #viral",
       clipType: "aha_moment",
       speakerDynamic: "Key takeaway from the video.",
     },

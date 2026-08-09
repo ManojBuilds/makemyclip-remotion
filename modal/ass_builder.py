@@ -1,18 +1,26 @@
 """ASS subtitle file builder.
 
-Takes a transcript + ``CaptionStyle`` and writes an ``.ass`` subtitle file that
-matches the React ``CaptionRenderer`` previews on the frontend.
+Takes a transcript + ``CaptionStyle`` and writes an ``.ass`` subtitle file for the
+five premium presets defined in ``presets.py``. Each preset owns:
+
+  * a *sentence entrance* animation  → ``ANIMATION_BUILDERS[preset]``
+  * an *active-word effect*          → ``WORD_EFFECTS[preset]``
+
+Dispatching through these registries keeps the renderer free of giant if/elif
+chains and makes new presets trivial to add.
 """
 
 from __future__ import annotations
 
 import logging
-from typing import Iterable
+from dataclasses import dataclass
+from typing import Callable, Iterable
 
 from colors import ass_color_override, hex_to_ass_color
 from fonts import resolve_font_name
 from presets import (
     ALWAYS_UPPERCASE,
+    DEFAULT_PRESET,
     DEFAULT_PRESET_STYLE,
     get_preset_style,
     normalize_preset,
@@ -20,36 +28,234 @@ from presets import (
 
 logger = logging.getLogger("makemyclip.ass_builder")
 
+# ── Canvas geometry ──────────────────────────────────────────────────────────
 V_WIDTH, V_HEIGHT = 1080, 1920
 SCALE_FACTOR = V_HEIGHT / 1920.0
 CX, CY = V_WIDTH // 2, V_HEIGHT // 2
 _MAX_SAFE_WIDTH = 840.0
 
+# ── Shadow tags ──────────────────────────────────────────────────────────────
 _SHADOW_TAG = r"\xshad2\yshad2\blur0\4a&H20&"
 _NO_SHADOW_TAG = r"\xshad0\yshad0\blur0"
+_NEON_SHADOW_TAG = r"\xshad0\yshad0\blur6\4a&H10&"
 
-_SPRING_CONFIG: dict[str, dict[str, int]] = {
-    "hormozi": {"scale_from": 94, "overshoot": 103},
-    "beast": {"scale_from": 94, "overshoot": 105},
-    "opus": {"scale_from": 94, "overshoot": 103},
-    "popline": {"scale_from": 94, "overshoot": 103},
-    "neon-glow": {"scale_from": 94, "overshoot": 103},
-    "sticker": {"scale_from": 94, "overshoot": 103},
-}
-_BOTTOM_ANCHOR = frozenset({"hormozi", "popline", "neon-glow", "simple", "opus"})
-_CENTER_ANCHOR = frozenset({"beast", "boxed"})
+# ── Default word-effect timing (milliseconds) ────────────────────────────────
+_WORD_ANIM_MS = 130
 
 
-def spring_pop(scale_from: int = 94, overshoot: int = 103, duration: int = 150) -> str:
-    """Subtle scale-in with a short overshoot settle (≤150 ms)."""
+# ─────────────────────────────────────────────────────────────────────────────
+# Animation context + registries
+# ─────────────────────────────────────────────────────────────────────────────
+@dataclass(frozen=True)
+class WordCtx:
+    """Everything a word-effect builder needs to emit its active-word tags."""
+
+    word: str
+    fs: int
+    highlight_tag: str  # ``\c&H..&`` for the active/highlight color
+    normal_tag: str  # ``\c&H..&`` for the inactive color
+    highlight_color_hex: str
+    normal_color_hex: str
+    stroke_c: object  # pysubs2.Color for the outline
+    stroke_bord: int  # scaled outline width
+    pill_color_hex: str  # focus pill background
+    default_fsp: float = 0.0
+
+
+# ── Sentence entrance animations (one per preset) ────────────────────────────
+def impact_animation(fs: int, duration: int = 150) -> str:
+    """Whole sentence squashes in: 92% → 104% → 100%."""
     mid = int(duration * 0.6)
     return (
-        rf"\fscx{scale_from}\fscy{scale_from}"
-        rf"\t(0,{mid},\fscx{overshoot}\fscy{overshoot})"
+        rf"\fscx92\fscy92"
+        rf"\t(0,{mid},\fscx104\fscy104)"
         rf"\t({mid},{duration},\fscx100\fscy100)"
     )
 
 
+def creator_animation(fs: int, duration: int = 150) -> str:
+    """No sentence-level pop — motion lives on the active word (handled per-word in build_animation)."""
+    return ""
+
+
+def cinema_animation(fs: int, duration: int = 200) -> str:
+    """Opacity-only fade in (FF → 00). No scaling."""
+    return rf"\alpha&HFF&\t(0,{duration},\alpha&H00&)"
+
+
+def focus_animation(fs: int, duration: int = 150) -> str:
+    """No sentence-level motion — the pill animates per active word."""
+    return ""
+
+
+def neon_animation(fs: int, duration: int = 150) -> str:
+    """No sentence-level motion — the glow pulses per active word."""
+    return ""
+
+
+def luxury_animation(fs: int, duration: int = 220) -> str:
+    """Luxury Shimmer & Rise entrance: Opacity fade + subtle letter tracking expand + upward drift."""
+    return (
+        rf"\alpha&HFF&\fsp6.0"
+        rf"\t(0,{duration},\alpha&H00&\fsp1.5)"
+    )
+
+
+ANIMATION_BUILDERS: dict[str, Callable[..., str]] = {
+    "impact": impact_animation,
+    "creator": creator_animation,
+    "cinema": cinema_animation,
+    "focus": focus_animation,
+    "neon": neon_animation,
+    "luxury": luxury_animation,
+}
+
+
+# ── Active-word effects (one per preset) ─────────────────────────────────────
+def _wrap(active_prefix: str, ctx: WordCtx, active_suffix: str) -> str:
+    """Wrap the active word with a prefix (entering highlight) and a suffix
+    (restoring the inactive style for the following words on the same line)."""
+    return (
+        rf"{{{active_prefix}{ctx.highlight_tag}}}{ctx.word}"
+        rf"{{{active_suffix}{ctx.normal_tag}}}"
+    )
+
+
+def impact_word_effect(ctx: WordCtx) -> str:
+    """Punchy squash/stretch overshoot to 116% then settle to 110%."""
+    mid = int(_WORD_ANIM_MS * 0.55)
+    prefix = (
+        rf"\fscx100\fscy100"
+        rf"\t(0,{mid},\fscx116\fscy116)"
+        rf"\t({mid},{_WORD_ANIM_MS},\fscx110\fscy110)"
+    )
+    suffix = r"\fscx100\fscy100"
+    return _wrap(prefix, ctx, suffix)
+
+
+def creator_word_effect(ctx: WordCtx) -> str:
+    """Smooth fade-in (no popping). Slide up is handled at sentence/line level."""
+    dur = 120
+    prefix = (
+        rf"\alpha&H90&"
+        rf"\t(0,{dur},\alpha&H00&)"
+    )
+    suffix = r"\alpha&H00&"
+    return _wrap(prefix, ctx, suffix)
+
+
+def cinema_word_effect(ctx: WordCtx) -> str:
+    """Opacity-only reveal of the soft highlight color. No scaling."""
+    prefix = rf"\alpha&H50&\t(0,120,\alpha&H00&)"
+    suffix = r"\alpha&H00&"
+    return _wrap(prefix, ctx, suffix)
+
+
+def focus_word_effect(ctx: WordCtx) -> str:
+    """Draw a growing rounded pill behind the active word (Apple-keynote feel).
+
+    Implemented with separate ``\\xbord`` (horizontal padding) and ``\\ybord`` (vertical padding)
+    along with ``\\blur`` to soften corners, animating the scale 95% -> 102% -> 100%.
+    """
+    pill = hex_to_ass_color(ctx.pill_color_hex)
+    active = hex_to_ass_color(ctx.highlight_color_hex)
+    normal = hex_to_ass_color(ctx.normal_color_hex)
+    pill_xbord = max(1, int(20 * SCALE_FACTOR))
+    pill_ybord = max(1, int(10 * SCALE_FACTOR))
+    mid = int(140 * 0.55)
+    prefix = (
+        rf"\c&H{active.b:02X}{active.g:02X}{active.r:02X}&"
+        rf"\3c&H{pill.b:02X}{pill.g:02X}{pill.r:02X}&\xbord{pill_xbord}\ybord{pill_ybord}\blur2\shad0"
+        rf"\fscx95\fscy95"
+        rf"\t(0,{mid},\fscx102\fscy102)"
+        rf"\t({mid},140,\fscx100\fscy100)"
+    )
+    suffix = (
+        rf"\c&H{normal.b:02X}{normal.g:02X}{normal.r:02X}&"
+        rf"\3c&H{ctx.stroke_c.b:02X}{ctx.stroke_c.g:02X}{ctx.stroke_c.r:02X}&"
+        rf"\xbord{ctx.stroke_bord}\ybord{ctx.stroke_bord}\blur0\fscx100\fscy100"
+    )
+    return rf"{{{prefix}}}{ctx.word}{{{suffix}}}"
+
+
+def neon_word_effect(ctx: WordCtx) -> str:
+    """Pulsing pink neon glow with a white text core, vibrant thick border/shadow glow, and scale pop."""
+    glow = hex_to_ass_color(ctx.highlight_color_hex)
+    mid = int(150 * 0.5)
+    
+    xbord_init = max(1.5, 3.0 * SCALE_FACTOR)
+    ybord_init = max(1.5, 3.0 * SCALE_FACTOR)
+    blur_init = int(8 * SCALE_FACTOR)
+    
+    xbord_mid = max(2.0, 5.0 * SCALE_FACTOR)
+    ybord_mid = max(2.0, 5.0 * SCALE_FACTOR)
+    blur_mid = int(12 * SCALE_FACTOR)
+    
+    xbord_settle = max(1.5, 3.5 * SCALE_FACTOR)
+    ybord_settle = max(1.5, 3.5 * SCALE_FACTOR)
+    blur_settle = int(8 * SCALE_FACTOR)
+
+    prefix = (
+        rf"\c&HFFFFFF&"
+        rf"\3c&H{glow.b:02X}{glow.g:02X}{glow.r:02X}&"
+        rf"\4c&H{glow.b:02X}{glow.g:02X}{glow.r:02X}&"
+        rf"\4a&H00&"
+        rf"\xbord{xbord_init:.1f}\ybord{ybord_init:.1f}\blur{blur_init}"
+        rf"\fscx100\fscy100"
+        rf"\t(0,{mid},\xbord{xbord_mid:.1f}\ybord{ybord_mid:.1f}\blur{blur_mid}\fscx108\fscy108)"
+        rf"\t({mid},150,\xbord{xbord_settle:.1f}\ybord{ybord_settle:.1f}\blur{blur_settle}\fscx104\fscy104)"
+    )
+    
+    normal_c = hex_to_ass_color(ctx.normal_color_hex)
+    suffix = (
+        rf"\c&H{normal_c.b:02X}{normal_c.g:02X}{normal_c.r:02X}&"
+        rf"\3c&H{ctx.stroke_c.b:02X}{ctx.stroke_c.g:02X}{ctx.stroke_c.r:02X}&"
+        rf"\4c&H{ctx.stroke_c.b:02X}{ctx.stroke_c.g:02X}{ctx.stroke_c.r:02X}&"
+        rf"\4a&H20&"
+        rf"\xbord{ctx.stroke_bord}\ybord{ctx.stroke_bord}\blur3\fscx100\fscy100"
+    )
+    return rf"{{{prefix}}}{ctx.word}{{{suffix}}}"
+
+
+def luxury_word_effect(ctx: WordCtx) -> str:
+    """Luxury Shimmer & Rise active word effect: tracking expansion, scale pop (1.06), soft champagne glow, and smooth return."""
+    dur = 160
+    mid = int(dur * 0.5)
+    gold = hex_to_ass_color(ctx.highlight_color_hex)
+    
+    prefix = (
+        rf"\c&H{gold.b:02X}{gold.g:02X}{gold.r:02X}&"
+        rf"\3c&H{gold.b:02X}{gold.g:02X}{gold.r:02X}&"
+        rf"\blur4\fscx100\fscy100\fsp{ctx.default_fsp:.1f}"
+        rf"\t(0,{mid},\blur6\fscx106\fscy106\fsp{ctx.default_fsp + 3.0:.1f})"
+        rf"\t({mid},{dur},\blur2\fscx104\fscy104\fsp{ctx.default_fsp + 1.5:.1f})"
+    )
+    
+    normal_c = hex_to_ass_color(ctx.normal_color_hex)
+    suffix = (
+        rf"\c&H{normal_c.b:02X}{normal_c.g:02X}{normal_c.r:02X}&"
+        rf"\3c&H{ctx.stroke_c.b:02X}{ctx.stroke_c.g:02X}{ctx.stroke_c.r:02X}&"
+        rf"\blur0\fscx100\fscy100\fsp{ctx.default_fsp:.1f}"
+    )
+    return rf"{{{prefix}}}{ctx.word}{{{suffix}}}"
+
+
+WORD_EFFECTS: dict[str, Callable[[WordCtx], str]] = {
+    "impact": impact_word_effect,
+    "creator": creator_word_effect,
+    "cinema": cinema_word_effect,
+    "focus": focus_word_effect,
+    "neon": neon_word_effect,
+    "luxury": luxury_word_effect,
+}
+
+# Presets that anchor to a bottom baseline (all five use bottom-center).
+_BOTTOM_ANCHOR = frozenset(ANIMATION_BUILDERS.keys())
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Styling / transcript helpers (unchanged public behavior)
+# ─────────────────────────────────────────────────────────────────────────────
 def _styling_to_dict(styling) -> dict:
     if hasattr(styling, "model_dump"):
         return styling.model_dump()
@@ -136,14 +342,15 @@ def _build_style(base: dict, overrides: dict, template: dict):
         if overrides["stroke_width"] is not None:
             outline = float(overrides["stroke_width"])
 
-    shadow = 0 if overrides["shadow_depth"] == 0.0 else 3
+    if overrides["shadow_depth"] is not None:
+        shadow = overrides["shadow_depth"]
     if overrides["position_y"] is not None:
         marginv = int((1.0 - overrides["position_y"]) * V_HEIGHT)
 
     style = pysubs2.SSAStyle()
     style.fontname = resolve_font_name(fontname)
     style.fontsize = int(fontsize * SCALE_FACTOR)
-    style.bold = True
+    style.bold = bool(base.get("bold", True))
     style.italic = overrides.get("italic") or False
     style.primarycolor = primarycolor
     style.outlinecolor = outlinecolor
@@ -151,8 +358,6 @@ def _build_style(base: dict, overrides: dict, template: dict):
     style.shadow = shadow * SCALE_FACTOR
     style.backcolor = backcolor
     style.borderstyle = base.get("borderstyle", 1)
-    if "secondary" in base:
-        style.secondarycolor = hex_to_ass_color(base["secondary"])
     style.alignment = (
         int(overrides["alignment"])
         if overrides.get("alignment") is not None
@@ -176,28 +381,34 @@ def _safe_event_fontsize(phrase_group: list[dict], style_fontsize: int) -> int:
 
 
 def _resolve_y_anchor(preset: str, position_y: float | None, fs: int) -> int | None:
-    if preset not in _BOTTOM_ANCHOR | _CENTER_ANCHOR:
+    if preset not in _BOTTOM_ANCHOR:
         return None
     if position_y is not None:
         raw = int(position_y * V_HEIGHT)
-        return int(raw + fs / 2.0) if preset in _BOTTOM_ANCHOR else raw
-    if preset in _BOTTOM_ANCHOR:
-        margin = 150 if preset == "hormozi" else 130
-        return V_HEIGHT - int(margin * SCALE_FACTOR)
-    return CY
+        return int(raw + fs / 2.0)
+    margin = 150 if preset == "impact" else 130
+    return V_HEIGHT - int(margin * SCALE_FACTOR)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Event emission
+# ─────────────────────────────────────────────────────────────────────────────
 def build_animation(
-    preset: str, fs: int, shadow_tag: str, *, animate: bool, y: int | None = None
+    preset: str, fs: int, shadow_tag: str, *, animate: bool, y: int | None = None, word_idx: int = 0
 ) -> str:
+    """Build the sentence-level tag block: position, shadow, entrance, fontsize."""
     tags: list[str] = []
-    if preset in _CENTER_ANCHOR:
-        tags.append(r"\an5")
     if y is not None:
-        tags.append(rf"\pos({CX},{y})")
+        if preset == "creator":
+            tags.append(rf"\pos({CX},{y})\t(0,120,\pos({CX},{y-12}))")
+        else:
+            tags.append(rf"\pos({CX},{y})")
     tags.append(shadow_tag)
-    if animate and preset in _SPRING_CONFIG:
-        tags.append(spring_pop(**_SPRING_CONFIG[preset]))
+    if animate:
+        builder = ANIMATION_BUILDERS.get(preset, ANIMATION_BUILDERS[DEFAULT_PRESET])
+        entrance = builder(fs)
+        if entrance:
+            tags.append(entrance)
     tags.append(rf"\fs{fs}")
     return "{" + "".join(tags) + "}"
 
@@ -206,60 +417,104 @@ def build_word_line(
     phrase_group: list[dict],
     active_idx: int,
     preset: str,
-    normal_color_hex: str,
-    h_color_hex: str,
-    stroke_c,
-    stroke_bord: int,
+    ctx_base: WordCtx,
 ) -> str:
-    hi_tag, normal_tag = ass_color_override(h_color_hex), ass_color_override(
-        normal_color_hex
-    )
-    normal_ass = hex_to_ass_color(normal_color_hex)
+    """Render a phrase line where ``active_idx`` is styled via the preset's
+    active-word effect and every other word uses the inactive style."""
+    effect = WORD_EFFECTS.get(preset, WORD_EFFECTS[DEFAULT_PRESET])
     parts: list[str] = []
-
     for w_idx, w in enumerate(phrase_group):
         if w_idx != active_idx:
             parts.append(w["word"])
             continue
+        ctx = WordCtx(
+            word=w["word"],
+            fs=ctx_base.fs,
+            highlight_tag=ctx_base.highlight_tag,
+            normal_tag=ctx_base.normal_tag,
+            highlight_color_hex=ctx_base.highlight_color_hex,
+            normal_color_hex=ctx_base.normal_color_hex,
+            stroke_c=ctx_base.stroke_c,
+            stroke_bord=ctx_base.stroke_bord,
+            pill_color_hex=ctx_base.pill_color_hex,
+            default_fsp=ctx_base.default_fsp,
+        )
+        parts.append(effect(ctx))
+    extra_space = max(1, int(ctx_base.fs * 0.04))
+    sep = f"{{\\fsp{ctx_base.default_fsp + extra_space}}} {{\\fsp{ctx_base.default_fsp}}}"
+    return sep.join(parts)
 
-        if preset == "box-highlight":
-            hi = h_color_hex.lstrip("#")
-            hi_r = int(hi[0:2], 16) if len(hi) >= 2 else 255
-            hi_g = int(hi[2:4], 16) if len(hi) >= 4 else 220
-            hi_b = int(hi[4:6], 16) if len(hi) >= 6 else 0
-            parts.append(
-                rf"{{\c&H000000&\3c&H{hi_b:02X}{hi_g:02X}{hi_r:02X}&"
-                rf"\bord{int(18 * SCALE_FACTOR)}}}{w['word']}"
-                rf"{{\c&H{normal_ass.b:02X}{normal_ass.g:02X}{normal_ass.r:02X}&"
-                rf"\3c&H{stroke_c.b:02X}{stroke_c.g:02X}{stroke_c.r:02X}&\bord{stroke_bord}}}"
-            )
-        else:
-            # Determine premium Canva/CapCut effects based on the preset
-            active_prefix = ""
-            active_suffix = ""
 
-            if preset in ("hormozi", "beast", "sticker"):
-                # Bold Pop scale effect (12% larger)
-                active_prefix = r"\fscx112\fscy112"
-                active_suffix = r"\fscx100\fscy100"
-            elif preset == "popline":
-                # Underline & scale effect
-                active_prefix = r"\u1\fscx106\fscy106"
-                active_suffix = r"\u0\fscx100\fscy100"
-            elif preset == "neon-glow":
-                # Glow/bloom & scale effect
-                active_prefix = rf"\bord6\3c&H{stroke_c.b:02X}{stroke_c.g:02X}{stroke_c.r:02X}&\blur8\fscx110\fscy110"
-                active_suffix = rf"\bord{stroke_bord}\3c&H{stroke_c.b:02X}{stroke_c.g:02X}{stroke_c.r:02X}&\blur0\fscx100\fscy100"
-            elif preset == "opus":
-                # Bouncy Pop scale effect (8% larger)
-                active_prefix = r"\fscx108\fscy108"
-                active_suffix = r"\fscx100\fscy100"
+def _chunk_into_phrases(
+    words: list[dict], max_words: int = 3, max_chars: int = 28
+) -> list[list[dict]]:
+    """Group words into natural semantic phrases or short clauses respecting
+    both word caps and character ceilings.
 
-            parts.append(
-                rf"{{{active_prefix}{hi_tag}}}{w['word']}{{{active_suffix}{normal_tag}}}"
-            )
+    Respects:
+      1. Hard caps of max_words (bounded 2-4) and max_chars (bounded 18-28).
+      2. Natural semantic breaks on punctuation ('.', ',', '!', '?', ';', ':', '—', '-').
+      3. Minimum phrase speech duration target so phrases aren't micro-fragmented.
+      4. Speaker / layout boundaries.
+    """
+    max_words = max(2, min(4, max_words))
+    groups: list[list[dict]] = []
+    current_group: list[dict] = []
 
-    return ("   " if preset == "box-highlight" else " ").join(parts)
+    for w in words:
+        word_text = (w.get("word") or "").strip()
+
+        # Check boundary condition with existing group (layout or speaker mismatch)
+        if current_group:
+            same_layout = w.get("layout") == current_group[0].get("layout")
+            same_speaker = w.get("speaker") == current_group[0].get("speaker")
+            if not (same_layout and same_speaker):
+                groups.append(current_group)
+                current_group = []
+
+        # Predict candidate character length
+        cand_words = current_group + [w]
+        cand_char_len = sum(len((x.get("word") or "").strip()) for x in cand_words) + (len(cand_words) - 1)
+
+        # Hard ceiling check
+        if current_group and (len(cand_words) > max_words or cand_char_len > max_chars):
+            groups.append(current_group)
+            current_group = [w]
+            continue
+
+        current_group.append(w)
+
+        # Check punctuation on the current word
+        has_clause_punct = any(word_text.endswith(p) for p in (",", ";", ":", "—", "-"))
+        has_sentence_punct = any(word_text.endswith(p) for p in (".", "!", "?"))
+        
+        group_dur = current_group[-1]["end"] - current_group[0]["start"]
+
+        if len(current_group) >= max_words:
+            groups.append(current_group)
+            current_group = []
+        elif has_sentence_punct and len(current_group) >= 1:
+            groups.append(current_group)
+            current_group = []
+        elif has_clause_punct and len(current_group) >= 2 and group_dur >= 0.5:
+            groups.append(current_group)
+            current_group = []
+
+    if current_group:
+        # Merge trailing single word if previous group has capacity
+        if len(current_group) == 1 and groups and len(groups[-1]) < max_words:
+            prev_layout = groups[-1][0].get("layout")
+            prev_speaker = groups[-1][0].get("speaker")
+            curr_layout = current_group[0].get("layout")
+            curr_speaker = current_group[0].get("speaker")
+            prev_char_len = sum(len((x.get("word") or "").strip()) for x in groups[-1]) + len(groups[-1]) + len(word_text)
+            if prev_layout == curr_layout and prev_speaker == curr_speaker and prev_char_len <= max_chars:
+                groups[-1].append(current_group[0])
+                current_group = []
+        if current_group:
+            groups.append(current_group)
+
+    return groups
 
 
 def _emit_events(
@@ -288,7 +543,7 @@ def _emit_events(
             )
         )
 
-    # Determine layout of this phrase
+    # Determine layout of this phrase → vertical anchor.
     phrase_layout = global_crop_mode
     layouts_in_group = [w.get("layout") for w in phrase_group if w.get("layout")]
     if layouts_in_group:
@@ -300,71 +555,94 @@ def _emit_events(
     elif phrase_layout == "letterbox":
         pos_y = 0.66
     elif phrase_layout in ("reframe", "single"):
-        pos_y = 0.75
+        pos_y = 0.82
 
     y = _resolve_y_anchor(preset, pos_y, fs)
-    uses_pos = preset in _BOTTOM_ANCHOR | _CENTER_ANCHOR
 
-    if preset == "opus":
-        y_val = y or CY
-        line = "  " + " ".join(w["word"] for w in phrase_group) + "  "
-        add(
-            p_start,
-            p_end,
-            build_animation("opus", fs, shadow_tag, animate=True, y=y_val) + line,
+    wh_val = template.get("word_highlight")
+    if wh_val is None:
+        wh_val = template.get("word_level_highlight")
+    word_highlight = True if wh_val is None else bool(wh_val)
+
+    if not word_highlight:
+        # Emit a single, clean subtitle block for the phrase group
+        phrase_text = " ".join(w["word"] for w in phrase_group)
+        prefix = build_animation(
+            preset,
+            fs,
+            shadow_tag,
+            animate=True,
+            y=y,
+            word_idx=0,
         )
-        return
-
-    if preset == "simple":
-        line = " ".join(w["word"] for w in phrase_group)
-        pos_tag = rf"\pos(540,{y})" if y is not None else ""
-        add(p_start, p_end, rf"{{{shadow_tag}\fs{fs}{pos_tag}}}{line}")
-        return
-
-    if preset == "karaoke":
-        text, cursor = "", p_start
-        for w in phrase_group:
-            gap = w["start"] - cursor
-            if gap > 0.01:
-                text += f"{{\\K{int(gap * 100)}}}"
-            text += f"{{\\K{max(0, int((w['end'] - w['start']) * 100))}}}{w['word']} "
-            cursor = w["end"]
-        tail = p_end - cursor
-        if tail > 0.01:
-            text += f"{{\\K{int(tail * 100)}}}"
-        pos_tag = rf"\pos(540,{y})" if y is not None else ""
-        add(p_start, p_end, rf"{{\fs{fs}{pos_tag}}}{text.strip()}")
+        add(p_start, p_end, prefix + phrase_text)
         return
 
     normal_color = template.get("font_color") or base["primary"]
     stroke_c = hex_to_ass_color(
-        "#000000"
+        base["outlinecolor"]
         if overrides["stroke_color"] in (None, "transparent")
         else overrides["stroke_color"]
     )
     stroke_bord = (
-        int(3 * SCALE_FACTOR)
+        max(0, int(float(base["outline"]) * SCALE_FACTOR))
         if overrides["stroke_width"] in (None, 0)
         else int(float(overrides["stroke_width"]) * SCALE_FACTOR)
     )
 
-    for idx, word in enumerate(phrase_group):
+    ctx_base = WordCtx(
+        word="",
+        fs=fs,
+        highlight_tag=ass_color_override(h_color_hex),
+        normal_tag=ass_color_override(normal_color),
+        highlight_color_hex=h_color_hex,
+        normal_color_hex=normal_color,
+        stroke_c=stroke_c,
+        stroke_bord=stroke_bord,
+        pill_color_hex=base.get("pillcolor", "#FFE500"),
+        default_fsp=float(template.get("letter_spacing", 0.0) or 0.0),
+    )
+
+    MIN_WORD_DURATION_S = 0.05  # Minimum 50ms highlight step to stay tight with fast speech without artificial lag
+    MAX_WORD_HIGHLIGHT_S = 0.45  # Maximum 450ms active highlight per word to prevent silence bleed during pauses
+
+    for idx in range(len(phrase_group)):
+        word = phrase_group[idx]
         start = word["start"]
-        end = phrase_group[idx + 1]["start"] if idx < len(phrase_group) - 1 else p_end
-        line = build_word_line(
-            phrase_group, idx, preset, normal_color, h_color_hex, stroke_c, stroke_bord
-        )
-        if preset == "box-highlight":
-            prefix = rf"{{\fs{fs}}}"
+        raw_word_end = word.get("end", start + 0.3)
+
+        if idx < len(phrase_group) - 1:
+            next_start = phrase_group[idx + 1]["start"]
+            # Active word highlight ends when next word begins or after MAX_WORD_HIGHLIGHT_S
+            end = min(next_start, max(start + MIN_WORD_DURATION_S, min(raw_word_end, start + MAX_WORD_HIGHLIGHT_S)))
+            if end <= start:
+                end = min(next_start, start + 0.1)
         else:
-            prefix = build_animation(
-                preset,
-                fs,
-                shadow_tag,
-                animate=idx == 0 and preset in _SPRING_CONFIG,
-                y=y if uses_pos else None,
-            )
+            end = min(p_end, max(start + MIN_WORD_DURATION_S, min(raw_word_end, start + MAX_WORD_HIGHLIGHT_S)))
+
+        if end <= start:
+            end = start + 0.1
+
+        line = build_word_line(phrase_group, idx, preset, ctx_base)
+        prefix = build_animation(
+            preset,
+            fs,
+            shadow_tag,
+            animate=(idx == 0),
+            y=y,
+            word_idx=idx,
+        )
         add(start, end, prefix + line)
+
+
+def _select_shadow_tag(preset: str, no_shadow: bool) -> str:
+    if no_shadow:
+        return _NO_SHADOW_TAG
+    if preset == "neon":
+        return _NEON_SHADOW_TAG
+    if preset == "cinema":
+        return r"\xshad1.5\yshad1.5\blur5\4a&H30&"
+    return _SHADOW_TAG
 
 
 def generate_ass(
@@ -374,10 +652,16 @@ def generate_ass(
     import pysubs2
 
     template = _styling_to_dict(styling)
-    if crop_mode in ("split", "course"):
-        template["position_y"] = 0.50
-    elif crop_mode == "letterbox":
-        template["position_y"] = 0.66
+    user_pos_y = _tpl(template, "position_y", "positionY")
+    if user_pos_y is None:
+        if crop_mode in ("split", "course"):
+            template["position_y"] = 0.50
+        elif crop_mode == "letterbox":
+            template["position_y"] = 0.66
+        elif crop_mode in ("reframe", "single", "auto"):
+            template["position_y"] = 0.82
+
+    if crop_mode == "letterbox":
         for snake, camel in (
             ("font_size", "fontSize"),
             ("stroke_width", "strokeWidth"),
@@ -386,8 +670,6 @@ def generate_ass(
             val = _tpl(template, snake, camel)
             if val is not None:
                 template[snake] = template[camel] = float(val)
-    elif crop_mode in ("reframe", "single", "auto"):
-        template["position_y"] = 0.75
 
     overrides = _resolve_overrides(template)
     preset = normalize_preset(
@@ -408,10 +690,6 @@ def generate_ass(
     )
 
     base = get_preset_style(preset)
-    if crop_mode == "letterbox":
-        base["fontsize"] = int(base["fontsize"])
-        base["outline"], base["shadow"] = base["outline"], base["shadow"]
-
     subs.styles["Default"] = _build_style(base, overrides, template)
 
     raw_items = _flatten_transcript(transcript)
@@ -436,41 +714,52 @@ def generate_ass(
         logger.info("Saved empty ASS to %s", output_path)
         return
 
-    words_per_phrase = template.get("max_words", 3) or 3
-    h_color_hex = template.get("highlight_color", "#FFDC00")
+    # Auto-normalize timestamps if absolute video timeline timestamps (> 10s start offset) are passed
+    first_start = words[0]["start"]
+    if first_start > 10.0:
+        logger.info("Normalizing transcript word timestamps from absolute start %.2fs -> 0.0s", first_start)
+        for w in words:
+            w["start"] = max(0.0, w["start"] - first_start)
+            w["end"] = max(0.0, w["end"] - first_start)
+
+    words_per_phrase = template.get("max_words") or base.get("preferred_words") or 3
+    words_per_phrase = max(2, min(4, int(words_per_phrase)))
+    max_chars = template.get("max_chars") or base.get("max_chars_per_line") or 28
+
+    # Highlight color: user override wins, otherwise the preset's own base color.
+    h_color_hex = template.get("highlight_color") or base["highlightcolor"]
     no_shadow = overrides.get("shadow") is False or overrides.get("shadow_depth") == 0.0
 
-    groups = []
-    current_group = []
-    for w in words:
-        if len(current_group) >= words_per_phrase:
-            groups.append(current_group)
-            current_group = [w]
-        elif current_group and w.get("layout") != current_group[0].get("layout"):
-            groups.append(current_group)
-            current_group = [w]
-        else:
-            current_group.append(w)
-    if current_group:
-        groups.append(current_group)
+    groups = _chunk_into_phrases(words, max_words=words_per_phrase, max_chars=int(max_chars))
 
-    for group in groups:
+    MIN_GROUP_DURATION_S = float(template.get("min_group_duration", 0.8))
+
+    for g_idx, group in enumerate(groups):
         if not group:
             continue
-        p_start, p_end = group[0]["start"], group[-1]["end"]
+
+        p_start = group[0]["start"]
+        p_end_raw = group[-1]["end"]
+
+        # Calculate next group start if available
+        next_group_start = (
+            groups[g_idx + 1][0]["start"]
+            if (g_idx + 1 < len(groups) and groups[g_idx + 1])
+            else None
+        )
+
+        # Enforce minimum display duration threshold per subtitle block (at least 0.8s)
+        target_end = p_start + MIN_GROUP_DURATION_S
+        if next_group_start is not None and next_group_start > p_start:
+            p_end = max(p_end_raw, min(target_end, next_group_start))
+        else:
+            p_end = max(p_end_raw, target_end)
+
         if p_end <= p_start:
             continue
 
         fs = _safe_event_fontsize(group, subs.styles["Default"].fontsize)
-        if preset == "simple":
-            s_tag = _NO_SHADOW_TAG if no_shadow else _SHADOW_TAG
-        elif preset == "box-highlight":
-            s_tag = _NO_SHADOW_TAG
-        elif preset == "neon-glow":
-            # 2026 Gaming Glow: diffused shadow with high blur for neon bloom
-            s_tag = _NO_SHADOW_TAG if no_shadow else r"\xshad3\yshad3\blur10\4a&H20&"
-        else:
-            s_tag = _SHADOW_TAG
+        s_tag = _select_shadow_tag(preset, no_shadow)
 
         _emit_events(
             subs,
@@ -489,3 +778,4 @@ def generate_ass(
 
     subs.save(output_path)
     logger.info("Saved ASS to %s with %d events", output_path, len(subs.events))
+

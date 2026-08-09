@@ -45,7 +45,7 @@ export async function POST(request: Request) {
         transcribeLanguage: transcribeLanguage || "auto",
         translateLanguage: translateLanguage || "none",
         // Persist caption styling preset name at the project level.
-        captionStyle: styling ? (styling.preset || styling.name || "hormozi") : "hormozi",
+        captionStyle: styling ? (styling.preset || styling.name || "impact") : "impact",
       })
       .returning()
 

@@ -40,6 +40,7 @@ class ReframeRequest(BaseModel):
     show_watermark: bool = False
     crop_mode: str = "reframe"
     quality: str = "preview"  # "preview" (fast, 540p, smaller file) or "export" (full 1080p)
+    analysis_url: Optional[str] = None
 
 
 class BurnCaptionsRequest(BaseModel):
@@ -49,6 +50,7 @@ class BurnCaptionsRequest(BaseModel):
     show_watermark: bool = False
     crop_mode: Optional[str] = "reframe"
     quality: str = "export"  # "preview" (fast, 540p) or "export" (full 1080p)
+    plan: str = "free"  # "free", "creator", or "power" — controls export resolution
 
 
 class BatchClipItem(BaseModel):
@@ -67,10 +69,30 @@ class BatchReframeRequest(BaseModel):
     video_url: str
     clips: List[BatchClipItem]
     quality: str = "preview"
+    analysis_url: Optional[str] = None
 
 
 class TranscribeRequest(BaseModel):
     video_url: str
     transcribe_language: Optional[str] = "auto"
     translate_language: Optional[str] = "none"
+
+
+class AnalyzeVideoRequest(BaseModel):
+    video_url: str
+    project_id: str
+    duration: float
+    detect_skip: int = 5
+    chunk_duration: float = 600.0  # 10 minutes per chunk
+
+
+class AnalyzeVideoResponse(BaseModel):
+    success: bool
+    project_id: str
+    analysis_url: str
+    total_frames: int
+    num_tracks: int
+    duration_secs: float
+    error: Optional[str] = None
+
 

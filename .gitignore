@@ -58,3 +58,8 @@ __pycache__
 *.m4v
 *.wav
 *.mp3
+downloads
+trimmed_video_clips
+vault
+demo
+*.ass

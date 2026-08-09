@@ -11,11 +11,9 @@ Pipeline (per request):
   8. Mux original audio back in
   9. Upload to R2
 
-Bug fix in this refactor: ``face_count_window`` (a deque used to stabilize
-the multi-person/letterbox layout decision) was referenced but never
-declared in the original ``main.py``, which crashed the render loop with
-``NameError`` whenever a third face appeared. It is now properly
-initialized at the top of the render loop.
+Bug fix in this refactor: In ``render_vertical``, the function now moves the rendered
+video (temp_v) to its output path (local_orig) before returning, preventing RenderError
+during the audio muxing step where the file is expected to exist.
 """
 
 from __future__ import annotations
@@ -23,6 +21,7 @@ from __future__ import annotations
 import glob
 import logging
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -30,6 +29,7 @@ import time
 import uuid
 
 import modal
+from fastapi import File, Form, UploadFile
 
 from config import ai_secret, app, image, youtube_cookies_secret
 from errors import DownloadError, InvalidInputError, RenderError, VideoProbeError
@@ -39,7 +39,6 @@ from utils import StageTimer, is_youtube_url, validate_url
 from ytdlp_helper import (
     SEGMENT_DOWNLOAD_PAD_S,
     download_youtube_video,
-    remove_bgutil_pot_provider,
 )
 
 logger = logging.getLogger("makemyclip.reframer")
@@ -50,6 +49,7 @@ DEAD_ZONE_PX = 40  # Prevent faces from touching the edges (reduced to 40px for 
 SPEAKER_HOLD_SECONDS = 1.5  # hold last speaker through brief pauses
 FACE_COUNT_WINDOW_LEN = 11  # frames used to stabilize face-count decision
 LETTERBOX_TARGET_HEIGHT_RATIO = 0.68
+ANALYSIS_FPS = 25.0  # TalkNet's audio/visual frontends assume this rate
 
 # A 90s clip seek into a 2hr source can take a while — use a generous limit
 # so a stalled ffmpeg doesn't hang the worker. 20 minutes covers the worst
@@ -106,7 +106,7 @@ def annotate_transcript_layout(transcript, frame_layout, crop_mode, fps):
             w_start = w.get("start", 0.0)
             fidx = int(w_start * fps)
             
-            if crop_mode in ("split", "course", "letterbox"):
+            if crop_mode in ("split", "letterbox"):
                 w["layout"] = crop_mode
             elif crop_mode in ("reframe", "auto"):
                 if frame_layout and 0 <= fidx < len(frame_layout):
@@ -119,22 +119,55 @@ def annotate_transcript_layout(transcript, frame_layout, crop_mode, fps):
     return transcript
 
 
+def is_valid_face_track(tr, sc, frame_height: float = 2160.0) -> tuple[bool, float, float, float, float]:
+    """Evaluate if a face track is valid/real (not noise, background poster, or fake face).
+
+    Applies the following filters:
+    1. Size Threshold Filter: Ignore faces/photos whose bounding height size is less than 5% of frame height (or mean size < 75px on 4K)
+       to automatically filter out background posters, album art, and desk photographs.
+    2. ASD & Movement Filter: Static background images with low ASD score (< 0.25) and static position (movement < 5.0px) are purged.
+    """
+    import numpy as np
+
+    max_score = float(np.max(sc)) if len(sc) > 0 else 0.0
+    xs = tr["proc_track"]["x"]
+    ys = tr["proc_track"]["y"]
+    movement = float(np.std(xs) + np.std(ys)) if len(xs) > 0 else 0.0
+
+    sizes = tr["proc_track"]["s"]
+    mean_size = float(np.mean(sizes)) if len(sizes) > 0 else 1.0
+    rel_movement = movement / mean_size if mean_size > 0 else 0.0
+
+    # 5% of frame height threshold (e.g. 108px on 4K 2160p, 54px on 1080p)
+    min_size_threshold = max(54.0, frame_height * 0.05)
+
+    is_valid = True
+    if mean_size < min_size_threshold and max_score < 0.35:
+        # Background poster / desk photo on shelf
+        is_valid = False
+    elif max_score < 0.25 and movement < 5.0:
+        # Static background element
+        is_valid = False
+    elif max_score < 0.12 and (movement < 10.0 and rel_movement < 0.08):
+        is_valid = False
+
+    return is_valid, max_score, movement, rel_movement, mean_size
+
+
 @app.cls(
     gpu="L4",
     image=image,
-    timeout=900,  # batch reframe may take longer
+    timeout=1800,  # extended timeout for long videos (up to 2 hrs)
     secrets=[ai_secret, youtube_cookies_secret],
     max_containers=20,
-    min_containers=1,
+    min_containers=0,
 )
-@modal.concurrent(max_inputs=1)
+@modal.concurrent(max_inputs=2)
 class AIReframe:
     @modal.enter()
     def setup(self):
-        # 1. Remove the bgutil PO Token plugin to prevent infinite retry loops
-        remove_bgutil_pot_provider()
 
-        # 2. Load the face detector + active-speaker model
+        # 1. Load the face detector + active-speaker model
         os.chdir("/root/asd")
         sys.path.append("/root/asd")
         from ASD import ASD
@@ -146,11 +179,11 @@ class AIReframe:
         self.ASD_MODEL.eval()
         self.ASD_MODEL.cuda()
 
-        # 3. Probe NVENC once at startup — saves a try/except per render
+        # 2. Probe NVENC once at startup — saves a try/except per render
         self.use_nvenc = self._probe_nvenc()
         logger.info("NVENC available: %s", self.use_nvenc)
 
-        # 4. Validate required env vars upfront so we fail fast on misconfig
+        # 3. Validate required env vars upfront so we fail fast on misconfig
         assert_r2_env()
 
     @staticmethod
@@ -218,25 +251,7 @@ class AIReframe:
         valid_tracks = []
         for tidx, tr in enumerate(tracks):
             sc = scores[tidx]
-            max_score = float(np.max(sc)) if len(sc) > 0 else 0.0
-            xs = tr["proc_track"]["x"]
-            ys = tr["proc_track"]["y"]
-            movement = float(np.std(xs) + np.std(ys)) if len(xs) > 0 else 0.0
-
-            sizes = tr["proc_track"]["s"]
-            mean_size = float(np.mean(sizes)) if len(sizes) > 0 else 1.0
-            rel_movement = movement / mean_size if mean_size > 0 else 0.0
-
-            # Filter out inactive / noise / fake tracks (posters, toys, background objects)
-            # 1. Purge tiny tracks (mean size < 50 pixels) which are noise/background elements
-            # 2. Purge silent tracks (score < 0.15) that don't show real movement (movement < 15.0 px or rel_movement < 0.12)
-            is_valid = True
-            if mean_size < 25.0:
-                is_valid = False
-            elif max_score < 0.12:
-                if movement < 5.0 and rel_movement < 0.05:
-                    is_valid = False
-
+            is_valid, _, _, _, _ = is_valid_face_track(tr, sc)
             if is_valid:
                 valid_tracks.append((tidx, tr))
 
@@ -320,37 +335,10 @@ class AIReframe:
                 break
 
         if num_columns == 1:
-            if len(valid_tracks) > 1 and has_temporal_overlap:
-                logger.info(
-                    "classify_layout decision: reframe (multiple distinct speakers overlapping in time in single column - preferred over letterbox)"
-                )
-                return "reframe"
-            elif len(valid_tracks) > 1:
-                logger.info(
-                    "classify_layout decision: reframe (multiple tracks in single column, no temporal overlap)"
-                )
-                return "reframe"
-
-            # Single speaker column: check for corner-mounted webcam (Course presentation layout)
+            # Single column: reframe (pan-and-zoom on active speaker) unless face is too small
             tidx, tr = columns[0]["tracks"][0]
             avg_face_width_pct = np.mean(tr["proc_track"]["s"]) / width
-            mean_x_pct = np.mean(tr["proc_track"]["x"]) / width
-            mean_y_pct = np.mean(tr["proc_track"]["y"]) / height
 
-            is_corner = (mean_x_pct < 0.30 or mean_x_pct > 0.70) and (
-                mean_y_pct < 0.30 or mean_y_pct > 0.70
-            )
-            if avg_face_width_pct < 0.20 and is_corner:
-                logger.info(
-                    "classify_layout decision: course (corner speaker: x=%.2f, y=%.2f, size=%.2f)",
-                    mean_x_pct,
-                    mean_y_pct,
-                    avg_face_width_pct,
-                )
-                return "course"
-
-            # Check if the face is extremely small in the frame (e.g., wide stage show, standup comedy).
-            # Zooming into a face smaller than 4.5% of the video width looks pixelated/blurry and cuts out body context.
             if avg_face_width_pct < 0.022:
                 logger.info(
                     "classify_layout decision: letterbox (face width %.2f%% is too small for reframe)",
@@ -372,21 +360,12 @@ class AIReframe:
                 )
                 return "reframe"
 
-            # Check if any column is in a corner (presenter slides, drummer in corner, background reaction)
-            def is_corner_col(col):
-                for tidx, tr in col["tracks"]:
-                    mean_x = np.mean(tr["proc_track"]["x"]) / width
-                    mean_y = np.mean(tr["proc_track"]["y"]) / height
-                    mean_s = np.mean(tr["proc_track"]["s"]) / width
-                    if (
-                        (mean_x < 0.30 or mean_x > 0.70)
-                        and (mean_y < 0.35 or mean_y > 0.65)
-                        and mean_s < 0.15
-                    ):
-                        return True
-                return False
+            # Check if speakers are in opposing halves (left/right split)
+            is_split_candidate = (mu_x1 < 0.48 and mu_x2 > 0.52) or (
+                mu_x2 < 0.48 and mu_x1 > 0.52
+            )
 
-            # Verify both columns have at least one track with speaking activity (max_score >= 0.35)
+            # Verify at least one column has speaking activity
             def has_speaking_track(col):
                 for tidx, tr in col["tracks"]:
                     sc = scores[tidx]
@@ -394,53 +373,33 @@ class AIReframe:
                         return True
                 return False
 
-            is_split_candidate = (mu_x1 < 0.48 and mu_x2 > 0.52) or (
-                mu_x2 < 0.48 and mu_x1 > 0.52
-            )
-            has_corner_face = is_corner_col(columns[0]) or is_corner_col(columns[1])
+            at_least_one_speaks = has_speaking_track(columns[0]) or has_speaking_track(columns[1])
 
-            # If one of the speakers is centered (e.g. 0.45 <= x <= 0.58), it's a center-anchored stage show
-            # with secondary side/corner reactions, not a left/right split podcast.
-            has_centered_speaker = (0.45 <= mu_x1 <= 0.58) or (0.45 <= mu_x2 <= 0.58)
-
-            both_columns_speak = has_speaking_track(columns[0]) and has_speaking_track(
-                columns[1]
-            )
-
-            if (
-                is_split_candidate
-                and not has_corner_face
-                and not has_centered_speaker
-                and both_columns_speak
-            ):
-                logger.info("classify_layout decision: split")
+            if is_split_candidate and at_least_one_speaks:
+                logger.info("classify_layout decision: split (opposing halves with speaking activity)")
                 return "split"
-            else:
-                # If they overlap in time but are not split screen, prefer reframe (active speaker tracking)
-                # over letterbox unless the faces are too small.
-                tidx1, tr1 = columns[0]["tracks"][0]
-                tidx2, tr2 = columns[1]["tracks"][0]
-                avg_face_width_pct1 = np.mean(tr1["proc_track"]["s"]) / width
-                avg_face_width_pct2 = np.mean(tr2["proc_track"]["s"]) / width
 
-                if avg_face_width_pct1 < 0.022 or avg_face_width_pct2 < 0.022:
-                    logger.info(
-                        "classify_layout decision: letterbox (faces are too small for reframe: %.2f%%, %.2f%%)",
-                        avg_face_width_pct1 * 100,
-                        avg_face_width_pct2 * 100,
-                    )
-                    return "letterbox"
+            # Faces too small for reframe → letterbox
+            tidx1, tr1 = columns[0]["tracks"][0]
+            tidx2, tr2 = columns[1]["tracks"][0]
+            avg_face_width_pct1 = np.mean(tr1["proc_track"]["s"]) / width
+            avg_face_width_pct2 = np.mean(tr2["proc_track"]["s"]) / width
 
+            if avg_face_width_pct1 < 0.022 or avg_face_width_pct2 < 0.022:
                 logger.info(
-                    "classify_layout decision: reframe (2 columns overlapping in time but not split-screen candidate. centered=%s, speaking=%s)",
-                    has_centered_speaker,
-                    both_columns_speak,
+                    "classify_layout decision: letterbox (faces too small: %.2f%%, %.2f%%)",
+                    avg_face_width_pct1 * 100,
+                    avg_face_width_pct2 * 100,
                 )
-                return "reframe"
+                return "letterbox"
+
+            logger.info("classify_layout decision: reframe (2 columns, not split candidate)")
+            return "reframe"
 
         else:
             logger.info("classify_layout decision: letterbox (3+ columns)")
             return "letterbox"
+
 
     # ─────────────────────────────────────────────────────────────────
     #  Track + score (face tracking + ASD)
@@ -452,9 +411,9 @@ class AIReframe:
         duration: float,
         work_dir: str,
         fps: float = 25.0,
-        crop_mode: str = "reframe",
         audio_url: str | None = None,
-        is_preview: bool = False,
+        target_fps: float | None = None,
+        detect_skip: int = 1,
     ):
         import math
         import warnings
@@ -476,6 +435,25 @@ class AIReframe:
             category=UserWarning,
             module=r".*box_utils.*",
         )
+
+        if not hasattr(self, "DET") or self.DET is None:
+            import sys
+            if "/root/asd" not in sys.path:
+                sys.path.append("/root/asd")
+            from model.faceDetector.s3fd import S3FD
+            self.DET = S3FD(device="cuda" if torch.cuda.is_available() else "cpu")
+
+        if not hasattr(self, "ASD_MODEL") or self.ASD_MODEL is None:
+            import sys
+            if "/root/asd" not in sys.path:
+                sys.path.append("/root/asd")
+            from ASD import ASD
+            self.ASD_MODEL = ASD()
+            if os.path.exists("/root/asd/weight/finetuning_TalkSet.model"):
+                self.ASD_MODEL.loadParameters("/root/asd/weight/finetuning_TalkSet.model")
+            self.ASD_MODEL.eval()
+            if torch.cuda.is_available():
+                self.ASD_MODEL.cuda()
 
         pyavi_path = os.path.join(work_dir, "pyavi")
         pyframes_path = os.path.join(work_dir, "pyframes")
@@ -501,10 +479,6 @@ class AIReframe:
             "stream=width,height",
             "-of",
             "csv=p=0:s=x",
-            "-ss",
-            str(start_time),
-            "-t",
-            str(duration),
             video_url,
         ]
         probe_out = subprocess.run(
@@ -816,25 +790,24 @@ class AIReframe:
 
             scenes = [(_FakeTimecode(0), _FakeTimecode(total_frames))]
 
-        # 5. Detect faces per frame (IN-MEMORY, no disk reads)
-        #    PERF: Skip every 4th frame universally — faces barely move between
-        #    consecutive 25fps frames. Combined with in-memory frames this
-        #    cuts detection time by ~75%.
-        _DETECT_SKIP = 4  # process every Nth frame (was 2 for non-preview)
-        detected_faces = []
-        _prev_frame_faces = []
-        for fidx in range(total_frames):
-            if fidx % _DETECT_SKIP != 0:
-                # Reuse previous detections with updated frame index
-                detected_faces.append(
-                    [
-                        {"frame": fidx, "bbox": list(f["bbox"]), "conf": f["conf"]}
-                        for f in _prev_frame_faces
-                    ]
-                )
-                continue
+        # Extract starting frame of every scene cut for 0ms delay re-detection
+        scene_cut_frames = {shot[0].get_frames() for shot in scenes}
 
-            img = frames_mem[fidx]
+        # 5. Detect faces per frame (IN-MEMORY, hybrid keyframing with smooth linear interpolation)
+        _DETECT_SKIP = max(1, int(detect_skip))
+        detected_faces = [None] * total_frames
+
+        # Identify keyframe indices where face detection must run
+        keyframe_indices = []
+        for fidx in range(total_frames):
+            is_scene_cut = fidx in scene_cut_frames
+            if fidx == 0 or fidx == total_frames - 1 or is_scene_cut or (_DETECT_SKIP > 1 and fidx % _DETECT_SKIP == 0):
+                keyframe_indices.append(fidx)
+        keyframe_indices = sorted(list(set(keyframe_indices)))
+
+        # Run face detection on keyframes
+        for kidx in keyframe_indices:
+            img = frames_mem[kidx]
             h, w = img.shape[:2]
             if h > 640:
                 scale = 640 / h
@@ -852,10 +825,68 @@ class AIReframe:
                     conf_th=0.4,
                     scales=[1.0],
                 )
-            _prev_frame_faces = [
-                {"frame": fidx, "bbox": b[:-1].tolist(), "conf": b[-1]} for b in res
+            detected_faces[kidx] = [
+                {"frame": kidx, "bbox": b[:-1].tolist(), "conf": float(b[-1])} for b in res
             ]
-            detected_faces.append(_prev_frame_faces)
+
+        # Fill intermediate frames via linear interpolation between keyframes
+        for i in range(len(keyframe_indices) - 1):
+            fa = keyframe_indices[i]
+            fb = keyframe_indices[i + 1]
+            gap = fb - fa
+            if gap <= 1:
+                continue
+
+            faces_a = detected_faces[fa]
+            faces_b = detected_faces[fb]
+
+            # If either side is a scene cut cutpoint, don't interpolate across shot boundary
+            if fb in scene_cut_frames:
+                for step in range(1, gap):
+                    fidx = fa + step
+                    detected_faces[fidx] = [
+                        {"frame": fidx, "bbox": list(f["bbox"]), "conf": f["conf"]}
+                        for f in faces_a
+                    ]
+                continue
+
+            # Linear interpolation for matching bboxes
+            for step in range(1, gap):
+                fidx = fa + step
+                alpha = step / float(gap)
+                frame_faces = []
+                used_b = set()
+
+                for f_a in faces_a:
+                    box_a = f_a["bbox"]
+                    best_b_idx = None
+                    best_iou = 0.0
+                    for b_idx, f_b in enumerate(faces_b):
+                        if b_idx in used_b:
+                            continue
+                        box_b = f_b["bbox"]
+                        xA, yA = max(box_a[0], box_b[0]), max(box_a[1], box_b[1])
+                        xB, yB = min(box_a[2], box_b[2]), min(box_a[3], box_b[3])
+                        inter = max(0, xB - xA) * max(0, yB - yA)
+                        areaA = (box_a[2] - box_a[0]) * (box_a[3] - box_a[1])
+                        areaB = (box_b[2] - box_b[0]) * (box_b[3] - box_b[1])
+                        iou = inter / float(areaA + areaB - inter) if (areaA + areaB - inter) > 0 else 0
+                        if iou > 0.25 and iou > best_iou:
+                            best_iou = iou
+                            best_b_idx = b_idx
+
+                    if best_b_idx is not None:
+                        used_b.add(best_b_idx)
+                        box_b = faces_b[best_b_idx]["bbox"]
+                        interp_box = [
+                            (1 - alpha) * box_a[k] + alpha * box_b[k] for k in range(4)
+                        ]
+                        interp_conf = (1 - alpha) * f_a["conf"] + alpha * faces_b[best_b_idx]["conf"]
+                        frame_faces.append({"frame": fidx, "bbox": interp_box, "conf": interp_conf})
+                    else:
+                        frame_faces.append({"frame": fidx, "bbox": list(box_a), "conf": f_a["conf"]})
+
+                detected_faces[fidx] = frame_faces
 
         # 6. Build tracks per scene
         all_tracks = []
@@ -899,7 +930,7 @@ class AIReframe:
             # Assume speaking for entire track (score = 1.0)
             all_scores = [np.ones(len(tr["frame"]))]
         else:
-            with ThreadPoolExecutor(max_workers=4) as ex:
+            with ThreadPoolExecutor(max_workers=8) as ex:
                 futures = {
                     ex.submit(_crop, (i, t)): i for i, t in enumerate(all_tracks)
                 }
@@ -957,14 +988,30 @@ class AIReframe:
                     all_scores.append(np.zeros(track_frame_count))
                     continue
 
+                # crop_video() writes one frame per NATIVE video frame, but
+                # TalkNet's audio frontend always emits embeddings at a fixed
+                # 25Hz. Feeding native-fps video straight into the visual
+                # frontend desyncs the two streams: the window slicing below
+                # assumes matching rates and silently keeps only the front
+                # `25/native_fps` fraction of each window's video, dropping
+                # the rest (not erroring). Resample to ANALYSIS_FPS first.
+                native_fps = fps if fps and fps > 0 else ANALYSIS_FPS
+                if abs(native_fps - ANALYSIS_FPS) > 0.5:
+                    duration_s = len(vf) / native_fps
+                    n_resampled = max(1, int(round(duration_s * ANALYSIS_FPS)))
+                    resample_idx = np.linspace(0, len(vf) - 1, n_resampled).round().astype(int)
+                    vf_analysis = vf[resample_idx]
+                else:
+                    vf_analysis = vf
+
                 audio_steps = af.shape[0] // 4 * 4
-                video_steps = int(vf.shape[0] / fps * 100) // 4 * 4
+                video_steps = int(vf_analysis.shape[0] / ANALYSIS_FPS * 100) // 4 * 4
 
                 n_audio_steps = min(audio_steps, video_steps)
-                n_video_frames = int(n_audio_steps / 100.0 * fps)
+                n_video_frames = int(n_audio_steps / 100.0 * ANALYSIS_FPS)
 
                 af = af[:n_audio_steps, :]
-                vf = vf[:n_video_frames, :, :]
+                vf_analysis = vf_analysis[:n_video_frames, :, :]
 
                 if n_audio_steps == 0 or n_video_frames == 0:
                     all_scores.append(np.zeros(track_frame_count))
@@ -974,7 +1021,7 @@ class AIReframe:
 
                 with torch.no_grad():
                     inA_full = torch.FloatTensor(af).unsqueeze(0).cuda()
-                    inV_full = torch.FloatTensor(vf).unsqueeze(0).cuda()
+                    inV_full = torch.FloatTensor(vf_analysis).unsqueeze(0).cuda()
                     eA_full = self.ASD_MODEL.model.forward_audio_frontend(inA_full)
                     eV_full = self.ASD_MODEL.model.forward_visual_frontend(inV_full)
 
@@ -985,8 +1032,10 @@ class AIReframe:
                     for i in range(batch):
                         a_start = i * dur * 25
                         a_end = (i + 1) * dur * 25
-                        v_start = int(round(i * dur * fps))
-                        v_end = int(round((i + 1) * dur * fps))
+                        # Both streams now share ANALYSIS_FPS — same slice as
+                        # a_start/a_end, kept separate for clarity.
+                        v_start = int(round(i * dur * ANALYSIS_FPS))
+                        v_end = int(round((i + 1) * dur * ANALYSIS_FPS))
 
                         eA = eA_full[:, a_start:a_end, :]
                         eV = eV_full[:, v_start:v_end, :]
@@ -1009,13 +1058,24 @@ class AIReframe:
 
                 if tr_scores:
                     min_len = min(len(s) for s in tr_scores)
-                    all_scores.append(
-                        np.round(
-                            np.mean([s[:min_len] for s in tr_scores], axis=0), 1
-                        ).astype(float)
-                    )
+                    scores_25hz = np.round(
+                        np.mean([s[:min_len] for s in tr_scores], axis=0), 1
+                    ).astype(float)
                 else:
-                    all_scores.append(np.zeros(track_frame_count))
+                    scores_25hz = np.zeros(0)
+
+                # scores_25hz is at ANALYSIS_FPS — upsample onto the native
+                # per-frame grid so it's guaranteed 1:1 with track_frame_count,
+                # which is what analysis.json / render_vertical expect.
+                if len(scores_25hz) == 0:
+                    scores_arr = np.zeros(track_frame_count)
+                elif len(scores_25hz) == 1:
+                    scores_arr = np.full(track_frame_count, scores_25hz[0])
+                else:
+                    src_idx = np.linspace(0, track_frame_count - 1, num=len(scores_25hz))
+                    scores_arr = np.interp(np.arange(track_frame_count), src_idx, scores_25hz)
+
+                all_scores.append(scores_arr)
 
         scene_bounds = [(shot[0].get_frames(), shot[1].get_frames()) for shot in scenes]
 
@@ -1109,11 +1169,16 @@ class AIReframe:
         if ss > 0.0 or duration is not None:
             ss_val = max(0.0, ss)
             t_str = f" -t {duration}" if duration is not None else ""
-            # Inject -ss before input and -t after input
-            cap.ffmpeg_cmd = cap.ffmpeg_cmd.replace(
-                f' -i "{filename}"',
-                f' -ss {ss_val} -i "{filename}"{t_str}'
-            )
+            if ss_val > 0.0:
+                cap.ffmpeg_cmd = cap.ffmpeg_cmd.replace(
+                    f' -i "{filename}"',
+                    f' -ss {ss_val:.3f} -i "{filename}"{t_str}'
+                )
+            else:
+                cap.ffmpeg_cmd = cap.ffmpeg_cmd.replace(
+                    f' -i "{filename}"',
+                    f' -i "{filename}"{t_str}'
+                )
             # Recompute total count if duration is specified
             if duration is not None:
                 cap.count = min(cap.count, int(duration * cap.fps))
@@ -1147,22 +1212,16 @@ class AIReframe:
 
         # Build per-frame face lists (with averaged scores) for sticky-speaker logic
         faces = [[] for _ in range(max_frames)]
+        # Rolling median smoothing buffer for raw face coordinates per track (filters S3FD detection noise)
+        track_coord_buffers = {tidx_item: deque(maxlen=5) for tidx_item in range(len(tracks))}
+
         for tidx, tr in enumerate(tracks):
             sc = scores[tidx]
 
             # --- FAKE FACE FILTER ---
-            # Posters, statues, and background extras who never speak will have near-zero ASD scores.
-            # Real speakers will have a track max score > 0.5. Even listening guests will move slightly.
-            track_max_score = float(np.max(sc)) if len(sc) > 0 else 0.0
-            xs = tr["proc_track"]["x"]
-            ys = tr["proc_track"]["y"]
-            std_x = float(np.std(xs)) if len(xs) > 0 else 0.0
-            std_y = float(np.std(ys)) if len(ys) > 0 else 0.0
-            movement = std_x + std_y
-
-            sizes = tr["proc_track"]["s"]
-            mean_size = float(np.mean(sizes)) if len(sizes) > 0 else 1.0
-            rel_movement = movement / mean_size if mean_size > 0 else 0.0
+            # Source frame height for thresholding
+            src_h = frames_mem[0].shape[0] if (frames_mem is not None and len(frames_mem) > 0) else 2160.0
+            is_valid, track_max_score, movement, rel_movement, mean_size = is_valid_face_track(tr, sc, frame_height=src_h)
 
             logger.info(
                 "Track %d evaluation: max_score=%.3f, movement=%.3f, rel_movement=%.3f, mean_size=%.3f",
@@ -1173,17 +1232,7 @@ class AIReframe:
                 mean_size,
             )
 
-            # Aggressively filter out fake faces (posters, skulls, t-shirts, toys)
-            # 1. Purge tiny tracks (mean size < 50 pixels) which are noise/background elements
-            # 2. Purge silent tracks (score < 0.15) that don't show real movement (movement < 15.0 px or rel_movement < 0.12)
-            is_fake = False
-            if mean_size < 25.0:
-                is_fake = True
-            elif track_max_score < 0.12:
-                if movement < 5.0 and rel_movement < 0.05:
-                    is_fake = True
-
-            if is_fake:
+            if not is_valid:
                 logger.info(
                     "Purged fake face track %d (score %.2f, move %.2f, rel_move %.3f, size %.1f)",
                     tidx,
@@ -1194,38 +1243,102 @@ class AIReframe:
                 )
                 continue
 
-            for fidx, f in enumerate(tr["track"]["frame"]):
+            # Interpolate sparse keyframes (e.g. 5fps detect_skip) to every frame in the track range
+            tr_frames = np.array(tr["track"]["frame"], dtype=int)
+            tr_x = np.array(tr["proc_track"]["x"], dtype=float)
+            tr_y = np.array(tr["proc_track"]["y"], dtype=float)
+            tr_s = np.array(tr["proc_track"]["s"], dtype=float)
+            tr_scores = np.array(sc, dtype=float)
+
+            min_len = min(len(tr_frames), len(tr_x), len(tr_y), len(tr_s), len(tr_scores))
+            if min_len == 0:
+                continue
+
+            tr_frames = tr_frames[:min_len]
+            tr_x = tr_x[:min_len]
+            tr_y = tr_y[:min_len]
+            tr_s = tr_s[:min_len]
+            tr_scores = tr_scores[:min_len]
+
+            min_f = max(0, tr_frames[0])
+            max_f = min(max_frames - 1, tr_frames[-1])
+
+            if len(tr_frames) > 1 and max_f > min_f:
+                all_f = np.arange(min_f, max_f + 1)
+                interp_x = np.interp(all_f, tr_frames, tr_x)
+                interp_y = np.interp(all_f, tr_frames, tr_y)
+                interp_s = np.interp(all_f, tr_frames, tr_s)
+                interp_sc = np.interp(all_f, tr_frames, tr_scores)
+            else:
+                all_f = np.array([min_f])
+                interp_x = tr_x[:1]
+                interp_y = tr_y[:1]
+                interp_s = tr_s[:1]
+                interp_sc = tr_scores[:1]
+
+            for i, f in enumerate(all_f):
                 if f >= max_frames:
                     continue
-                # Level 100: Responsive 7-frame speech window (0.28s total) to avoid laggy cuts/zooms.
-                score_window = sc[max(fidx - 7, 0) : min(fidx + 7, len(sc))]
+                score_window = interp_sc[max(i - 7, 0) : min(i + 7, len(interp_sc))]
                 avg = float(np.mean(score_window)) if len(score_window) > 0 else 0
+
+                fx = float(interp_x[i])
+                fy = float(interp_y[i])
+                fs = float(interp_s[i])
+
+                src_w = frames_mem[0].shape[1] if (frames_mem is not None and len(frames_mem) > 0) else 3840.0
+                dist_from_center_x = abs(fx - (src_w / 2.0)) / (src_w / 2.0)
+                central_bias = max(0.85, 1.0 - 0.15 * dist_from_center_x)
+                weighted_score = avg * central_bias
+
                 faces[f].append(
                     {
-                        "score": avg,
-                        "x": tr["proc_track"]["x"][fidx],
-                        "y": tr["proc_track"]["y"][fidx],
-                        "s": tr["proc_track"]["s"][fidx],
+                        "score": weighted_score,
+                        "x": fx,
+                        "y": fy,
+                        "s": fs,
                         "tidx": tidx,
                     }
                 )
 
-        if duration is not None:
-            logger.info(
-                "Limiting frames to %d (duration=%.2fs at %.2ffps)",
-                max_frames,
-                duration,
-                fps,
-            )
+        # Pre-identify primary speaker track across the entire clip for instant 0ms framing lock
+        valid_tracks = []
+        for tidx, tr in enumerate(tracks):
+            sc = scores[tidx]
+            src_h = frames_mem[0].shape[0] if (frames_mem is not None and len(frames_mem) > 0) else 2160.0
+            is_valid, track_max_score, movement, rel_movement, mean_size = is_valid_face_track(tr, sc, frame_height=src_h)
+            if is_valid:
+                valid_tracks.append((tidx, tr, track_max_score, len(tr["track"]["frame"])))
 
-        sorted_by_len = sorted(
-            tracks, key=lambda t: len(t["track"]["frame"]), reverse=True
-        )
+        # Sort valid tracks by max ASD score (primary active speaker first), then track duration
+        valid_tracks.sort(key=lambda item: (item[2], item[3]), reverse=True)
+
+        primary_speaker_init_x = None
+        primary_speaker_init_y = None
+        primary_speaker_init_s = None
+
+        if valid_tracks:
+            # If there is an active face detected directly on frame 0, lock to it immediately
+            frame_0_faces = faces[0] if len(faces) > 0 else []
+            if frame_0_faces:
+                best_f0 = max(frame_0_faces, key=lambda f: f["score"])
+                primary_speaker_init_x = float(best_f0["x"])
+                primary_speaker_init_y = float(best_f0["y"])
+                primary_speaker_init_s = float(best_f0["s"])
+            else:
+                best_init_track = max(valid_tracks, key=lambda vt: (scores[vt[0]][0] if len(scores[vt[0]]) > 0 else 0, vt[2]))
+                top_tidx, top_tr, _, _ = best_init_track
+                primary_speaker_init_x = float(top_tr["proc_track"]["x"][0])
+                primary_speaker_init_y = float(top_tr["proc_track"]["y"][0])
+                primary_speaker_init_s = float(top_tr["proc_track"]["s"][0])
+            logger.info("Pre-locked primary speaker at initial pos: x=%.1f, y=%.1f", primary_speaker_init_x, primary_speaker_init_y)
+
+        sorted_by_len = [vt[1] for vt in valid_tracks]
         has_speaker = len(sorted_by_len) >= 1
         full_x_solo = None
         if has_speaker:
-            full_x_solo = self.get_smooth_x_for_track(sorted_by_len[0], len(frames_mem))
-            logger.info("Solo speaker locking enabled (%d tracks)", len(tracks))
+            full_x_solo = self.get_smooth_x_for_track(sorted_by_len[0], max_frames)
+            logger.info("Solo speaker locking enabled (%d valid tracks)", len(valid_tracks))
 
         temp_v = os.path.join(pyavi_path, "v.mp4")
 
@@ -1245,10 +1358,10 @@ class AIReframe:
         prev_target_cx = None
         speaker_hold_frames = int(fps * SPEAKER_HOLD_SECONDS)
         frames_since_active = 0
-        held_speaker_x = None
-        held_speaker_y = None
-        held_speaker_s = None
-        held_speaker_zoom = 0.115
+        held_speaker_x = primary_speaker_init_x
+        held_speaker_y = primary_speaker_init_y
+        held_speaker_s = primary_speaker_init_s
+        held_speaker_zoom = 0.098
         current_track_id = None
 
         # --- split-screen state (Vizard-style independent crop per person) ---
@@ -1270,14 +1383,6 @@ class AIReframe:
         current_s_reframe = None
         current_target_cy_reframe = None
         current_target_s_reframe = None
-
-        # --- course layout state ---
-        current_cx_course = None
-        current_cy_course = None
-        current_s_course = None
-        current_target_cx_course = None
-        current_target_cy_course = None
-        current_target_s_course = None
 
         # Hysteresis to prevent conversational whiplash. Level 100: Snappier 0.8s minimum cut lock.
         MIN_CUT_FRAMES = int(fps * 0.8)
@@ -1311,8 +1416,8 @@ class AIReframe:
         # Pre-compute layout per frame based on strict scene boundaries.
         # This completely prevents "random" layout changes mid-scene.
         frame_layout = ["single"] * max_frames
-        if crop_mode in ("split", "course", "letterbox"):
-            mapped = "split" if crop_mode == "split" else ("course" if crop_mode == "course" else "letterbox")
+        if crop_mode in ("split", "letterbox"):
+            mapped = crop_mode
             frame_layout = [mapped] * max_frames
         else:
             # crop_mode is either "auto" or "reframe"
@@ -1330,23 +1435,13 @@ class AIReframe:
                     
                     if scene_crop == "reframe":
                         mapped = "single"
-                    elif scene_crop == "split":
-                        mapped = "split"
-                    elif scene_crop == "course":
-                        mapped = "course"
+                    elif scene_crop in ("split", "letterbox"):
+                        mapped = scene_crop
                     else:
-                        mapped = "letterbox"
+                        mapped = "single"
                 else:
-                    # crop_mode is "reframe"
-                    has_faces = any(len(faces[f]) > 0 for f in range(sf, ef))
-                    if not has_faces:
-                        mapped = "letterbox"
-                    else:
-                        two_face_frames = sum(1 for f in range(sf, ef) if len(faces[f]) >= 2)
-                        if (two_face_frames / scene_len) > 0.30:
-                            mapped = "split"
-                        else:
-                            mapped = "single"
+                    # crop_mode is "reframe" - strictly single vertical panning layout
+                    mapped = "single"
                 
                 for f in range(sf, ef):
                     frame_layout[f] = mapped
@@ -1393,19 +1488,32 @@ class AIReframe:
 
                 scale = 1920 / img.shape[0]
 
-                # Strict Mode Enforcement
+                # Dynamic layout dispatch from pre-computed per-scene classification
                 current_layout = frame_layout[fidx]
                 use_multi_face_letterbox = current_layout == "letterbox"
-                use_course_layout = current_layout == "course"
-
-                # Perfect Layout Snap based on Scene Boundaries
                 use_split_screen = current_layout == "split"
+
+                # Reset split-screen tracking state on layout transitions to prevent stale camera positions
+                if use_split_screen and fidx > 0 and frame_layout[fidx - 1] != "split":
+                    split_cx_top = None
+                    split_cy_top = None
+                    split_s_top = None
+                    split_target_cx_top = None
+                    split_target_cy_top = None
+                    split_target_s_top = None
+                    split_cx_bottom = None
+                    split_cy_bottom = None
+                    split_s_bottom = None
+                    split_target_cx_bottom = None
+                    split_target_cy_bottom = None
+                    split_target_s_bottom = None
 
                 # --- Look-ahead Interjection Filter ---
                 # If the current "best" speaker is different from the last one,
                 # verify they continue speaking for at least 10 frames before switching.
                 # This prevents the camera from bouncing for a "Yeah" or "Right".
-                look_ahead_frames = 12
+                # Minimum Stability Duration: 8-frame (~300ms) look-ahead window prevents back-and-forth bouncing on brief interjections
+                look_ahead_frames = 8
                 potential_best = None
                 if faces[fidx]:
                     potential_best = max(faces[fidx], key=lambda x: x["score"])
@@ -1416,13 +1524,11 @@ class AIReframe:
                     and current_track_id is not None
                     and potential_best["tidx"] != current_track_id
                 ):
-                    # New speaker detected — check future frames
                     active_count = 0
                     for i in range(1, look_ahead_frames + 1):
                         future_idx = fidx + i
                         if future_idx >= max_frames:
                             break
-                        # If this speaker appears in future frames with high score
                         future_faces = faces[future_idx]
                         if any(
                             f["tidx"] == potential_best["tidx"]
@@ -1434,31 +1540,30 @@ class AIReframe:
                     if active_count < (look_ahead_frames // 2):
                         is_interjection = True
 
-                # Sticky-speaker selection: prefer staying on the current track unless
-                # it goes clearly silent, to prevent cross-talk bouncing.
+                # Sticky-speaker selection for multi-speaker overlap arbitration (mic holder & score margin priority):
                 if faces[fidx] and not is_interjection:
                     if current_track_id is not None:
                         same_track = [
                             f for f in faces[fidx] if f["tidx"] == current_track_id
                         ]
-                        # Level 100: Interruption Override
-                        # If the other speaker interrupts loudly (> 0.75 score) and the current speaker is silent (< 0.4 score),
-                        # override the minimum cut frames lock and switch immediately.
-                        is_interruption_overriding = (
-                            potential_best
-                            and same_track
-                            and potential_best["score"] > 0.75
-                            and same_track[0]["score"] < 0.4
-                        )
-                        # Hold current speaker if we haven't spent enough frames on them yet
-                        if (
-                            same_track
-                            and (
-                                same_track[0]["score"] > ACTIVE_SPEAKER_THRESHOLD * 0.7
-                                or frames_on_current_speaker < MIN_CUT_FRAMES
-                            )
-                            and not is_interruption_overriding
-                        ):
+                        # Prioritize primary audio source / larger face size (microphone holder) in overlap scenarios
+                        # Require a minimum score margin of 0.15 + face size weighting before switching
+                        if potential_best and potential_best["score"] > 0.45:
+                            current_score = same_track[0]["score"] if same_track else 0.0
+                            current_size = same_track[0]["s"] if same_track else 1.0
+                            pot_size = potential_best["s"]
+                            
+                            # Size bonus multiplier: larger face (mic holder / closer) gets up to 10% boost
+                            size_ratio = pot_size / max(current_size, 1.0)
+                            size_bonus = 0.05 if size_ratio > 1.15 else 0.0
+                            
+                            if not same_track or (potential_best["score"] + size_bonus > current_score + 0.15):
+                                best = potential_best
+                            elif same_track and same_track[0]["score"] > ACTIVE_SPEAKER_THRESHOLD * 0.5:
+                                best = same_track[0]
+                            else:
+                                best = potential_best
+                        elif same_track and same_track[0]["score"] > ACTIVE_SPEAKER_THRESHOLD * 0.5:
                             best = same_track[0]
                         else:
                             best = potential_best
@@ -1481,11 +1586,11 @@ class AIReframe:
                     held_speaker_y = best["y"]
                     held_speaker_s = best["s"]
 
-                    # Level 100 zoom lock
+                    # Level 100 zoom lock (widened by ~15% to preserve hand gestures and upper body context)
                     if best.get("score", 0) > 0.75:
-                        held_speaker_zoom = 0.145
+                        held_speaker_zoom = 0.125
                     else:
-                        held_speaker_zoom = 0.115
+                        held_speaker_zoom = 0.098
 
                     frames_since_active = 0
                     target_cx = int(held_speaker_x * scale)
@@ -1571,149 +1676,36 @@ class AIReframe:
                     bg[start_y : start_y + H, start_x : start_x + W] = res
                     vout.write(bg)
 
-                elif use_course_layout:
-                    bg = np.zeros((1920, 1080, 3), dtype=np.uint8)
-                    # 1. Scale and fit the main slide area on the top half.
-                    scale_top = 1080.0 / img.shape[1]
-                    if img.shape[0] * scale_top > 960:
-                        scale_top = 960.0 / img.shape[0]
-                    top_w = int(img.shape[1] * scale_top)
-                    top_h = int(img.shape[0] * scale_top)
-
-                    res_top = cv2.resize(img, (top_w, top_h), interpolation=cv2.INTER_AREA)
-                    start_x_top = (1080 - top_w) // 2
-                    start_y_top = (960 - top_h) // 2
-                    bg[
-                        start_y_top : start_y_top + top_h, start_x_top : start_x_top + top_w
-                    ] = res_top
-
-                    # 2. Render the face-tracked close-up of the presenter in the bottom half.
-                    target_cx_course = None
-                    target_cy_course = None
-                    target_s_course = None
-
-                    if best is not None:
-                        target_cx_course = best["x"]
-                        target_cy_course = best["y"]
-                        target_s_course = best["s"]
-                    elif fidx < len(faces) and len(faces[fidx]) > 0:
-                        # Fallback to the largest face if no active speaker face is tracked
-                        largest_face = max(faces[fidx], key=lambda x: x.get("s", 0))
-                        target_cx_course = largest_face["x"]
-                        target_cy_course = largest_face["y"]
-                        target_s_course = largest_face["s"]
-
-                    if target_cx_course is not None:
-                        if current_cx_course is None:
-                            current_cx_course = float(target_cx_course)
-                            current_cy_course = float(target_cy_course)
-                            current_s_course = float(target_s_course)
-                            current_target_cx_course = float(target_cx_course)
-                            current_target_cy_course = float(target_cy_course)
-                            current_target_s_course = float(target_s_course)
-                        else:
-                            # 15px dead-zone on position shifts
-                            COURSE_DEAD_ZONE = 15.0
-                            if (
-                                abs(target_cx_course - current_target_cx_course)
-                                > COURSE_DEAD_ZONE
-                            ):
-                                current_target_cx_course = float(target_cx_course)
-                            if (
-                                abs(target_cy_course - current_target_cy_course)
-                                > COURSE_DEAD_ZONE
-                            ):
-                                current_target_cy_course = float(target_cy_course)
-
-                            # 10% dead-zone on scale shifts
-                            if abs(target_s_course - current_target_s_course) > (
-                                current_target_s_course * 0.10
-                            ):
-                                current_target_s_course = float(target_s_course)
-
-                            # Slow smoothing: tripod feel. Snappy course pan: 0.12
-                            COURSE_ALPHA = 0.12
-                            current_cx_course += (
-                                current_target_cx_course - current_cx_course
-                            ) * COURSE_ALPHA
-                            current_cy_course += (
-                                current_target_cy_course - current_cy_course
-                            ) * COURSE_ALPHA
-                            current_s_course += (
-                                current_target_s_course - current_s_course
-                            ) * COURSE_ALPHA
-                    else:
-                        # Fallback to absolute center of video if no faces exist in the video segment at all
-                        if current_cx_course is None:
-                            current_cx_course = img.shape[1] / 2.0
-                            current_cy_course = img.shape[0] / 2.0
-                            current_s_course = img.shape[1] * 0.15  # assume 15% face width
-                            current_target_cx_course = img.shape[1] / 2.0
-                            current_target_cy_course = img.shape[0] / 2.0
-                            current_target_s_course = img.shape[1] * 0.15
-
-                    # We target a 20% face-to-frame ratio in a 1080x960 layout.
-                    # Face size in crop should scale to 960 * 0.20 = 192px.
-                    target_face_h = 960.0 * 0.20
-                    scale_bottom = target_face_h / current_s_course
-
-                    # Calculate corresponding crop size in original image space
-                    crop_w = 1080.0 / scale_bottom
-                    crop_h = 960.0 / scale_bottom
-
-                    # Clamp crop sizes to image boundaries
-                    crop_w = min(crop_w, img.shape[1])
-                    crop_h = min(crop_h, img.shape[0])
-
-                    # Keep exactly 1080:960 aspect ratio
-                    if crop_w * 960.0 > crop_h * 1080.0:
-                        crop_w = crop_h * (1080.0 / 960.0)
-                    else:
-                        crop_h = crop_w * (960.0 / 1080.0)
-
-                    # Centered coordinates
-                    x1 = current_cx_course - crop_w / 2.0
-                    y1 = current_cy_course - crop_h / 2.0
-
-                    # Clamp bounding box
-                    x1 = max(0.0, min(x1, img.shape[1] - crop_w))
-                    y1 = max(0.0, min(y1, img.shape[0] - crop_h))
-                    x2 = x1 + crop_w
-                    y2 = y1 + crop_h
-
-                    # Crop and resize
-                    crop_bottom = img[int(y1) : int(y2), int(x1) : int(x2)]
-                    res_bottom = cv2.resize(
-                        crop_bottom, (1080, 960), interpolation=cv2.INTER_AREA
-                    )
-
-                    # Paste in bottom half
-                    bg[960:1920, 0:1080] = res_bottom
-
-                    # Draw a clean 4px black divider line at y = 960
-                    cv2.line(bg, (0, 960), (1080, 960), (0, 0, 0), 4)
-
-                    vout.write(bg)
-
                 elif use_split_screen:
-                    # --- Vizard-style: independent face-focused crop per person ---
+                    # --- Vizard/Opus-style: Dynamic Multi-Speaker ASD Split Layout ---
                     face_top = None
                     face_bottom = None
 
-                    if fidx < len(faces) and len(faces[fidx]) >= 2:
-                        largest_faces = sorted(
-                            faces[fidx], key=lambda x: x.get("s", 0), reverse=True
-                        )[:2]
-                        # Left person → top half, right person → bottom half
-                        sorted_lr = sorted(largest_faces, key=lambda x: x["x"])
-                        face_top = sorted_lr[0]
-                        face_bottom = sorted_lr[1]
-                    elif fidx < len(faces) and len(faces[fidx]) == 1:
-                        f = faces[fidx][0]
-                        if f["x"] < img.shape[1] / 2.0:
-                            face_top = f
-                        else:
-                            face_bottom = f
+                    if fidx < len(faces) and len(faces[fidx]) > 0:
+                        # Filter faces by ASD active speech score
+                        active_faces = [f for f in faces[fidx] if f.get("score", 0) > ACTIVE_SPEAKER_THRESHOLD]
+                        if not active_faces:
+                            # Fallback to faces sorted by ASD score, then size
+                            active_faces = sorted(faces[fidx], key=lambda x: (x.get("score", 0), x.get("s", 0)), reverse=True)
+
+                        if len(active_faces) >= 2:
+                            # Pick 2 distinct active speakers across left and right sides of the stage
+                            top_two = active_faces[:2]
+                            sorted_lr = sorted(top_two, key=lambda x: x["x"])
+                            face_top = sorted_lr[0]
+                            face_bottom = sorted_lr[1]
+                        elif len(active_faces) == 1:
+                            face_top = active_faces[0]
+                            other_faces = [f for f in faces[fidx] if f["tidx"] != face_top["tidx"]]
+                            if other_faces:
+                                face_bottom = max(other_faces, key=lambda x: x.get("s", 0))
+                            else:
+                                # Keep previous distinct bottom speaker if available
+                                face_bottom = None
+
+                    # Prevent duplicate slot framing: if top and bottom are too close horizontally, offset bottom
+                    if face_top and face_bottom and abs(face_top["x"] - face_bottom["x"]) < 100.0:
+                        face_bottom = None
 
                     # Smooth tracking — top person (with dead-zones and tripod-like SPLIT_ALPHA = 0.03)
                     if face_top is not None:
@@ -1792,18 +1784,15 @@ class AIReframe:
 
                     # We iterate over top (left speaker) and bottom (right speaker) slots
                     for is_top, y_start in [(True, 0), (False, 960)]:
+                        sub_img = img  # Crop directly from full source frame to avoid slicing faces in half
                         if is_top:
-                            sub_img = img[:, 0 : img_w // 2]
                             cx = split_cx_top
                             cy = split_cy_top
                             s = split_s_top
-                            cx_offset = 0.0
                         else:
-                            sub_img = img[:, img_w // 2 : img_w]
                             cx = split_cx_bottom
                             cy = split_cy_bottom
                             s = split_s_bottom
-                            cx_offset = img_w / 2.0
 
                         sub_h, sub_w = sub_img.shape[:2]
 
@@ -1813,7 +1802,7 @@ class AIReframe:
                             cy_rel = sub_h / 2.0
                             s = sub_w * 0.15
                         else:
-                            cx_rel = cx - cx_offset
+                            cx_rel = cx
                             cy_rel = cy
 
                         # Ensure coordinates are within sub-image boundaries
@@ -1882,16 +1871,21 @@ class AIReframe:
                             else virtual_w * 0.08
                         )
 
-                    # Level 100: Scene cut hard reset (snap camera)
+                    # Level 100: Scene cut hard reset (snap camera ONLY on actual video scene edit cuts)
                     is_scene_start = fidx in scene_starts
 
-                    # Initialize or hard cut on speaker switch or scene boundary (prevents panning animation across edit cuts)
-                    if current_cx is None or speaker_switched or is_scene_start:
+                    # Initialize on first frame or hard cut ONLY on true scene edits (prevents 1s abrupt flicker on speaker switches)
+                    if current_cx is None or is_scene_start:
                         current_cx = float(target_cx)
                         current_target_cx = float(target_cx)
                         current_cy_reframe = float(target_cy)
                         current_target_cy_reframe = float(target_cy)
                         current_s_reframe = float(target_s)
+                        current_target_s_reframe = float(target_s)
+                    elif speaker_switched:
+                        # Smooth transition interpolation across speaker switches: glide viewport over ~6 frames instead of snapping
+                        current_target_cx = float(target_cx)
+                        current_target_cy_reframe = float(target_cy)
                         current_target_s_reframe = float(target_s)
 
                     # Dead-zone on X
@@ -1911,14 +1905,16 @@ class AIReframe:
                     ):
                         current_target_s_reframe = float(target_s)
 
-                    # Level 1000: Adaptive Easing & Camera Stabilization Lock
+                    # Level 1000: Sigmoid Adaptive Easing & Smooth Panning Transition
                     dist_x = abs(current_target_cx - current_cx)
                     if dist_x < 15.0:
-                        # Stabilization lock: completely lock camera to eliminate microscopic drift/jitter
+                        # Stabilization lock: lock camera on stationary speaker
                         adaptive_alpha = 0.0
                     else:
-                        # Dynamic easing: slow, smooth corrections for small movements, snappy catch-up for large movements
-                        adaptive_alpha = 0.02 + min((dist_x - 15.0) / 200.0, 1.0) * 0.10
+                        # Sigmoid S-curve acceleration/deceleration for fluid studio camera pan
+                        import math
+                        sigmoid_factor = 1.0 / (1.0 + math.exp(-0.025 * (dist_x - 150.0)))
+                        adaptive_alpha = 0.05 + 0.20 * sigmoid_factor
 
                     if adaptive_alpha > 0.0:
                         current_cx += (current_target_cx - current_cx) * adaptive_alpha
@@ -1927,22 +1923,30 @@ class AIReframe:
                         ) * (
                             adaptive_alpha * 0.5
                         )  # Dampen vertical movement by 50% for gimbal-like stability
-                        current_s_reframe += (
-                            current_target_s_reframe - current_s_reframe
-                        ) * (
-                            adaptive_alpha * 0.7
-                        )  # Dampen scale shifts to avoid constant sizing changes
+                        # Strong EMA smoothing on scale shifts (alpha 0.15) to eliminate micro-jitter and rapid zoom snaps
+                        current_s_reframe += (current_target_s_reframe - current_s_reframe) * 0.15
 
-                    # Premium level 100: AI Reaction Zoom
-                    # Locked to held_speaker_zoom to prevent single-frame zoom flickers when face drops
-                    face_size_pct = (
-                        held_speaker_zoom if held_speaker_zoom is not None else 0.115
-                    )
+                    # 15% Padding Margin: Wider crop (0.106 face_size_pct vs 0.125) to keep hands, mic & gestures unclipped
+                    face_size_pct = 0.106
 
                     person_scale = (1920.0 * face_size_pct) / max(current_s_reframe, 1.0)
                     min_s = max(1080.0 / virtual_w, 1920.0 / virtual_h)
+
+                    # Dynamic edge zoom adjust: widen crop slightly when speaker sits near extreme edges (x < 25% or > 75%)
+                    # to keep the speaker centered in the 9:16 frame without touching frame bounds
+                    dist_edge_x = min(current_cx, virtual_w - current_cx) / virtual_w
+                    if dist_edge_x < 0.25:
+                        min_s *= 0.88  # Widen crop by 12% so edge guests fit cleanly
+
                     person_scale = max(person_scale, min_s)
                     person_scale = min(person_scale, 4.0)
+
+                    # Frame Zero Margin Correction & Smooth Cosine Transition:
+                    # Expand horizontal crop by an extra 15% on opening frames (fidx < 15) with smooth easing away from frame 0
+                    if fidx < 15:
+                        import math
+                        ease_factor = 0.5 * (1.0 + math.cos(math.pi * (fidx / 15.0)))  # Smooth 1.0 -> 0.0 cosine easing curve
+                        person_scale *= (1.0 - 0.15 * ease_factor)
 
                     crop_w = 1080.0 / person_scale
                     crop_h = 1920.0 / person_scale
@@ -1957,9 +1961,9 @@ class AIReframe:
                     else:
                         crop_h = crop_w * (1920.0 / 1080.0)
 
-                    # Face positioned ~33% from the top
+                    # Face positioned at ~22% from top (upper third rule for high engagement vertical video)
                     x1_virtual = current_cx - crop_w / 2.0
-                    y1_virtual = current_cy_reframe - crop_h * 0.33
+                    y1_virtual = current_cy_reframe - crop_h * 0.22
 
                     # Bounds check in virtual space
                     x1_virtual = max(0.0, min(x1_virtual, virtual_w - crop_w))
@@ -2001,12 +2005,8 @@ class AIReframe:
                     pass
 
         vout.release()
-
-        import shutil
-
-        return frame_layout
-
         shutil.move(temp_v, output_path)
+        return frame_layout
 
     # ─────────────────────────────────────────────────────────────────
     #  Public endpoint
@@ -2044,8 +2044,7 @@ class AIReframe:
                     "Detected YouTube URL, downloading via yt-dlp (quality=%s)...",
                     req.quality,
                 )
-                seg_start = max(0.0, req.start_time - SEGMENT_DOWNLOAD_PAD_S)
-                vurl = download_youtube_video(
+                vurl, segment_offset = download_youtube_video(
                     vurl,
                     tmpdir,
                     start_time=req.start_time,
@@ -2053,23 +2052,27 @@ class AIReframe:
                     max_height=720 if is_preview else 1080,
                     skip_probe=is_preview,  # Still skip format probe for preview to save ~4s
                 )
-                segment_offset = seg_start
+            elif vurl.startswith("http://") or vurl.startswith("https://"):
+                logger.info("Downloading remote video from %s...", vurl[:100])
+                local_video = os.path.join(tmpdir, "input_video.mp4")
+                try:
+                    import requests
+                    with requests.get(vurl, stream=True, timeout=300) as r:
+                        r.raise_for_status()
+                        with open(local_video, "wb") as f:
+                            for chunk in r.iter_content(chunk_size=8192):
+                                if chunk:
+                                    f.write(chunk)
+                    vurl = local_video
+                except Exception as e:
+                    raise DownloadError(f"Failed to download video: {e}") from e
 
                 dl_size = os.path.getsize(vurl)
                 logger.info(
-                    "YouTube video downloaded to: %s (%.1f MB, segment_offset=%.1fs)",
+                    "Remote video downloaded to: %s (%.1f MB)",
                     vurl,
                     dl_size / (1024 * 1024),
-                    segment_offset,
                 )
-
-                all_files = list(Path(tmpdir).iterdir())
-                logger.info("Files in tmpdir after download (%d):", len(all_files))
-                for f in all_files:
-                    if f.is_file():
-                        logger.info(
-                            "  %s (%.1f MB)", f.name, f.stat().st_size / (1024 * 1024)
-                        )
 
             # Adjust start_time for the downloaded segment (0 offset for non-YT URLs)
             effective_start = req.start_time - segment_offset
@@ -2139,9 +2142,7 @@ class AIReframe:
                 duration_secs,
                 tmpdir,
                 fps=fps,
-                crop_mode=req.crop_mode,
                 audio_url=segment_audio,
-                is_preview=is_preview,
             )
             logger.info(
                 "Face tracking done in %.1fs, found %d tracks",
@@ -2151,14 +2152,15 @@ class AIReframe:
 
             # 4. Render vertical
             crop_mode = req.crop_mode
+            reported_crop_mode = crop_mode
             if crop_mode == "auto":
-                crop_mode = self.classify_layout(
+                reported_crop_mode = self.classify_layout(
                     tracks,
                     scores,
                     video_info.get("width", 1920),
                     video_info.get("height", 1080),
                 )
-                logger.info("Auto-detected layout: %s", crop_mode)
+                logger.info("Auto-detected layout (reported): %s", reported_crop_mode)
 
             orig_name = f"orig_{uuid.uuid4()}.mp4"
             local_orig = os.path.join(tmpdir, orig_name)
@@ -2178,6 +2180,9 @@ class AIReframe:
                 video_path=vurl,
                 start_time_in_video=effective_start,
             )
+
+            if not os.path.exists(local_orig) or os.path.getsize(local_orig) == 0:
+                raise RenderError(f"Render failed: output video file not found or empty at {local_orig}")
 
             # Annotate layout inside the transcript!
             if req.transcript:
@@ -2220,6 +2225,8 @@ class AIReframe:
                 "0:v:0",
                 "-map",
                 "1:a:0",
+                "-r",
+                str(fps),
                 "-c:v",
                 *video_codec,
                 "-pix_fmt",
@@ -2230,6 +2237,8 @@ class AIReframe:
                 "aac",
                 "-b:a",
                 "128k",
+                "-af",
+                "aresample=async=1000:min_hard_comp=0.100000:first_pts=0",
                 "-movflags",
                 "+faststart",
                 synced_output,
@@ -2324,7 +2333,7 @@ class AIReframe:
                 "preview_video_url": preview_video_url,
                 "thumbnail_url": thumbnail_url,
                 "caption_video_url": None,
-                "crop_mode": crop_mode,
+                "crop_mode": reported_crop_mode,
                 "source_width": actual_w,
                 "source_height": actual_h,
                 "transcript": req.transcript,
@@ -2362,13 +2371,10 @@ class AIReframe:
             global_end = max(c.end_time for c in req.clips)
 
             if is_youtube_url(vurl):
-                from ytdlp_helper import SEGMENT_DOWNLOAD_PAD_S
-
                 logger.info(
                     "Downloading YouTube video ONCE for %d clips...", len(req.clips)
                 )
-                seg_start = max(0.0, global_start - SEGMENT_DOWNLOAD_PAD_S)
-                vurl = download_youtube_video(
+                vurl, segment_offset = download_youtube_video(
                     vurl,
                     tmpdir,
                     start_time=global_start,
@@ -2376,10 +2382,23 @@ class AIReframe:
                     max_height=720 if is_preview else 1080,
                     skip_probe=is_preview,
                 )
-                segment_offset = seg_start
                 logger.info(
                     "YouTube download complete (segment_offset=%.1fs)", segment_offset
                 )
+            elif vurl.startswith("http://") or vurl.startswith("https://"):
+                logger.info("Downloading remote video from %s...", vurl[:100])
+                local_video = os.path.join(tmpdir, "input_video.mp4")
+                try:
+                    import requests
+                    with requests.get(vurl, stream=True, timeout=300) as r:
+                        r.raise_for_status()
+                        with open(local_video, "wb") as f:
+                            for chunk in r.iter_content(chunk_size=8192):
+                                if chunk:
+                                    f.write(chunk)
+                    vurl = local_video
+                except Exception as e:
+                    raise DownloadError(f"Failed to download video: {e}") from e
 
             # 2. Probe video info ONCE
             video_info = self.get_video_info(vurl)
@@ -2387,6 +2406,19 @@ class AIReframe:
             actual_w = video_info.get("width", 1280)
             actual_h = video_info.get("height", 720)
             logger.info("Source: %sx%s @ %.1f fps", actual_w, actual_h, fps)
+
+            # 2.5 Download pre-computed analysis.json if provided
+            precomputed_analysis = None
+            if getattr(req, "analysis_url", None):
+                try:
+                    import requests
+                    logger.info("Fetching pre-computed analysis.json from %s...", req.analysis_url)
+                    resp = requests.get(req.analysis_url, timeout=30)
+                    if resp.status_code == 200:
+                        precomputed_analysis = resp.json()
+                        logger.info("Loaded pre-computed analysis with %d tracks", len(precomputed_analysis.get("tracks", [])))
+                except Exception as err:
+                    logger.warning("Failed to fetch pre-computed analysis.json: %s", err)
 
             # 3. Build clusters of nearby clips (merge if gap < 5s)
             CLUSTER_GAP_S = 5.0
@@ -2465,27 +2497,117 @@ class AIReframe:
                     timeout=_FFMPEG_LONG_TIMEOUT_S,
                 )
 
-                # Run face tracking for this cluster
+                # Run face tracking for this cluster (or reconstruct from pre-computed analysis)
                 t0 = time.time()
-                (
-                    cluster_tracks,
-                    cluster_scores,
-                    audio,
-                    cluster_frames,
-                    pya,
-                    cluster_scene_bounds,
-                ) = self.get_tracks_and_scores(
-                    vurl,
-                    effective_cluster_start,
-                    cluster_duration,
-                    cluster_workdir,
-                    fps=fps,
-                    crop_mode="auto",
-                    audio_url=cluster_audio,
-                    is_preview=is_preview,
-                )
+                cluster_frames = None  # Only assigned in the live-tracking path below
+                if precomputed_analysis and "tracks" in precomputed_analysis:
+                    logger.info("Reconstructing cluster %d tracks from pre-computed analysis.json (Fast Path)...", cluster_idx + 1)
+                    analysis_video_fps = precomputed_analysis.get("video_info", {}).get("fps", fps)
+
+                    # analysis.json may have been produced at a slightly different fps
+                    # than what we probe now for this render (yt-dlp metadata fps at
+                    # analysis time vs ffprobe on a freshly re-downloaded segment).
+                    # Scale frame numbers so they line up with `fps`, used everywhere
+                    # else below for frame<->time conversion.
+                    scale_factor = (fps / analysis_video_fps) if analysis_video_fps else 1.0
+                    if abs(scale_factor - 1.0) > 0.01:
+                        logger.warning(
+                            "analysis.json fps (%.3f) differs from render fps (%.3f) — "
+                            "scaling track frame indices by %.4f",
+                            analysis_video_fps, fps, scale_factor,
+                        )
+
+                    # Extract analysis video metadata to calculate resolution scale factors
+                    v_info = precomputed_analysis.get("video_info", {})
+                    analysis_w = float(v_info.get("width") or 0)
+                    analysis_h = float(v_info.get("height") or 0)
+
+                    cluster_tracks = []
+                    cluster_scores = []
+                    for tr in precomputed_analysis.get("tracks", []):
+                        raw_frames = np.array(tr["frames"], dtype=float)
+                        raw_bboxes = np.array(tr["bboxes"], dtype=float) if tr.get("bboxes") else np.array([])
+                        px = np.array(tr["proc_track"]["x"], dtype=float)
+                        py = np.array(tr["proc_track"]["y"], dtype=float)
+                        ps = np.array(tr["proc_track"]["s"], dtype=float)
+
+                        # Detect if coordinates are normalized [0.0, 1.0] or pixel space
+                        max_val = max(np.max(px) if len(px) > 0 else 0.0, np.max(py) if len(py) > 0 else 0.0)
+                        is_normalized = (max_val > 0 and max_val <= 1.5)
+
+                        if is_normalized:
+                            px_scaled = px * actual_w
+                            py_scaled = py * actual_h
+                            ps_scaled = ps * actual_h
+                            if raw_bboxes.ndim == 2 and raw_bboxes.shape[1] == 4:
+                                raw_bboxes[:, [0, 2]] *= actual_w
+                                raw_bboxes[:, [1, 3]] *= actual_h
+                        elif analysis_w > 0 and analysis_h > 0 and (abs(analysis_w - actual_w) > 1 or abs(analysis_h - actual_h) > 1):
+                            scale_x = actual_w / analysis_w
+                            scale_y = actual_h / analysis_h
+                            px_scaled = px * scale_x
+                            py_scaled = py * scale_y
+                            ps_scaled = ps * scale_y
+                            if raw_bboxes.ndim == 2 and raw_bboxes.shape[1] == 4:
+                                raw_bboxes[:, [0, 2]] *= scale_x
+                                raw_bboxes[:, [1, 3]] *= scale_y
+                        else:
+                            px_scaled = px
+                            py_scaled = py
+                            ps_scaled = ps
+
+                        cluster_tracks.append({
+                            "track": {
+                                "frame": np.round(raw_frames * scale_factor).astype(int),
+                                "bbox": raw_bboxes,
+                            },
+                            "proc_track": {
+                                "x": px_scaled,
+                                "y": py_scaled,
+                                "s": ps_scaled,
+                            },
+                        })
+                        # Defensive normalization for analysis.json files generated
+                        # before the get_tracks_and_scores alignment fix — pad/truncate
+                        # scores to match len(raw_frames).
+                        raw_scores = np.array(tr["scores"], dtype=float)
+                        n = len(raw_frames)
+                        if len(raw_scores) != n:
+                            if len(raw_scores) == 0:
+                                raw_scores = np.zeros(n)
+                            elif len(raw_scores) < n:
+                                pad_val = raw_scores[-1]
+                                raw_scores = np.pad(
+                                    raw_scores, (0, n - len(raw_scores)),
+                                    mode="constant", constant_values=pad_val,
+                                )
+                            else:
+                                raw_scores = raw_scores[:n]
+                        cluster_scores.append(raw_scores)
+                    cluster_scene_bounds = [
+                        (int(round(sb[0] * scale_factor)), int(round(sb[1] * scale_factor))) 
+                        for sb in precomputed_analysis.get("scene_bounds", [])
+                    ]
+                    pya = os.path.join(cluster_workdir, "pyavi")
+                    os.makedirs(pya, exist_ok=True)
+                else:
+                    (
+                        cluster_tracks,
+                        cluster_scores,
+                        audio,
+                        cluster_frames,
+                        pya,
+                        cluster_scene_bounds,
+                    ) = self.get_tracks_and_scores(
+                        vurl,
+                        effective_cluster_start,
+                        cluster_duration,
+                        cluster_workdir,
+                        fps=fps,
+                        audio_url=cluster_audio,
+                    )
                 logger.info(
-                    "Cluster %d tracking done in %.1fs, %d tracks",
+                    "Cluster %d tracking ready in %.1fs, %d tracks",
                     cluster_idx + 1,
                     time.time() - t0,
                     len(cluster_tracks),
@@ -2508,10 +2630,31 @@ class AIReframe:
                         clip_end_rel = clip_req.end_time - cluster_start
                         clip_duration = clip_end_rel - clip_start_rel
 
-                        # Slice frames mathematically for this clip
-                        start_frame = max(0, int(clip_start_rel * fps))
-                        clip_frame_count = int(clip_duration * fps)
-                        end_frame = start_frame + clip_frame_count
+                        # --- Frame-index anchor for slicing cluster_tracks ---
+                        # analysis.json tracks are indexed on the ORIGINAL video's
+                        # global timeline (see stitch_chunk_tracks in the analyzer),
+                        # but live-tracked cluster_tracks come back 0-based from
+                        # THIS cluster's own start (get_tracks_and_scores decodes
+                        # starting at effective_cluster_start). Mixing these up
+                        # silently emptied out tracks for non-first clusters.
+                        if precomputed_analysis:
+                            track_anchor_start = clip_req.start_time
+                            track_anchor_end = clip_req.end_time
+                        else:
+                            track_anchor_start = clip_start_rel
+                            track_anchor_end = clip_end_rel
+
+                        start_frame_global = int(round(track_anchor_start * fps))
+                        end_frame_global = int(round(track_anchor_end * fps))
+                        clip_frame_count = max(1, end_frame_global - start_frame_global)
+
+                        # --- Seek position for reading actual video frames ---
+                        # `vurl` is the locally downloaded file, whose own timeline
+                        # starts at `segment_offset` seconds into the ORIGINAL video
+                        # (0 for non-YouTube sources, where the whole file is
+                        # downloaded). Must always subtract segment_offset here —
+                        # mirrors `effective_start` in the single-clip reframe().
+                        abs_clip_start = clip_req.start_time - segment_offset
 
                         if clip_frame_count <= 0:
                             logger.warning("No frames for clip %s", clip_id)
@@ -2529,16 +2672,18 @@ class AIReframe:
                         clip_scores = []
                         for tidx, tr in enumerate(cluster_tracks):
                             track_frames = tr["track"]["frame"]
-                            mask = (track_frames >= start_frame) & (
-                                track_frames < end_frame
+                            mask = (track_frames >= start_frame_global) & (
+                                track_frames < end_frame_global
                             )
                             if not np.any(mask):
                                 continue
 
                             indices = np.where(mask)[0]
+                            local_frames = track_frames[indices] - start_frame_global
                             new_track = {
                                 "track": {
-                                    "frame": track_frames[indices] - start_frame,
+                                    "frame": local_frames,
+                                    "bbox": tr["track"]["bbox"][indices] if isinstance(tr["track"]["bbox"], np.ndarray) and len(tr["track"]["bbox"]) == len(track_frames) else tr["track"]["bbox"],
                                 },
                                 "proc_track": {
                                     "x": tr["proc_track"]["x"][indices],
@@ -2547,34 +2692,93 @@ class AIReframe:
                                 },
                             }
                             sc = cluster_scores[tidx]
-                            new_scores = (
-                                sc[indices]
-                                if len(sc) > len(indices)
-                                else sc[indices[: len(sc)]]
-                            )
+                            sc_arr = np.array(sc)
+                            if len(sc_arr) == len(track_frames):
+                                new_scores = sc_arr[indices]
+                            elif len(sc_arr) >= len(indices):
+                                new_scores = sc_arr[:len(indices)]
+                            else:
+                                # Fallback pad with zero score
+                                new_scores = np.pad(sc_arr, (0, len(indices) - len(sc_arr)), mode='constant')
+
+                            # Pipeline Data Integrity Assertions
+                            assert len(new_track["track"]["frame"]) == len(new_track["proc_track"]["x"]), "Track frames and proc_track.x length mismatch"
+                            assert len(new_track["proc_track"]["x"]) == len(new_track["proc_track"]["y"]), "proc_track.x and y length mismatch"
+                            assert len(new_track["proc_track"]["x"]) == len(new_track["proc_track"]["s"]), "proc_track.x and s length mismatch"
+                            assert len(new_scores) == len(new_track["track"]["frame"]), "Scores length does not match track frames length"
+                            if len(new_track["track"]["frame"]) > 1:
+                                assert np.all(np.diff(new_track["track"]["frame"]) > 0), "Track frame indices must be strictly increasing"
+
                             clip_tracks.append(new_track)
                             clip_scores.append(new_scores)
 
-                        # Classify layout for this clip
                         crop_mode = clip_req.crop_mode
+                        reported_crop_mode = crop_mode
                         if crop_mode == "auto":
-                            crop_mode = self.classify_layout(
+                            reported_crop_mode = self.classify_layout(
                                 clip_tracks,
                                 clip_scores,
                                 actual_w,
                                 actual_h,
                             )
-                        logger.info("Clip %s layout: %s", clip_id, crop_mode)
+                        logger.info("Clip %s layout (reported): %s", clip_id, reported_crop_mode)
 
                         # Slice scene bounds for this clip
                         clip_scene_bounds = []
                         for sf, ef in cluster_scene_bounds:
-                            adj_sf = max(0, sf - start_frame)
-                            adj_ef = min(clip_frame_count, ef - start_frame)
+                            adj_sf = max(0, sf - start_frame_global)
+                            adj_ef = min(clip_frame_count, ef - start_frame_global)
                             if adj_ef > adj_sf:
                                 clip_scene_bounds.append((adj_sf, adj_ef))
                         if not clip_scene_bounds:
                             clip_scene_bounds = [(0, clip_frame_count)]
+
+                        # Pre-trim source to a clip-specific file using ffmpeg's
+                        # precise input seeking.  Both video frames and audio are
+                        # then extracted from THIS file at position 0, guaranteeing
+                        # perfect A/V sync.  The previous approach sought into the
+                        # full source independently for video (via ffmpegcv two-pass
+                        # seek) and audio (via ffmpeg single-pass seek), and the
+                        # two-pass seek landed later due to B-frame reordering and
+                        # keyframe alignment, causing video to lag audio.
+                        # Pre-trim source to a clip-specific file using ffmpeg's
+                        # precise input seeking. Both video frames and audio are
+                        # then extracted from THIS file at position 0, guaranteeing
+                        # perfect A/V sync.
+                        clip_pretrim = os.path.join(
+                            cluster_workdir, f"pretrim_{clip_id}.mp4"
+                        )
+                        # Precise frame-accurate pre-trim (re-encode ultrafast so frame 0 starts EXACTLY at abs_clip_start)
+                        pretrim_codec = (
+                            ["h264_nvenc", "-preset", "p1"]
+                            if self.use_nvenc
+                            else ["libx264", "-preset", "ultrafast", "-crf", "18"]
+                        )
+                        subprocess.run(
+                            [
+                                "ffmpeg",
+                                "-y",
+                                "-ss",
+                                str(abs_clip_start),
+                                "-i",
+                                vurl,
+                                "-t",
+                                str(clip_duration),
+                                "-c:v",
+                                *pretrim_codec,
+                                "-c:a",
+                                "aac",
+                                "-b:a",
+                                "192k",
+                                "-avoid_negative_ts",
+                                "make_zero",
+                                clip_pretrim,
+                                "-loglevel",
+                                "warning",
+                            ],
+                            check=True,
+                            timeout=_FFMPEG_LONG_TIMEOUT_S,
+                        )
 
                         # Render this clip
                         orig_name = f"orig_{uuid.uuid4()}.mp4"
@@ -2589,19 +2793,21 @@ class AIReframe:
                             local_orig,
                             duration=clip_duration,
                             fps=fps,
-                            crop_mode=crop_mode,
+                            crop_mode=reported_crop_mode,
                             scene_bounds=clip_scene_bounds,
-                            video_path=vurl,
-                            start_time_in_video=effective_cluster_start + clip_start_rel,
+                            video_path=clip_pretrim,
+                            start_time_in_video=0.0,
                         )
+
+                        if not os.path.exists(local_orig) or os.path.getsize(local_orig) == 0:
+                            raise RenderError(f"Render failed: output video file not found or empty at {local_orig}")
 
                         if clip_req.transcript:
                             clip_req.transcript = annotate_transcript_layout(
                                 clip_req.transcript, frame_layout, crop_mode, fps
                             )
 
-
-                        # Extract clip audio and mux
+                        # Extract audio from the SAME pre-trimmed file (no seeking) for 100% A/V sync.
                         clip_audio = os.path.join(
                             cluster_workdir, f"clip_audio_{clip_id}.aac"
                         )
@@ -2609,12 +2815,9 @@ class AIReframe:
                             [
                                 "ffmpeg",
                                 "-y",
-                                "-ss",
-                                str(clip_start_rel),
-                                "-t",
-                                str(clip_duration),
                                 "-i",
-                                cluster_audio,
+                                clip_pretrim,
+                                "-vn",
                                 "-c:a",
                                 "aac",
                                 "-b:a",
@@ -2645,6 +2848,8 @@ class AIReframe:
                                 "0:v:0",
                                 "-map",
                                 "1:a:0",
+                                "-r",
+                                str(fps),
                                 "-c:v",
                                 *video_codec,
                                 "-pix_fmt",
@@ -2655,6 +2860,8 @@ class AIReframe:
                                 "aac",
                                 "-b:a",
                                 "128k",
+                                "-af",
+                                "aresample=async=1000:min_hard_comp=0.100000:first_pts=0",
                                 "-movflags",
                                 "+faststart",
                                 synced,
@@ -2676,6 +2883,7 @@ class AIReframe:
                                 "orig_name": orig_name,
                                 "clip_req": clip_req,
                                 "crop_mode": crop_mode,
+                                "reported_crop_mode": reported_crop_mode,
                                 "actual_w": actual_w,
                                 "actual_h": actual_h,
                             }
@@ -2693,10 +2901,7 @@ class AIReframe:
                         )
 
                 # Free cluster memory after all clips in this cluster are processed
-                if (
-                    hasattr(cluster_frames, "_mmap")
-                    and cluster_frames._mmap is not None
-                ):
+                if cluster_frames is not None and hasattr(cluster_frames, "_mmap") and cluster_frames._mmap is not None:
                     try:
                         cluster_frames._mmap.close()
                     except Exception:
@@ -2747,6 +2952,7 @@ class AIReframe:
                     orig_name = task["orig_name"]
                     clip_req = task["clip_req"]
                     crop_mode = task["crop_mode"]
+                    reported_crop_mode = task["reported_crop_mode"]
                     actual_w = task["actual_w"]
                     actual_h = task["actual_h"]
 
@@ -2814,7 +3020,7 @@ class AIReframe:
                             "original_video_url": orig_url,
                             "preview_video_url": preview_url,
                             "thumbnail_url": thumbnail_url,
-                            "crop_mode": crop_mode,
+                            "crop_mode": reported_crop_mode,
                             "source_width": actual_w,
                             "source_height": actual_h,
                             "transcript": clip_req.transcript,
@@ -2826,7 +3032,6 @@ class AIReframe:
                             "error": error_msg,
                         }
 
-                # Limit concurrency to min(6, len(all_deferred)) to balance upload bandwidth and CPU during burns
                 with concurrent.futures.ThreadPoolExecutor(max_workers=min(6, len(all_deferred))) as upload_executor:
                     upload_futures = [
                         upload_executor.submit(perform_upload_and_burn, task)
@@ -2845,3 +3050,81 @@ class AIReframe:
             len(results),
         )
         return {"success": True, "results": results}
+
+    @modal.fastapi_endpoint(method="POST")
+    async def eval_clip(self, file: UploadFile = File(...), label: str = Form("")):
+        """
+        Eval-only endpoint: runs face tracking + ASD + layout classification
+        on an already-trimmed local clip and returns summary stats. Does NOT
+        render the final vertical video — this is for building a baseline to
+        diff against before/after model swaps (face detector, tracker, etc).
+
+        Send a raw video file (already cut to the segment you want to test)
+        as multipart form data under "file", with an optional "label" field.
+        """
+        import numpy as np
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            local_path = os.path.join(tmpdir, "clip.mp4")
+            with open(local_path, "wb") as f:
+                f.write(await file.read())
+
+            video_info = self.get_video_info(local_path)
+            fps = video_info["fps"]
+            duration_secs = video_info.get("duration") or 0.0
+            if duration_secs <= 0:
+                return {"label": label, "error": "Could not determine clip duration"}
+
+            segment_audio = os.path.join(tmpdir, "segment_audio.aac")
+            subprocess.run(
+                [
+                    "ffmpeg", "-y",
+                    "-i", local_path,
+                    "-vn", "-c:a", "aac", "-b:a", "192k",
+                    segment_audio, "-loglevel", "panic",
+                ],
+                check=True, timeout=_FFMPEG_LONG_TIMEOUT_S,
+            )
+
+            t0 = time.time()
+            tracks, scores, audio, pyf, pya, scene_bounds = self.get_tracks_and_scores(
+                local_path, 0.0, duration_secs, tmpdir,
+                fps=fps, audio_url=segment_audio,
+            )
+            elapsed = time.time() - t0
+
+            layout = self.classify_layout(
+                tracks, scores,
+                video_info.get("width", 1920), video_info.get("height", 1080),
+            )
+
+            track_summaries = []
+            for tidx, tr in enumerate(tracks):
+                sc = scores[tidx]
+                frames = tr["track"]["frame"]
+                track_summaries.append({
+                    "track_id": tidx,
+                    "frame_count": int(len(frames)),
+                    "duration_s": round(float(len(frames)) / fps, 2) if fps else None,
+                    "max_score": round(float(np.max(sc)), 3) if len(sc) else 0.0,
+                    "mean_score": round(float(np.mean(sc)), 3) if len(sc) else 0.0,
+                    "mean_size_px": round(float(np.mean(tr["proc_track"]["s"])), 1),
+                    "first_frame": int(frames[0]) if len(frames) else None,
+                    "last_frame": int(frames[-1]) if len(frames) else None,
+                })
+
+            if hasattr(pyf, "_mmap") and pyf._mmap is not None:
+                try:
+                    pyf._mmap.close()
+                except Exception:
+                    pass
+
+            return {
+                "label": label,
+                "fps": fps,
+                "duration_s": round(duration_secs, 2),
+                "tracking_time_s": round(elapsed, 2),
+                "num_tracks": len(tracks),
+                "layout_decision": layout,
+                "tracks": track_summaries,
+        }

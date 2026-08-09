@@ -1,38 +1,25 @@
-import { NextRequest, NextResponse } from "next/server"
+import { clerkMiddleware, createRouteMatcher } from "@clerk/nextjs/server"
 
-export function proxy(request: NextRequest) {
-  const path = request.nextUrl.pathname
+const isPublicRoute = createRouteMatcher([
+  "/",
+  "/login(.*)",
+  "/pricing(.*)",
+  "/privacy(.*)",
+  "/terms(.*)",
+  "/api/webhooks(.*)",
+  "/api/inngest(.*)",
+])
 
-  // Check for the presence of Better Auth session token cookies (standard and secure/production)
-  const sessionToken =
-    request.cookies.get("better-auth.session_token") ||
-    request.cookies.get("__Secure-better-auth.session_token")
-
-  const hasSession = !!sessionToken
-
-  const isDashboardRoute =
-    path.startsWith("/projects") || path.startsWith("/settings")
-  const isAuthRoute = path.startsWith("/login") || path.startsWith("/signup")
-
-  if (isDashboardRoute && !hasSession) {
-    const loginUrl = new URL("/login", request.url)
-    // Keep track of the original page to redirect back after successful login
-    loginUrl.searchParams.set(
-      "callbackUrl",
-      request.nextUrl.pathname + request.nextUrl.search
-    )
-    return NextResponse.redirect(loginUrl)
+export default clerkMiddleware(async (auth, req) => {
+  if (!isPublicRoute(req)) {
+    await auth.protect()
   }
+})
 
-  if (isAuthRoute && hasSession) {
-    // If user is already authenticated, redirect them to dashboard
-    return NextResponse.redirect(new URL("/projects", request.url))
-  }
-
-  return NextResponse.next()
-}
-
-// Limit the middleware to run only on dashboard and authentication pages
 export const config = {
-  matcher: ["/projects/:path*", "/settings/:path*", "/login", "/signup"],
+  matcher: [
+    '/((?!_next|[^?]*\\.(?:html?|css|js(?!on)|jpe?g|webp|png|gif|svg|ttf|woff2?|ico|csv|docx?|xlsx?|zip|webmanifest)).*)',
+    '/(api|trpc)(.*)',
+    '/__clerk/(.*)',
+  ],
 }

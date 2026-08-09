@@ -47,7 +47,7 @@ export default function ProjectDetailPage() {
       try {
         const projectRes = await fetch(`/api/projects/${projectId}`)
         if (projectRes.status === 401) {
-          router.replace("/login")
+          window.location.reload()
           return
         }
 

@@ -34,4 +34,6 @@ export type Clip = {
   clipType?: string | null
   speakerDynamic?: string | null
   thumbnailUrl?: string | null
+  description?: string | null
+  hashtags?: string | null
 }

@@ -14,10 +14,12 @@ export async function createCustomerPortalSession() {
     throw new Error("Unauthorized")
   }
 
-  const [dbUser] = await db
-    .select()
-    .from(user)
-    .where(eq(user.id, session.user.id))
+  const { getOrCreateUser } = require("@/lib/user")
+  const dbUser = await getOrCreateUser({
+    id: session.user.id,
+    email: session.user.email,
+    name: session.user.name,
+  })
 
   const dodoCustomerId = dbUser?.dodoCustomerId
 

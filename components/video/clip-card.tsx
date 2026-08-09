@@ -12,10 +12,20 @@ import {
   Sparkles,
   Type,
   Play,
+  Eye,
+  Smartphone,
+  ClosedCaption,
+  ChevronDown,
 } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { toast } from "sonner"
 import type { Clip } from "@/lib/types"
+import {
+  DropdownMenu,
+  DropdownMenuTrigger,
+  DropdownMenuContent,
+  DropdownMenuItem,
+} from "@/components/ui/dropdown-menu"
 import {
   Tooltip,
   TooltipContent,
@@ -85,6 +95,7 @@ export function NativeVideoPreview({
   onPlay,
   clipType = "hot_take",
   posterUrl,
+  duration,
 }: {
   src: string
   className?: string
@@ -92,26 +103,39 @@ export function NativeVideoPreview({
   onPlay: () => void
   clipType?: string
   posterUrl?: string | null
+  duration?: number
 }) {
   const theme = CLIP_THEME_MAP[clipType] || CLIP_THEME_MAP.hot_take
 
   const previewBadge = (
-    <span className="absolute top-2 left-2 z-30 inline-flex items-center gap-1 rounded-md bg-black/60 px-1.5 py-0.5 text-[9px] font-bold tracking-wide text-white/80 uppercase backdrop-blur-sm">
-      SD Preview
-    </span>
+    <div className="absolute top-3 left-3 z-30 flex items-center gap-1.5 select-none">
+      <span className="inline-flex items-center gap-1 rounded-lg bg-black/60 px-2.5 py-1 text-[10px] font-bold text-white/95 backdrop-blur-sm">
+        <Eye className="h-3.5 w-3.5" /> Preview
+      </span>
+      <span className="inline-flex items-center rounded-lg bg-black/60 px-2.5 py-1 text-[10px] font-bold text-white/95 backdrop-blur-sm">
+        540p
+      </span>
+    </div>
   )
+
+  const durationBadge = duration ? (
+    <span className="absolute top-3 right-3 z-30 inline-flex items-center rounded-lg bg-black/60 px-2.5 py-1 text-[10px] font-bold text-white/95 backdrop-blur-sm select-none">
+      {Math.round(duration)}s
+    </span>
+  ) : null
 
   if (isPlaying) {
     return (
       <div className={cn("relative h-full w-full bg-slate-950", className)}>
         {previewBadge}
+        {durationBadge}
         <video
           src={src}
           poster={posterUrl || undefined}
           autoPlay
           controls
           playsInline
-          className="h-full w-full object-cover"
+          className="h-full w-full object-cover bg-slate-950"
         />
       </div>
     )
@@ -123,18 +147,19 @@ export function NativeVideoPreview({
       type="button"
       variant="ghost"
       className={cn(
-        "group/preview relative block flex h-full w-full flex-col items-center justify-center overflow-hidden p-0 transition-all duration-500 hover:bg-transparent focus-visible:ring-0",
+        "group/preview relative block flex h-full w-full flex-col items-center justify-center overflow-hidden p-0 transition-all duration-500 hover:bg-transparent",
         className
       )}
     >
       {previewBadge}
+      {durationBadge}
       {/* Background Gradient & Pattern or Poster Image */}
       {posterUrl ? (
         <>
           <img
             src={posterUrl}
             alt="Video preview thumbnail"
-            className="absolute inset-0 h-full w-full object-cover transition-transform duration-500 group-hover/preview:scale-105"
+            className="absolute inset-0 h-full w-full object-cover bg-slate-950 transition-transform duration-500 group-hover/preview:scale-105"
             loading="lazy"
           />
           {/* Subtle dark overlay to make play button pop and look premium */}
@@ -155,19 +180,10 @@ export function NativeVideoPreview({
       {/* Glow effect on hover */}
       <div className="absolute inset-0 bg-primary/0 transition-colors duration-500 group-hover/preview:bg-primary/5" />
 
-      {/* Glassmorphic Play Button */}
-      <div className="relative z-10 flex size-14 items-center justify-center rounded-full border border-white/20 bg-white/10 text-white shadow-[0_8px_32px_0_rgba(0,0,0,0.3)] backdrop-blur-md transition-all duration-300 group-hover/preview:scale-110 group-hover/preview:border-white/30 group-hover/preview:bg-white/20">
-        <Play
-          className={cn(
-            "size-6 fill-current transition-transform duration-300 group-hover/preview:translate-x-0.5",
-            theme.iconColor
-          )}
-        />
+      {/* Solid White Play Button */}
+      <div className="relative z-10 flex size-14 items-center justify-center rounded-full bg-white text-slate-950 shadow-[0_8px_32px_0_rgba(0,0,0,0.3)] transition-all duration-300 group-hover/preview:scale-110">
+        <Play className="size-6 fill-current text-slate-950 translate-x-0.5" />
       </div>
-
-      <span className="relative z-10 mt-3 text-[10px] font-bold tracking-widest text-white uppercase drop-shadow-sm transition-colors duration-300 group-hover/preview:text-white">
-        Play Preview
-      </span>
     </Button>
   )
 }
@@ -176,10 +192,10 @@ export function NativeVideoPreview({
    Viral score ring component matching Vizard.ai
    ───────────────────────────────────────────── */
 const VIRAL_SCORE_TIERS: Record<string, { range: string; desc: string; dot: string }> = {
-  "Very High": { range: "85–100", desc: "Ready to post — strong hook & high resonance.", dot: "bg-emerald-500" },
-  High: { range: "70–84", desc: "Likely to perform well on social platforms.", dot: "bg-amber-500" },
-  Medium: { range: "50–69", desc: "May need a tighter hook or edit to take off.", dot: "bg-indigo-500" },
-  Low: { range: "0–49", desc: "Consider reworking the angle or using as B-roll.", dot: "bg-rose-500" },
+  "Very High": { range: "8.5–10", desc: "Ready to post — strong hook & high resonance.", dot: "bg-emerald-500" },
+  High: { range: "7.0–8.4", desc: "Likely to perform well on social platforms.", dot: "bg-amber-500" },
+  Medium: { range: "5.0–6.9", desc: "May need a tighter hook or edit to take off.", dot: "bg-indigo-500" },
+  Low: { range: "0–4.9", desc: "Consider reworking the angle or using as B-roll.", dot: "bg-rose-500" },
 }
 
 export function ViralScoreRing({ score }: { score: number }) {
@@ -187,24 +203,24 @@ export function ViralScoreRing({ score }: { score: number }) {
   const stroke = 5
   const normalizedRadius = radius - stroke * 2
   const circumference = normalizedRadius * 2 * Math.PI
-  const strokeDashoffset = circumference - (score / 100) * circumference
+  const strokeDashoffset = circumference - (score / 10) * circumference
 
   let strokeColor = "stroke-slate-250"
   let textColor = "text-slate-700"
   let bgColor = "bg-slate-50"
   let labelText = "Low"
 
-  if (score >= 85) {
+  if (score >= 8.5) {
     strokeColor = "stroke-emerald-500"
     textColor = "text-emerald-700"
     bgColor = "bg-emerald-50/50"
     labelText = "Very High"
-  } else if (score >= 70) {
+  } else if (score >= 7.0) {
     strokeColor = "stroke-amber-500"
     textColor = "text-amber-700"
     bgColor = "bg-amber-50/50"
     labelText = "High"
-  } else if (score >= 50) {
+  } else if (score >= 5.0) {
     strokeColor = "stroke-indigo-500"
     textColor = "text-indigo-700"
     bgColor = "bg-indigo-50/50"
@@ -220,7 +236,7 @@ export function ViralScoreRing({ score }: { score: number }) {
     <TooltipProvider>
       <Tooltip>
         <TooltipTrigger asChild>
-          <div className="flex shrink-0 cursor-help items-center gap-2.5">
+          <div className="flex flex-col items-center gap-1.5 cursor-help shrink-0 select-none">
             <div
               className={cn(
                 "relative flex items-center justify-center rounded-full border border-slate-100 p-0.5",
@@ -257,13 +273,21 @@ export function ViralScoreRing({ score }: { score: number }) {
               </svg>
               <span
                 className={cn(
-                  "absolute text-xs sm:text-lg font-black tabular-nums",
+                  "absolute text-sm sm:text-lg font-black tabular-nums",
                   textColor
                 )}
               >
                 {score}
               </span>
             </div>
+            <span
+              className={cn(
+                "text-[9px] font-extrabold tracking-widest uppercase",
+                textColor === "text-slate-700" ? "text-slate-400" : textColor
+              )}
+            >
+              Viral Score
+            </span>
           </div>
         </TooltipTrigger>
         <TooltipContent side="top" sideOffset={6} className="max-w-[280px] px-3.5 py-2.5">
@@ -323,6 +347,73 @@ export function HookCard({ hookText }: { hookText: string }) {
   )
 }
 
+/* ─────────────────────────────────────────────
+   DescriptionCard: displays description and hashtags with copy functionality.
+   ───────────────────────────────────────────── */
+export function DescriptionCard({
+  description,
+  hashtags,
+}: {
+  description: string
+  hashtags?: string | null
+}) {
+  const [copied, setCopied] = useState(false)
+
+  const handleCopy = async () => {
+    try {
+      const textToCopy = hashtags
+        ? `${description}\n\n${hashtags}`
+        : description
+      await navigator.clipboard.writeText(textToCopy)
+      setCopied(true)
+      toast.success("Description & hashtags copied!")
+      setTimeout(() => setCopied(false), 1500)
+    } catch (err) {
+      console.error("Copy failed:", err)
+      toast.error("Couldn't copy to clipboard")
+    }
+  }
+
+  return (
+    <div className="relative group/desc rounded-xl border border-indigo-100/40 bg-indigo-50/20 p-2.5 text-indigo-950 sm:p-3.5">
+      <div className="mb-1.5 flex items-center justify-between gap-3">
+        <div className="flex items-center gap-1.5 text-[10px] font-bold tracking-wider text-indigo-600 uppercase">
+          <Sparkles className="h-3.5 w-3.5 fill-indigo-100/30" />
+          <span>AI Description & Hashtags</span>
+        </div>
+        <Button
+          type="button"
+          onClick={handleCopy}
+          title="Copy description & hashtags"
+          variant="ghost"
+          className="h-6 w-6 rounded-md p-0 text-slate-400 hover:bg-indigo-100/60 hover:text-indigo-600 active:scale-95 transition-all"
+        >
+          {copied ? (
+            <Check className="h-3.5 w-3.5 text-emerald-500" />
+          ) : (
+            <Copy className="h-3.5 w-3.5" />
+          )}
+        </Button>
+      </div>
+      <p className="text-[11px] leading-relaxed font-medium text-slate-600 sm:text-xs">
+        {description}
+      </p>
+      {hashtags && (
+        <div className="mt-2.5 flex flex-wrap gap-1.5">
+          {hashtags.split(/\s+/).map((tag, idx) => (
+            <span
+              key={idx}
+              className="inline-block rounded-md bg-indigo-50 px-1.5 py-0.5 text-[10px] font-bold text-indigo-600 border border-indigo-100/40 sm:text-[11px]"
+            >
+              {tag}
+            </span>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 function formatTime(seconds: number): string {
   if (isNaN(seconds) || seconds < 0) return "00:00"
   const mins = Math.floor(seconds / 60)
@@ -336,13 +427,15 @@ type ClipCardProps = {
   isCaptioned: boolean
   onToggleCaptions: (clipId: string) => void
   onEdit: (clip: Clip) => void
-  onDownload: (clip: Clip) => void
+  onDownload: (clip: Clip, options?: { withoutCaptions?: boolean }) => void
   isPlaying: boolean
   onPlay: () => void
   isDownloading?: boolean
   isExporting?: boolean
   isFree?: boolean
 }
+
+import { UpgradeModal } from "@/components/ui/upgrade-modal"
 
 function ClipCardBase({
   clip,
@@ -357,6 +450,7 @@ function ClipCardBase({
   isExporting = false,
   isFree = false,
 }: ClipCardProps) {
+  const [showUpgradeModal, setShowUpgradeModal] = useState(false)
   const isRendering = clip.status === "rendering"
   const clipType = clip.clipType && CLIP_TYPE_MAP[clip.clipType]
   const duration = clip.endTime - clip.startTime
@@ -369,7 +463,7 @@ function ClipCardBase({
       className="group relative flex flex-col overflow-hidden rounded-2xl border border-slate-100 bg-white transition-all duration-300 hover:border-slate-200 hover:shadow-[0_12px_40px_rgba(0,0,0,0.05)] md:flex-row"
       style={{ contentVisibility: "auto", containIntrinsicSize: "auto 220px" }}
     >
-      <div className="relative w-full flex-shrink-0 overflow-hidden rounded-2xl bg-slate-950 md:w-[380px] md:min-w-[280px]">
+      <div className="relative w-full aspect-[9/16] flex-shrink-0 overflow-hidden bg-slate-950 md:w-[270px]">
         {videoUrl ? (
           <NativeVideoPreview
             src={videoUrl}
@@ -377,10 +471,11 @@ function ClipCardBase({
             onPlay={onPlay}
             clipType={clip.clipType || "hot_take"}
             posterUrl={clip.thumbnailUrl}
-            className="aspect-[4/5] w-full md:aspect-auto md:h-full md:min-h-[360px]"
+            duration={duration}
+            className="h-full w-full"
           />
         ) : (
-          <div className="flex aspect-[4/5] w-full flex-col items-center justify-center gap-3 bg-slate-900 text-slate-500 md:aspect-auto md:h-full md:min-h-[360px]">
+          <div className="flex h-full w-full flex-col items-center justify-center gap-3 bg-slate-900 text-slate-500">
             <div className="relative size-10">
               <div className="absolute inset-0 animate-spin rounded-full border-2 border-primary/20 border-t-primary" />
             </div>
@@ -407,13 +502,13 @@ function ClipCardBase({
           <div className="flex items-start justify-between gap-3 sm:gap-4">
             <div className="min-w-0 flex-1">
               <div className="mb-1.5 flex items-center gap-1.5 sm:mb-2 sm:gap-2">
-                <span className="inline-flex shrink-0 items-center justify-center rounded-md bg-slate-100 px-2 py-0.5 text-[11px] font-bold text-slate-700">
+                <span className="inline-flex shrink-0 items-center justify-center rounded-md bg-indigo-50 px-2 py-0.5 text-[11px] font-bold text-indigo-600">
                   #{String(index + 1).padStart(2, "0")}
                 </span>
                 {clipType && (
                   <span
                     className={cn(
-                      "inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold",
+                      "inline-flex items-center rounded-md px-2 py-0.5 text-[10px] font-bold",
                       clipType.classes
                     )}
                   >
@@ -421,7 +516,7 @@ function ClipCardBase({
                   </span>
                 )}
               </div>
-              <h3 className="line-clamp-2 text-base leading-snug font-black text-slate-950 sm:text-lg">
+              <h3 className="line-clamp-2 text-lg sm:text-xl font-bold tracking-tight text-slate-900 leading-snug">
                 {clip.title}
               </h3>
             </div>
@@ -438,14 +533,25 @@ function ClipCardBase({
         </div>
 
         <div className="mb-3 flex flex-wrap items-center gap-1.5 sm:mb-4 sm:gap-2">
-          <span className="inline-flex items-center gap-1 rounded-lg border border-slate-100 bg-slate-50 px-2 py-0.5 text-[11px] font-semibold text-slate-600 sm:gap-1.5 sm:px-2.5 sm:py-1 sm:text-xs">
-            <Clock className="h-3 w-3 text-slate-400 sm:h-3.5 sm:w-3.5" />
-            {formatTime(clip.startTime)} - {formatTime(clip.endTime)} (
-            {Math.round(duration)}s)
+          {/* Time range */}
+          <span className="inline-flex items-center gap-1.5 rounded-lg border border-slate-100 bg-slate-50/60 px-2.5 py-1 text-[11px] font-semibold text-slate-600 sm:text-xs">
+            <Clock className="h-3.5 w-3.5 text-slate-400" />
+            {formatTime(clip.startTime)} - {formatTime(clip.endTime)} ({Math.round(duration)}s)
           </span>
-          <span className="inline-flex items-center gap-1 rounded-lg border border-slate-100 bg-slate-50 px-2 py-0.5 text-[11px] font-semibold text-slate-500 sm:px-2.5 sm:py-1 sm:text-xs">
-            <Video className="h-3 w-3 text-slate-400 sm:h-3.5 sm:w-3.5" />
+          {/* Aspect ratio */}
+          <span className="inline-flex items-center gap-1.5 rounded-lg border border-slate-100 bg-slate-50/60 px-2.5 py-1 text-[11px] font-semibold text-slate-600 sm:text-xs">
+            <Smartphone className="h-3.5 w-3.5 text-slate-400" />
             9:16
+          </span>
+          {/* Captions */}
+          <span className="inline-flex items-center gap-1.5 rounded-lg border border-slate-100 bg-slate-50/60 px-2.5 py-1 text-[11px] font-semibold text-slate-600 sm:text-xs">
+            <ClosedCaption className="h-3.5 w-3.5 text-slate-400" />
+            Captions
+          </span>
+          {/* Auto Framed */}
+          <span className="inline-flex items-center gap-1.5 rounded-lg border border-slate-100 bg-slate-50/60 px-2.5 py-1 text-[11px] font-semibold text-slate-600 sm:text-xs">
+            <Sparkles className="h-3.5 w-3.5 text-slate-400" />
+            Auto Framed
           </span>
         </div>
 
@@ -455,15 +561,12 @@ function ClipCardBase({
           </div>
         )}
 
-        {clip.viralReason && (
-          <div className="mb-3 rounded-xl border border-indigo-100/40 bg-indigo-50/20 p-2.5 text-indigo-950 sm:mb-4 sm:p-3.5">
-            <div className="mb-1 flex items-center gap-1.5 text-[10px] font-bold tracking-wider text-indigo-600 uppercase">
-              <Sparkles className="h-3.5 w-3.5 fill-indigo-100/30" />
-              <span>AI Virality Explanation</span>
-            </div>
-            <p className="line-clamp-3 text-[11px] leading-relaxed font-medium text-slate-600 sm:line-clamp-none sm:text-xs">
-              {clip.viralReason}
-            </p>
+        {clip.description && (
+          <div className="mb-3 sm:mb-4">
+            <DescriptionCard
+              description={clip.description}
+              hashtags={clip.hashtags}
+            />
           </div>
         )}
 
@@ -487,52 +590,73 @@ function ClipCardBase({
                 <Download className="size-3.5 text-slate-500" />
                 Download Preview (SD)
               </Button>
-              <a
-                href="/pricing"
-                className="flex h-9 w-full items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-violet-600 to-indigo-600 px-4 text-xs font-bold text-white shadow-sm transition-all duration-300 hover:from-violet-500 hover:to-indigo-500 active:scale-95 sm:h-10 sm:w-auto sm:px-5 sm:hover:scale-[1.02]"
+              <Button
+                variant="default"
+                size="sm"
+                onClick={() => setShowUpgradeModal(true)}
+                className="flex h-9 w-full items-center justify-center gap-2 rounded-xl px-4 text-xs font-bold shadow-sm transition-all duration-300 active:scale-95 sm:h-10 sm:w-auto sm:px-5"
               >
-                <Sparkles className="size-3.5 text-amber-300 fill-amber-300 animate-pulse" />
-                Upgrade to Download HD
-              </a>
+                <Sparkles className="size-3.5 text-primary-foreground" />
+                Upgrade to Export HD
+              </Button>
             </>
           ) : (
-            <Button
-              size="sm"
-              className="flex h-9 w-full items-center justify-center gap-2 rounded-xl border-0 bg-slate-950 px-4 text-xs font-bold text-white shadow-sm transition-all duration-300 hover:bg-slate-800 active:scale-95 sm:h-10 sm:w-auto sm:px-5 sm:hover:scale-[1.02]"
-              onClick={() => {
-                if (clip.captionVideoUrl) {
-                  window.open(clip.captionVideoUrl, "_blank", "noopener,noreferrer")
-                } else {
-                  onDownload(clip)
-                }
-              }}
-              disabled={isRendering || isExporting || isDownloading || !clip.originalVideoUrl}
-            >
-              {isRendering || isExporting ? (
-                <>
-                  <Loader2 className="size-3.5 animate-spin" />
-                  Exporting HD…
-                </>
-              ) : isDownloading ? (
-                <>
-                  <Loader2 className="size-3.5 animate-spin" />
-                  Downloading…
-                </>
-              ) : clip.captionVideoUrl ? (
-                <>
-                  <Download className="size-3.5" />
-                  Download HD
-                </>
-              ) : (
-                <>
-                  <Download className="size-3.5" />
-                  Export HD
-                </>
-              )}
-            </Button>
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  size="sm"
+                  className="flex h-9 w-full sm:w-auto items-center justify-center gap-2 rounded-xl border-0 bg-slate-950 px-4 text-xs font-bold text-white shadow-sm transition-all duration-300 hover:bg-slate-800 active:scale-95 sm:h-10 sm:px-5"
+                  disabled={isRendering || isExporting || isDownloading || !clip.originalVideoUrl}
+                >
+                  {isRendering || isExporting ? (
+                    <>
+                      <Loader2 className="size-3.5 animate-spin" />
+                      Exporting HD…
+                    </>
+                  ) : isDownloading ? (
+                    <>
+                      <Loader2 className="size-3.5 animate-spin" />
+                      Downloading…
+                    </>
+                  ) : (
+                    <>
+                      <Download className="size-3.5" />
+                      <span>Download</span>
+                      <ChevronDown className="size-4 ml-1 opacity-70" />
+                    </>
+                  )}
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" className="w-fit">
+                <DropdownMenuItem
+                  className="justify-between gap-8 px-4 text-[11px] whitespace-nowrap"
+                  onClick={() => onDownload(clip)}
+                >
+                  {clip.captionVideoUrl ? (
+                    <span>Download with Captions</span>
+                  ) : (
+                    <span>Export HD with Captions</span>
+                  )}
+                  <ClosedCaption className="size-3.5 opacity-80" />
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  className="justify-between gap-8 px-4 text-[11px] whitespace-nowrap"
+                  onClick={() => onDownload(clip, { withoutCaptions: true })}
+                >
+                  <span>Download without Captions</span>
+                  <ClosedCaption className="size-3.5 opacity-40" />
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
           )}
         </div>
       </div>
+
+      <UpgradeModal
+        open={showUpgradeModal}
+        onOpenChange={setShowUpgradeModal}
+        triggerId="export_1080p"
+      />
     </div>
   )
 }

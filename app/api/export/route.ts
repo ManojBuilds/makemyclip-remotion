@@ -1,13 +1,13 @@
 import { NextResponse } from "next/server"
 import { inngest } from "@/lib/inngest/client"
 import { db } from "@/lib/db"
-import { clips } from "@/lib/db/schema"
+import { clips, projects, user } from "@/lib/db/schema"
 import { eq } from "drizzle-orm"
 
 /**
  * POST /api/export
  * Triggers an on-demand HD export for a clip.
- * The preview is already available — this produces the full 1080p version.
+ * Export quality is plan-gated: free=720p+watermark, paid=1080p clean.
  */
 export async function POST(req: Request) {
   try {
@@ -17,13 +17,23 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "clipId is required" }, { status: 400 })
     }
 
-    const clip = await db.query.clips.findFirst({
-      where: eq(clips.id, clipId),
-    })
+    // Fetch clip + user plan in one query
+    const [data] = await db
+      .select({
+        clip: clips,
+        userPlan: user.plan,
+      })
+      .from(clips)
+      .innerJoin(projects, eq(clips.projectId, projects.id))
+      .innerJoin(user, eq(projects.userId, user.id))
+      .where(eq(clips.id, clipId))
 
-    if (!clip) {
+    if (!data) {
       return NextResponse.json({ error: "Clip not found" }, { status: 404 })
     }
+
+    const clip = data.clip
+    const plan = data.userPlan || "free"
 
     if (!clip.originalVideoUrl) {
       return NextResponse.json(
@@ -53,10 +63,10 @@ export async function POST(req: Request) {
       })
       .where(eq(clips.id, clipId))
 
-    // Trigger Inngest export function
+    // Trigger Inngest export function with plan info
     await inngest.send({
       name: "clip.export_requested",
-      data: { clipId },
+      data: { clipId, plan },
     })
 
     return NextResponse.json({
@@ -69,3 +79,4 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: message }, { status: 500 })
   }
 }
+

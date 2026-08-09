@@ -1,0 +1,86 @@
+{
+  "solo_talking_head": {
+    "title": "If you're ambitious and in your 20s or 30s, please watch this.",
+    "url": "https://www.youtube.com/watch?v=ub1D6RQocRU",
+    "duration": 2143,
+    "segment": {
+      "start": "35:19",
+      "end": "35:44",
+      "start_seconds": 2119,
+      "end_seconds": 2144
+    },
+    "notes": "Steven Bartlett - Monologue style. User selected segment."
+  },
+  "two_person_podcast": {
+    "title": "He Risked Everything To Warn You: No One Is Ready For What's Coming, And The AI Companies Know It!",
+    "url": "https://www.youtube.com/watch?v=_g4l7YkDQwA",
+    "duration": 7250,
+    "segment": {
+      "start": "45:02",
+      "end": "45:51",
+      "start_seconds": 2702,
+      "end_seconds": 2751
+    },
+    "notes": "Diary of a CEO playlist - guest interviews."
+  },
+  "webcam_course_layout": {
+    "title": "you need to learn Python RIGHT NOW!! // EP 1",
+    "url": "https://www.youtube.com/watch?v=mRMmlo_Uqcs",
+    "duration": 1061,
+    "segment": {
+      "start": "2:39",
+      "end": "3:19",
+      "start_seconds": 159,
+      "end_seconds": 199
+    },
+    "notes": "Webcam overlay over code/slides layout."
+  },
+  "fast_crosstalk": {
+    "title": "KT #776 - BRIAN MOSES + DAVE LANDAU",
+    "url": "https://www.youtube.com/watch?v=-8_w9zfPoQQ",
+    "duration": 7876,
+    "segment": {
+      "start": "1:18:04",
+      "end": "1:18:35",
+      "start_seconds": 4684,
+      "end_seconds": 4715
+    },
+    "notes": "Panel/debate with fast cross-talk."
+  },
+  "occluded_profile_face": {
+    "title": "Babish Comfort Food Marathon",
+    "url": "https://www.youtube.com/watch?v=j5fbFcW3FK0",
+    "duration": 5243,
+    "segment": {
+      "start": "27:07",
+      "end": "27:11",
+      "start_seconds": 1627,
+      "end_seconds": 1631
+    },
+    "notes": "Host looks down at food (occlusion/profile)."
+  },
+  "background_poster": {
+    "title": "Ari Matti | This Past Weekend w/ Theo Von #659",
+    "url": "https://www.youtube.com/watch?v=DWYbmLqFYJc",
+    "duration": 6769,
+    "segment": {
+      "start": "15:45",
+      "end": "16:15",
+      "start_seconds": 945,
+      "end_seconds": 975
+    },
+    "notes": "Streamer background with monitors/posters."
+  },
+  "tv_show": {
+    "title": "Priyanka Chopra Jonas Talks Donut (Jonas) Brothers, Shows Jimmy How To Fake a Fight (Extended)",
+    "url": "https://www.youtube.com/watch?v=7iZ_1NL3pCo",
+    "duration": 600,
+    "segment": {
+      "start": "3:55",
+      "end": "4:45",
+      "start_seconds": 235,
+      "end_seconds": 285
+    },
+    "notes": "Jimmy Fallon TV show interview."
+  }
+}

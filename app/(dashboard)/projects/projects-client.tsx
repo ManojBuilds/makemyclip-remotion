@@ -15,6 +15,8 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent } from "@/components/ui/card"
 
+import { UpgradeModal } from "@/components/ui/upgrade-modal"
+
 export function ProjectsClient({
   projects,
   plan,
@@ -29,6 +31,7 @@ export function ProjectsClient({
   const [selectedFile, setSelectedFile] = useState<File | null>(null)
   const [isSubmittingUrl, setIsSubmittingUrl] = useState(false)
   const [searchQuery, setSearchQuery] = useState("")
+  const [upgradeTrigger, setUpgradeTrigger] = useState<string | null>(null)
   const { status, progress, error, upload, reset } = useUpload()
 
   // Redirect from landing page with pending URL
@@ -121,9 +124,7 @@ export function ProjectsClient({
 
       const durationInMinutes = Math.ceil(duration / 60)
       if (credits < durationInMinutes) {
-        toast.error("Insufficient credits", {
-          description: `This video requires ${durationInMinutes} credits, but you only have ${credits}. Please upgrade your plan.`,
-        })
+        setUpgradeTrigger("processing_limit")
         return
       }
     } catch {
@@ -179,9 +180,9 @@ export function ProjectsClient({
   const filteredProjects = projects.filter((project) =>
     project.title?.toLowerCase().includes(searchQuery.toLowerCase())
   )
-
   return (
     <div className="mx-auto w-full max-w-4xl space-y-6 px-4 py-4 sm:space-y-8 sm:px-6 sm:py-8 md:space-y-10 md:py-12">
+
       {/* 2. UPLOAD FLOW */}
       {!selectedFile && !isUploading && (
         <div className="w-full animate-in duration-300 fade-in">
@@ -277,6 +278,14 @@ export function ProjectsClient({
           )}
         </div>
       )}
+
+      <UpgradeModal
+        open={Boolean(upgradeTrigger)}
+        onOpenChange={(openState) => {
+          if (!openState) setUpgradeTrigger(null)
+        }}
+        triggerId={upgradeTrigger}
+      />
     </div>
   )
 }

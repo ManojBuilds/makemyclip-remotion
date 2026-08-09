@@ -1,15 +1,22 @@
-import { headers } from "next/headers"
-import { auth } from "@/lib/auth"
+import { auth, currentUser } from "@clerk/nextjs/server"
 
 /**
- * Get the current authenticated user from the request headers.
+ * Get the current authenticated user from the request headers/cookies.
  * Returns null if not authenticated.
  */
 export async function getServerSession() {
-  const session = await auth.api.getSession({
-    headers: await headers(),
-  })
-  return session
+  const { userId } = await auth()
+  if (!userId) return null
+
+  const user = await currentUser()
+
+  return {
+    user: {
+      id: userId,
+      email: user?.emailAddresses[0]?.emailAddress || "",
+      name: `${user?.firstName || ""} ${user?.lastName || ""}`.trim() || "User",
+    },
+  }
 }
 
 /**
