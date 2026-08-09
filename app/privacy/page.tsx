@@ -3,7 +3,7 @@ import Link from "next/link"
 import { ArrowLeft } from "lucide-react"
 
 export const metadata: Metadata = {
-  title: "Privacy Policy | Kivio",
+  title: "Privacy Policy",
   description: "Privacy Policy for Kivio AI video clipping service.",
 }
 
