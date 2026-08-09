@@ -67,10 +67,10 @@ def probe_video_dimensions(video_path: str) -> tuple[int, int]:
 
 def get_watermark_config(video_width: int, video_height: int) -> tuple[int, int, int]:
     """Calculates watermark sizing and positioning margins proportional to video width.
-    - Sizing: 35% of video width (~126px on 360p, ~378px on 1080p, ~756px on 4K)
+    - Sizing: 45% of video width (~162px on 360p, ~486px on 1080p, ~864px on 4K)
     - Position: Top-left corner (unobstructed by TikTok/Reels UI) with safe margins
     """
-    wm_width = max(120, int(video_width * 0.35))
+    wm_width = max(145, int(video_width * 0.45))
     margin_left = max(16, int(video_width * 0.04))
     margin_top = max(24, int(video_height * 0.04))
 
@@ -161,9 +161,21 @@ def burn_captions_local(
         if show_watermark and watermark_exists:
             w, h = probe_video_dimensions(local_video)
             if qp["scale"]:
-                scale_factor = 360.0 / float(h) if h > 0 else 0.3333
+                scale_factor = 1.0
+                scale_str = qp["scale"].replace("scale=", "")
+                parts = scale_str.split(":")
+                if len(parts) >= 2:
+                    try:
+                        w_val = int(parts[0])
+                        h_val = int(parts[1])
+                        if w_val > 0 and w > 0:
+                            scale_factor = float(w_val) / float(w)
+                        elif h_val > 0 and h > 0:
+                            scale_factor = float(h_val) / float(h)
+                    except ValueError:
+                        pass
                 effective_w = int(w * scale_factor)
-                effective_h = 360
+                effective_h = int(h * scale_factor)
             else:
                 effective_w, effective_h = w, h
 

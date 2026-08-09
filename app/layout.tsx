@@ -1,4 +1,4 @@
-import { Geist_Mono, DM_Sans } from "next/font/google"
+import { Geist_Mono, TikTok_Sans } from "next/font/google"
 import type { Metadata } from "next"
 import { Analytics } from "@vercel/analytics/next"
 import { ClerkProvider } from "@clerk/nextjs"
@@ -62,7 +62,7 @@ export const metadata: Metadata = {
   isReadOnly: true, // not a standard Next metadata property, just keeping user changes if any
 } as any
 
-const inter = DM_Sans({
+const inter = TikTok_Sans({
   subsets: ["latin"],
   weight: ["300", "400", "500", "600", "700", "800", "900"],
   variable: "--font-sans",

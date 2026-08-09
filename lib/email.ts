@@ -27,7 +27,7 @@ export async function sendClipsReadyEmail({
   const baseUrl =
     process.env.NEXT_PUBLIC_APP_URL ||
     (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : "https://kivio.pro")
-  const projectUrl = `${baseUrl}/project/${projectId}`
+  const projectUrl = `${baseUrl}/projects/${projectId}`
   const fromEmail =
     process.env.RESEND_FROM_EMAIL || "Kivio.pro <notifications@mailer.kivio.pro>"
 

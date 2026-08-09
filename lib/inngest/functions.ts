@@ -41,25 +41,25 @@ export const processVideo = inngest.createFunction(
         console.log(
           `[processVideo] Step: update-status-and-fetch-plan for project: ${projectId}`
         )
-        const [data] = await db
-          .select({
-            project: projects,
-            userPlan: user.plan,
-          })
-          .from(projects)
-          .innerJoin(user, eq(projects.userId, user.id))
-          .where(eq(projects.id, projectId))
+        const [[data], _] = await Promise.all([
+          db
+            .select({
+              project: projects,
+              userPlan: user.plan,
+            })
+            .from(projects)
+            .innerJoin(user, eq(projects.userId, user.id))
+            .where(eq(projects.id, projectId)),
+          db
+            .update(projects)
+            .set({ status: "processing" })
+            .where(eq(projects.id, projectId))
+        ])
 
-        if (!data) {
-          throw new Error(`Project ${projectId} or associated user not found`)
+        if (!data || !data.project) {
+          throw new Error(`Project not found: ${projectId}`);
         }
-
-        const projectData = data.project
-
-        await db
-          .update(projects)
-          .set({ status: "processing" })
-          .where(eq(projects.id, projectId))
+        const projectData = data.project;
 
         // Read styling preset from the project record (saved during upload)
         const styling = {
@@ -83,12 +83,29 @@ export const processVideo = inngest.createFunction(
         `[processVideo] Step: transcribe-video for project: ${projectId}`
       )
 
-      // Check if transcription already exists
-      const existing = await db
+      const existingPromise = db
         .select()
         .from(transcriptions)
         .where(eq(transcriptions.projectId, projectId))
         .limit(1)
+
+      const existingForSameKeyPromise = key
+        ? db
+            .select({
+              fullText: transcriptions.fullText,
+              words: transcriptions.words,
+              paragraphs: transcriptions.paragraphs,
+            })
+            .from(transcriptions)
+            .innerJoin(projects, eq(transcriptions.projectId, projects.id))
+            .where(eq(projects.sourceVideoKey, key))
+            .limit(1)
+        : Promise.resolve([])
+
+      const [existing, existingForSameKeyList] = await Promise.all([
+        existingPromise,
+        existingForSameKeyPromise
+      ])
 
       if (existing.length > 0) {
         console.log(
@@ -101,34 +118,21 @@ export const processVideo = inngest.createFunction(
         }
       }
 
-      // Check if transcription exists for any other project with the same key
-      if (key) {
-        const [existingForSameKey] = await db
-          .select({
-            fullText: transcriptions.fullText,
-            words: transcriptions.words,
-            paragraphs: transcriptions.paragraphs,
-          })
-          .from(transcriptions)
-          .innerJoin(projects, eq(transcriptions.projectId, projects.id))
-          .where(eq(projects.sourceVideoKey, key))
-          .limit(1)
-
-        if (existingForSameKey) {
-          console.log(
-            `[processVideo] Transcription found in another project with the same key: ${key}. Reusing it.`
-          )
-          await db.insert(transcriptions).values({
-            projectId,
-            fullText: existingForSameKey.fullText,
-            words: existingForSameKey.words,
-            paragraphs: existingForSameKey.paragraphs,
-          })
-          return {
-            fullText: existingForSameKey.fullText,
-            words: existingForSameKey.words as WordTimestamp[],
-            paragraphs: existingForSameKey.paragraphs,
-          }
+      if (key && existingForSameKeyList?.length > 0) {
+        const existingForSameKey = existingForSameKeyList[0]
+        console.log(
+          `[processVideo] Transcription found in another project with the same key: ${key}. Reusing it.`
+        )
+        await db.insert(transcriptions).values({
+          projectId,
+          fullText: existingForSameKey.fullText,
+          words: existingForSameKey.words,
+          paragraphs: existingForSameKey.paragraphs,
+        })
+        return {
+          fullText: existingForSameKey.fullText,
+          words: existingForSameKey.words as WordTimestamp[],
+          paragraphs: existingForSameKey.paragraphs,
         }
       }
 
@@ -170,36 +174,40 @@ export const processVideo = inngest.createFunction(
       const analyzerEndpoint = process.env.MODAL_ANALYZER_ENDPOINT || "https://ms8460149--makemyclip-ai-rendering-videoanalyzer-analyze.modal.run"
       console.log(`[processVideo] Step: analyze-video-modal calling endpoint: ${analyzerEndpoint}`)
 
-      // Check if analysis path already exists
-      const [proj] = await db
+      const projPromise = db
         .select({ analysisPath: projects.analysisPath })
         .from(projects)
         .where(eq(projects.id, projectId))
+        .then(res => res[0])
+
+      const existingAnalysisPromise = key
+        ? db
+            .select({ analysisPath: projects.analysisPath })
+            .from(projects)
+            .where(eq(projects.sourceVideoKey, key))
+            .limit(1)
+            .then(res => res[0])
+        : Promise.resolve(null)
+
+      const [proj, existingAnalysis] = await Promise.all([
+        projPromise,
+        existingAnalysisPromise
+      ])
 
       if (proj?.analysisPath) {
         console.log(`[processVideo] Analysis path already exists for project ${projectId}: ${proj.analysisPath}. Skipping analyze-video-modal.`)
         return { success: true, analysisUrl: proj.analysisPath }
       }
 
-      // Check if analysis path exists for any other project with the same key
-      if (key) {
-        const [existingAnalysis] = await db
-          .select({ analysisPath: projects.analysisPath })
-          .from(projects)
-          .where(eq(projects.sourceVideoKey, key))
-          .limit(1)
-
-        if (existingAnalysis?.analysisPath) {
-          console.log(`[processVideo] Analysis path found in another project with the same key: ${key}. Reusing it.`)
-          await db
-            .update(projects)
-            .set({
-              analysisPath: existingAnalysis.analysisPath,
-              status: "analysis_complete",
-            })
-            .where(eq(projects.id, projectId))
-          return { success: true, analysisUrl: existingAnalysis.analysisPath }
-        }
+      if (key && existingAnalysis?.analysisPath) {
+        console.log(`[processVideo] Analysis path found in another project with the same key: ${key}. Reusing it.`)
+        await db
+          .update(projects)
+          .set({
+            analysisPath: existingAnalysis.analysisPath,
+          })
+          .where(eq(projects.id, projectId))
+        return { success: true, analysisUrl: existingAnalysis.analysisPath }
       }
 
       const presignedUrl = videoUrl || (await getDownloadPresignedUrl(key, 3600))
@@ -231,7 +239,6 @@ export const processVideo = inngest.createFunction(
             .update(projects)
             .set({
               analysisPath: resJson.analysis_url,
-              status: "analysis_complete",
             })
             .where(eq(projects.id, projectId))
           return { success: true, analysisUrl: resJson.analysis_url }
@@ -245,15 +252,8 @@ export const processVideo = inngest.createFunction(
       }
     })
 
-    // Step 3: Analyze and extract viral clips using Gemini 2.5 Flash
     const aiClips = await step.run("analyze-moments", async () => {
       console.log(`[processVideo] Step: analyze-moments using Gemini...`)
-
-      // Update status to analyzing
-      await db
-        .update(projects)
-        .set({ status: "analyzing" })
-        .where(eq(projects.id, projectId))
 
       const { analyzeViralMoments } = await import("@/lib/gemini")
       const { clips } = await import("@/lib/db/schema")
@@ -382,21 +382,21 @@ export const processVideo = inngest.createFunction(
     // Step 5: Deduct credits and finalize
     await step.run("deduct-credits-and-finalize", async () => {
       const { user } = await import("@/lib/db/schema")
-      const [projectData] = await db
-        .select({
-          userId: projects.userId,
-          credits: user.credits,
-          duration: projects.duration,
-        })
-        .from(projects)
-        .innerJoin(user, eq(projects.userId, user.id))
-        .where(eq(projects.id, projectId))
-
-      // Always mark project status as ready
-      await db
-        .update(projects)
-        .set({ status: "ready" })
-        .where(eq(projects.id, projectId))
+      const [[projectData], _] = await Promise.all([
+        db
+          .select({
+            userId: projects.userId,
+            credits: user.credits,
+            duration: projects.duration,
+          })
+          .from(projects)
+          .innerJoin(user, eq(projects.userId, user.id))
+          .where(eq(projects.id, projectId)),
+        db
+          .update(projects)
+          .set({ status: "ready" })
+          .where(eq(projects.id, projectId))
+      ])
 
       if (!projectData) return
 

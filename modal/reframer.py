@@ -2679,6 +2679,14 @@ class AIReframe:
                                 continue
 
                             indices = np.where(mask)[0]
+                            if len(indices) > 0:
+                                # Ensure frame indices are sorted in ascending order
+                                sort_idx = np.argsort(track_frames[indices])
+                                indices = indices[sort_idx]
+                                # Deduplicate frame indices, keeping the first occurrence
+                                _, uniq_idx = np.unique(track_frames[indices], return_index=True)
+                                indices = indices[uniq_idx]
+
                             local_frames = track_frames[indices] - start_frame_global
                             new_track = {
                                 "track": {

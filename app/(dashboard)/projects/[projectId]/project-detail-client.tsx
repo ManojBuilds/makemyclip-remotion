@@ -323,6 +323,7 @@ export function ProjectDetailClient({
     return () => clearInterval(intervalId)
   }, [project.id, project.status, clips, autoDownloadClipIds])
 
+
   if (project.status === "error") {
     return (
       <div className="flex min-h-[70vh] flex-col items-center justify-center space-y-8 px-4 text-center">
@@ -383,35 +384,37 @@ export function ProjectDetailClient({
 
         {/* CLIPS LIST — horizontal cards */}
         <div className="flex flex-col gap-4">
-          {clips.map((clip, index) => {
-            const isCaptioned = showCaptions[clip.id] ?? true
+          {clips
+            .filter((clip) => clip.status !== "error")
+            .map((clip, index) => {
+              const isCaptioned = showCaptions[clip.id] ?? true
 
-            return (
-              <ClipCard
-                key={clip.id}
-                clip={clip}
-                index={index}
-                isCaptioned={isCaptioned}
-                isFree={_userData.plan === "free"}
-                onToggleCaptions={(clipId) =>
-                  setShowCaptions((prev) => ({
-                    ...prev,
-                    [clipId]: !(prev[clipId] ?? true),
-                  }))
-                }
-                onEdit={(c) => setActiveEditClip(c)}
-                onDownload={(c, opts) => handleDownloadClick(c, opts)}
-                isPlaying={activePlayingId === clip.id}
-                onPlay={() =>
-                  setActivePlayingId(
-                    activePlayingId === clip.id ? null : clip.id
-                  )
-                }
-                isDownloading={downloadingClipId === clip.id}
-                isExporting={exportingClipIds[clip.id]}
-              />
-            )
-          })}
+              return (
+                <ClipCard
+                  key={clip.id}
+                  clip={clip}
+                  index={index}
+                  isCaptioned={isCaptioned}
+                  isFree={_userData.plan === "free"}
+                  onToggleCaptions={(clipId) =>
+                    setShowCaptions((prev) => ({
+                      ...prev,
+                      [clipId]: !(prev[clipId] ?? true),
+                    }))
+                  }
+                  onEdit={(c) => setActiveEditClip(c)}
+                  onDownload={(c, opts) => handleDownloadClick(c, opts)}
+                  isPlaying={activePlayingId === clip.id}
+                  onPlay={() =>
+                    setActivePlayingId(
+                      activePlayingId === clip.id ? null : clip.id
+                    )
+                  }
+                  isDownloading={downloadingClipId === clip.id}
+                  isExporting={exportingClipIds[clip.id]}
+                />
+              )
+            })}
         </div>
       </div>
     )

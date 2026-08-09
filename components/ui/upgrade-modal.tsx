@@ -78,7 +78,7 @@ export function UpgradeModal({
             {prompt.highlights.map((highlight, index) => (
               <li
                 key={index}
-                className="flex items-start gap-3 text-xs font-semibold text-slate-700 dark:text-slate-200"
+                className="flex items-start gap-3 text-xs font-semibold text-slate-700"
               >
                 <div className="mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-primary/10 text-primary">
                   <Check className="h-3 w-3 stroke-[3]" />
