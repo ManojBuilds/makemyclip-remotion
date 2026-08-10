@@ -16,7 +16,7 @@ export function Logo({ className, iconClassName, textClassName, href = "/"
 
       <div className={cn("flex items-center select-none", className)}>
         <img
-          src="/assets/logo_only.png"
+          src="https://res.cloudinary.com/dc6yzmwrq/image/upload/v1786372588/logo_only_ezfvyn.png"
           alt="kivio"
           className={cn("h-8 w-auto object-contain md:h-10", iconClassName)}
         />

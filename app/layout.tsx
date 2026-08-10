@@ -46,7 +46,7 @@ export const metadata: Metadata = {
     description: siteDescription,
     images: [
       {
-        url: "/assets/logo_with_text.svg",
+        url: "https://res.cloudinary.com/dc6yzmwrq/image/upload/v1786372287/ChatGPT_Image_Aug_10_2026_07_43_43_PM_1_jrlmgz.png",
         width: 1200,
         height: 630,
         alt: "Kivio Logo",
@@ -57,7 +57,7 @@ export const metadata: Metadata = {
     card: "summary_large_image",
     title: siteName,
     description: siteDescription,
-    images: ["/assets/logo_with_text.svg"],
+    images: ["https://res.cloudinary.com/dc6yzmwrq/image/upload/v1786372287/ChatGPT_Image_Aug_10_2026_07_43_43_PM_1_jrlmgz.png"],
   },
   isReadOnly: true, // not a standard Next metadata property, just keeping user changes if any
 } as any
