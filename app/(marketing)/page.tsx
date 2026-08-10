@@ -43,7 +43,7 @@ export default function LandingPage() {
 
             <motion.p
               variants={fadeIn}
-              className="md:text-lg mx-auto mb-4 max-w-4xl text-sm leading-relaxed text-muted-foreground"
+              className="md:text-lg mx-auto mb-4 max-w-3xl text-sm leading-relaxed text-muted-foreground"
             >
               Paste a YouTube link or upload a file. The app finds the best parts, crops them to vertical, and generates styled captions. Ready for TikTok, Reels, and Shorts.
             </motion.p>

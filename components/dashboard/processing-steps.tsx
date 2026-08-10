@@ -94,15 +94,7 @@ export function ProcessingSteps({ project }: { project: Project }) {
           </div>
         )}
         
-        {/* Pulsing Glassmorphic Processing Overlay */}
-        <div className="absolute inset-0 bg-black/10 flex items-center justify-center">
-          <div className="flex items-center gap-1.5 rounded-full bg-white/95 px-3 py-1 shadow-md backdrop-blur-md">
-            <Loader2 className="size-3 animate-spin text-blue-600" />
-            <span className="text-[10px] font-bold tracking-wider text-slate-800 uppercase">
-              Processing
-            </span>
-          </div>
-        </div>
+
       </div>
 
       {/* Video Title & Notify Action Block */}

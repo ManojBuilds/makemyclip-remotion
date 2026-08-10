@@ -451,6 +451,7 @@ function ClipCardBase({
   isFree = false,
 }: ClipCardProps) {
   const [showUpgradeModal, setShowUpgradeModal] = useState(false)
+  const [isDownloadingPreview, setIsDownloadingPreview] = useState(false)
   const isRendering = clip.status === "rendering"
   const clipType = clip.clipType && CLIP_TYPE_MAP[clip.clipType]
   const duration = clip.endTime - clip.startTime
@@ -577,18 +578,47 @@ function ClipCardBase({
                 variant="outline"
                 size="sm"
                 className="flex h-9 w-full items-center justify-center gap-2 rounded-xl border border-slate-200 bg-white px-4 text-xs font-bold text-slate-700 shadow-sm transition-all duration-300 hover:bg-slate-50 active:scale-95 sm:h-10 sm:w-auto sm:px-5"
-                onClick={() => {
-                  if (clip.previewVideoUrl) {
-                    window.open(clip.previewVideoUrl, "_blank", "noopener,noreferrer")
-                    toast.success("Opening preview video in new tab!")
-                  } else {
+                onClick={async () => {
+                  if (!clip.previewVideoUrl) {
                     toast.error("Preview video is not ready yet.")
+                    return
+                  }
+                  setIsDownloadingPreview(true)
+                  const toastId = toast.loading("Downloading preview video...")
+                  try {
+                    const response = await fetch(clip.previewVideoUrl)
+                    if (!response.ok) throw new Error("Fetch failed")
+                    const blob = await response.blob()
+                    const blobUrl = window.URL.createObjectURL(blob)
+                    const link = document.createElement("a")
+                    link.href = blobUrl
+
+                    const safeTitle = (clip.title || "clip").replace(/[^a-z0-9]/gi, "_").toLowerCase()
+                    link.download = `${safeTitle}_preview.mp4`
+
+                    document.body.appendChild(link)
+                    link.click()
+                    document.body.removeChild(link)
+                    window.URL.revokeObjectURL(blobUrl)
+                    toast.dismiss(toastId)
+                    toast.success("Download started!")
+                  } catch (err) {
+                    console.error("Direct download failed, using fallback:", err)
+                    window.open(clip.previewVideoUrl, "_blank", "noopener,noreferrer")
+                    toast.dismiss(toastId)
+                    toast.success("Opening preview video in new tab.")
+                  } finally {
+                    setIsDownloadingPreview(false)
                   }
                 }}
-                disabled={!clip.previewVideoUrl}
+                disabled={!clip.previewVideoUrl || isDownloadingPreview}
               >
-                <Download className="size-3.5 text-slate-500" />
-                Download Preview (SD)
+                {isDownloadingPreview ? (
+                  <Loader2 className="size-3.5 animate-spin" />
+                ) : (
+                  <Download className="size-3.5 text-slate-500" />
+                )}
+                {isDownloadingPreview ? "Downloading..." : "Download Preview (SD)"}
               </Button>
               <Button
                 variant="default"
