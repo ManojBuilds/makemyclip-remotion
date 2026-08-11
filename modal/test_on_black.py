@@ -15,12 +15,16 @@ from presets import PRESET_STYLES, ALWAYS_UPPERCASE
 # ----------------------------------------------------------------------
 
 CUSTOM_TRANSCRIPT = [
-    {"word": "Wait...", "start": 0.00, "end": 0.35},
-    {"word": "this", "start": 0.35, "end": 0.60},
-    {"word": "changes", "start": 0.60, "end": 1.00},
-    {"word": "everything!", "start": 1.00, "end": 1.70},
-    {"word": "Watch", "start": 1.70, "end": 2.10},
-    {"word": "closely.", "start": 2.10, "end": 3.00},
+    # Speaker 1
+    {"word": "Wait...", "start": 0.00, "end": 0.35, "speaker": "speaker_1"},
+    {"word": "this", "start": 0.35, "end": 0.60, "speaker": "speaker_1"},
+    {"word": "changes", "start": 0.60, "end": 1.00, "speaker": "speaker_1"},
+    {"word": "everything!", "start": 1.00, "end": 1.50, "speaker": "speaker_1"},
+    # Speaker 2
+    {"word": "Watch", "start": 1.50, "end": 1.85, "speaker": "speaker_2"},
+    {"word": "closely", "start": 1.85, "end": 2.20, "speaker": "speaker_2"},
+    {"word": "right", "start": 2.20, "end": 2.50, "speaker": "speaker_2"},
+    {"word": "now!", "start": 2.50, "end": 2.90, "speaker": "speaker_2"},
 ]
 
 
@@ -83,8 +87,8 @@ def preset_to_styling(name: str, preset: dict) -> dict:
         "stroke_width": preset["outline"],
         "shadow_depth": preset["shadow"],
         "text_transform": ("uppercase" if name in ALWAYS_UPPERCASE else "none"),
-        # Enable word-level active highlighting by default
-        "word_highlight": True,
+        # Use preset default for word-level active highlighting (True for Shorts/Reels, False for Cinema/Luxury)
+        "word_highlight": preset.get("word_highlight_default", True),
         # Approximate vertical position from margin
         "position_y": 0.5,
     }
@@ -105,17 +109,17 @@ def preset_to_styling(name: str, preset: dict) -> dict:
 
 
 def main():
-    output_dir = "test_outputs"
+    output_dir = os.path.join(os.path.dirname(__file__), "test_outputs")
     os.makedirs(output_dir, exist_ok=True)
 
-    black_video = os.path.join(output_dir, "video_for_caption_testing.mp4")
+    black_video = os.path.join(output_dir, "black_canvas.mp4")
     generate_black_video(black_video)
+    input_video = black_video
 
-    # Target a single preset (change to any preset name, e.g. "hormozi")
-    target_preset = "cinema"
+    target_preset = sys.argv[1].lower() if len(sys.argv) > 1 else "all"
 
     for preset_name, preset in PRESET_STYLES.items():
-        if preset_name != target_preset:
+        if target_preset != "all" and preset_name != target_preset:
             continue
 
         print(f"\n{'=' * 60}")
@@ -134,18 +138,18 @@ def main():
 
         try:
             video_url, _ = burn_captions_local(
-                local_video=black_video,
+                local_video=input_video,
                 local_output=out_video,
                 transcript=CUSTOM_TRANSCRIPT,
                 styling=styling,
-                show_watermark=True,
-                crop_mode="reframe",
+                show_watermark=False,
+                crop_mode="split",
                 quality="export",
                 tmpdir=output_dir,
             )
-            print(f"✅ {out_video}")
+            print(f"✅ Generated {out_video}")
         except Exception as e:
-            print(f"❌ Failed: {preset_name}: {e}")
+            print(f"❌ Failed preset {preset_name}: {e}")
 
 
 if __name__ == "__main__":

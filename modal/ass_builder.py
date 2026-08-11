@@ -28,6 +28,20 @@ from presets import (
 
 logger = logging.getLogger("makemyclip.ass_builder")
 
+# Curated multi-speaker highlight palettes (Speaker 1, Speaker 2, Speaker 3, Speaker 4)
+SPEAKER_HIGHLIGHT_PALETTES: dict[str, list[str]] = {
+    "impact": ["#FFE500", "#00F0FF", "#FF007A", "#34D399"],
+    "creator": ["#00F0FF", "#FFE500", "#FF007A", "#A855F7"],
+    "cinema": ["#FFB800", "#00F0FF", "#F43F5E", "#38BDF8"],
+    "focus": ["#0A0A0A", "#0A0A0A", "#0A0A0A", "#0A0A0A"],
+    "neon": ["#FF007A", "#00F0FF", "#FFE500", "#A855F7"],
+    "luxury": ["#FFD700", "#00F0FF", "#F43F5E", "#38BDF8"],
+}
+
+SPEAKER_PILL_PALETTES: dict[str, list[str]] = {
+    "focus": ["#FFE600", "#00F0FF", "#FF007A", "#34D399"],
+}
+
 # ── Canvas geometry ──────────────────────────────────────────────────────────
 V_WIDTH, V_HEIGHT = 1080, 1920
 SCALE_FACTOR = V_HEIGHT / 1920.0
@@ -35,9 +49,9 @@ CX, CY = V_WIDTH // 2, V_HEIGHT // 2
 _MAX_SAFE_WIDTH = 840.0
 
 # ── Shadow tags ──────────────────────────────────────────────────────────────
-_SHADOW_TAG = r"\xshad2\yshad2\blur0\4a&H20&"
+_SHADOW_TAG = r"\xshad3\yshad3\blur0\4a&H20&"
 _NO_SHADOW_TAG = r"\xshad0\yshad0\blur0"
-_NEON_SHADOW_TAG = r"\xshad0\yshad0\blur6\4a&H10&"
+_NEON_SHADOW_TAG = r"\xshad0\yshad0\blur10\4a&H10&"
 
 # ── Default word-effect timing (milliseconds) ────────────────────────────────
 _WORD_ANIM_MS = 130
@@ -64,17 +78,17 @@ class WordCtx:
 
 # ── Sentence entrance animations (one per preset) ────────────────────────────
 def impact_animation(fs: int, duration: int = 150) -> str:
-    """Whole sentence squashes in: 92% → 104% → 100%."""
+    """Whole sentence squashes in: 90% → 106% → 100%."""
     mid = int(duration * 0.6)
     return (
-        rf"\fscx92\fscy92"
-        rf"\t(0,{mid},\fscx104\fscy104)"
+        rf"\fscx90\fscy90"
+        rf"\t(0,{mid},\fscx106\fscy106)"
         rf"\t({mid},{duration},\fscx100\fscy100)"
     )
 
 
 def creator_animation(fs: int, duration: int = 150) -> str:
-    """No sentence-level pop — motion lives on the active word (handled per-word in build_animation)."""
+    """No sentence-level pop — motion lives on the active word."""
     return ""
 
 
@@ -122,25 +136,26 @@ def _wrap(active_prefix: str, ctx: WordCtx, active_suffix: str) -> str:
 
 
 def impact_word_effect(ctx: WordCtx) -> str:
-    """Punchy squash/stretch overshoot to 116% then settle to 110%."""
+    """Punchy squash/stretch overshoot to 122% then settle to 112%."""
     mid = int(_WORD_ANIM_MS * 0.55)
     prefix = (
         rf"\fscx100\fscy100"
-        rf"\t(0,{mid},\fscx116\fscy116)"
-        rf"\t({mid},{_WORD_ANIM_MS},\fscx110\fscy110)"
+        rf"\t(0,{mid},\fscx122\fscy122)"
+        rf"\t({mid},{_WORD_ANIM_MS},\fscx112\fscy112)"
     )
     suffix = r"\fscx100\fscy100"
     return _wrap(prefix, ctx, suffix)
 
 
 def creator_word_effect(ctx: WordCtx) -> str:
-    """Smooth fade-in (no popping). Slide up is handled at sentence/line level."""
-    dur = 120
+    """Smooth cyan highlight reveal with scale pop (108% -> 104%)."""
+    mid = int(140 * 0.5)
     prefix = (
-        rf"\alpha&H90&"
-        rf"\t(0,{dur},\alpha&H00&)"
+        rf"\fscx100\fscy100\alpha&H60&"
+        rf"\t(0,{mid},\fscx108\fscy108\alpha&H00&)"
+        rf"\t({mid},140,\fscx104\fscy104)"
     )
-    suffix = r"\alpha&H00&"
+    suffix = r"\fscx100\fscy100\alpha&H00&"
     return _wrap(prefix, ctx, suffix)
 
 
@@ -155,19 +170,19 @@ def focus_word_effect(ctx: WordCtx) -> str:
     """Draw a growing rounded pill behind the active word (Apple-keynote feel).
 
     Implemented with separate ``\\xbord`` (horizontal padding) and ``\\ybord`` (vertical padding)
-    along with ``\\blur`` to soften corners, animating the scale 95% -> 102% -> 100%.
+    along with ``\\blur`` to soften corners, animating the scale 94% -> 106% -> 100%.
     """
     pill = hex_to_ass_color(ctx.pill_color_hex)
     active = hex_to_ass_color(ctx.highlight_color_hex)
     normal = hex_to_ass_color(ctx.normal_color_hex)
-    pill_xbord = max(1, int(20 * SCALE_FACTOR))
-    pill_ybord = max(1, int(10 * SCALE_FACTOR))
+    pill_xbord = max(1, int(24 * SCALE_FACTOR))
+    pill_ybord = max(1, int(14 * SCALE_FACTOR))
     mid = int(140 * 0.55)
     prefix = (
         rf"\c&H{active.b:02X}{active.g:02X}{active.r:02X}&"
-        rf"\3c&H{pill.b:02X}{pill.g:02X}{pill.r:02X}&\xbord{pill_xbord}\ybord{pill_ybord}\blur2\shad0"
-        rf"\fscx95\fscy95"
-        rf"\t(0,{mid},\fscx102\fscy102)"
+        rf"\3c&H{pill.b:02X}{pill.g:02X}{pill.r:02X}&\xbord{pill_xbord}\ybord{pill_ybord}\blur3\shad0"
+        rf"\fscx94\fscy94"
+        rf"\t(0,{mid},\fscx106\fscy106)"
         rf"\t({mid},140,\fscx100\fscy100)"
     )
     suffix = (
@@ -183,17 +198,17 @@ def neon_word_effect(ctx: WordCtx) -> str:
     glow = hex_to_ass_color(ctx.highlight_color_hex)
     mid = int(150 * 0.5)
     
-    xbord_init = max(1.5, 3.0 * SCALE_FACTOR)
-    ybord_init = max(1.5, 3.0 * SCALE_FACTOR)
-    blur_init = int(8 * SCALE_FACTOR)
+    xbord_init = max(2.0, 4.0 * SCALE_FACTOR)
+    ybord_init = max(2.0, 4.0 * SCALE_FACTOR)
+    blur_init = int(10 * SCALE_FACTOR)
     
-    xbord_mid = max(2.0, 5.0 * SCALE_FACTOR)
-    ybord_mid = max(2.0, 5.0 * SCALE_FACTOR)
-    blur_mid = int(12 * SCALE_FACTOR)
+    xbord_mid = max(3.0, 6.0 * SCALE_FACTOR)
+    ybord_mid = max(3.0, 6.0 * SCALE_FACTOR)
+    blur_mid = int(14 * SCALE_FACTOR)
     
-    xbord_settle = max(1.5, 3.5 * SCALE_FACTOR)
-    ybord_settle = max(1.5, 3.5 * SCALE_FACTOR)
-    blur_settle = int(8 * SCALE_FACTOR)
+    xbord_settle = max(2.0, 4.5 * SCALE_FACTOR)
+    ybord_settle = max(2.0, 4.5 * SCALE_FACTOR)
+    blur_settle = int(10 * SCALE_FACTOR)
 
     prefix = (
         rf"\c&HFFFFFF&"
@@ -202,8 +217,8 @@ def neon_word_effect(ctx: WordCtx) -> str:
         rf"\4a&H00&"
         rf"\xbord{xbord_init:.1f}\ybord{ybord_init:.1f}\blur{blur_init}"
         rf"\fscx100\fscy100"
-        rf"\t(0,{mid},\xbord{xbord_mid:.1f}\ybord{ybord_mid:.1f}\blur{blur_mid}\fscx108\fscy108)"
-        rf"\t({mid},150,\xbord{xbord_settle:.1f}\ybord{ybord_settle:.1f}\blur{blur_settle}\fscx104\fscy104)"
+        rf"\t(0,{mid},\xbord{xbord_mid:.1f}\ybord{ybord_mid:.1f}\blur{blur_mid}\fscx112\fscy112)"
+        rf"\t({mid},150,\xbord{xbord_settle:.1f}\ybord{ybord_settle:.1f}\blur{blur_settle}\fscx106\fscy106)"
     )
     
     normal_c = hex_to_ass_color(ctx.normal_color_hex)
@@ -218,17 +233,17 @@ def neon_word_effect(ctx: WordCtx) -> str:
 
 
 def luxury_word_effect(ctx: WordCtx) -> str:
-    """Luxury Shimmer & Rise active word effect: tracking expansion, scale pop (1.06), soft champagne glow, and smooth return."""
+    """Luxury Shimmer & Rise active word effect: sharp metallic gold, tracking expansion, crisp dark border, scale pop (106% -> 102%)."""
     dur = 160
     mid = int(dur * 0.5)
     gold = hex_to_ass_color(ctx.highlight_color_hex)
     
     prefix = (
         rf"\c&H{gold.b:02X}{gold.g:02X}{gold.r:02X}&"
-        rf"\3c&H{gold.b:02X}{gold.g:02X}{gold.r:02X}&"
-        rf"\blur4\fscx100\fscy100\fsp{ctx.default_fsp:.1f}"
-        rf"\t(0,{mid},\blur6\fscx106\fscy106\fsp{ctx.default_fsp + 3.0:.1f})"
-        rf"\t({mid},{dur},\blur2\fscx104\fscy104\fsp{ctx.default_fsp + 1.5:.1f})"
+        rf"\3c&H{ctx.stroke_c.b:02X}{ctx.stroke_c.g:02X}{ctx.stroke_c.r:02X}&"
+        rf"\blur0\fscx100\fscy100\fsp{ctx.default_fsp:.1f}"
+        rf"\t(0,{mid},\fscx106\fscy106\fsp{ctx.default_fsp + 3.0:.1f})"
+        rf"\t({mid},{dur},\fscx102\fscy102\fsp{ctx.default_fsp + 1.5:.1f})"
     )
     
     normal_c = hex_to_ass_color(ctx.normal_color_hex)
@@ -530,6 +545,7 @@ def _emit_events(
     h_color_hex: str,
     shadow_tag: str,
     global_crop_mode: str = "reframe",
+    pill_color_hex: Optional[str] = None,
 ) -> None:
     import pysubs2
 
@@ -543,7 +559,6 @@ def _emit_events(
             )
         )
 
-    # Determine layout of this phrase → vertical anchor.
     phrase_layout = global_crop_mode
     layouts_in_group = [w.get("layout") for w in phrase_group if w.get("layout")]
     if layouts_in_group:
@@ -562,7 +577,10 @@ def _emit_events(
     wh_val = template.get("word_highlight")
     if wh_val is None:
         wh_val = template.get("word_level_highlight")
-    word_highlight = True if wh_val is None else bool(wh_val)
+    if wh_val is None:
+        word_highlight = base.get("word_highlight_default", True)
+    else:
+        word_highlight = bool(wh_val)
 
     if not word_highlight:
         # Emit a single, clean subtitle block for the phrase group
@@ -599,7 +617,7 @@ def _emit_events(
         normal_color_hex=normal_color,
         stroke_c=stroke_c,
         stroke_bord=stroke_bord,
-        pill_color_hex=base.get("pillcolor", "#FFE500"),
+        pill_color_hex=pill_color_hex or base.get("pillcolor", "#FFE500"),
         default_fsp=float(template.get("letter_spacing", 0.0) or 0.0),
     )
 
@@ -694,6 +712,7 @@ def generate_ass(
 
     raw_items = _flatten_transcript(transcript)
     do_upper = template.get("uppercase") or preset in ALWAYS_UPPERCASE
+
     words = [
         {
             "word": (
@@ -734,9 +753,30 @@ def generate_ass(
 
     MIN_GROUP_DURATION_S = float(template.get("min_group_duration", 0.8))
 
+    multi_speaker_val = template.get("multi_speaker_colors")
+    if multi_speaker_val is None:
+        multi_speaker_val = template.get("speaker_colors")
+    enable_multi_speaker = bool(multi_speaker_val)
+
+    unique_speakers = list(dict.fromkeys(w.get("speaker", "speaker_1") for w in words))
+    multi_speaker = enable_multi_speaker and len(unique_speakers) > 1
+
     for g_idx, group in enumerate(groups):
         if not group:
             continue
+
+        spk = group[0].get("speaker", "speaker_1")
+        if multi_speaker and spk in unique_speakers:
+            spk_idx = unique_speakers.index(spk)
+            group_h_color = SPEAKER_HIGHLIGHT_PALETTES.get(preset, SPEAKER_HIGHLIGHT_PALETTES["impact"])[spk_idx % 4]
+            group_pill_color = (
+                SPEAKER_PILL_PALETTES.get(preset, [base.get("pillcolor")])[spk_idx % 4]
+                if base.get("pillcolor")
+                else base.get("pillcolor")
+            )
+        else:
+            group_h_color = h_color_hex
+            group_pill_color = base.get("pillcolor")
 
         p_start = group[0]["start"]
         p_end_raw = group[-1]["end"]
@@ -771,9 +811,10 @@ def generate_ass(
             template,
             overrides,
             base,
-            h_color_hex,
+            group_h_color,
             s_tag,
             crop_mode,
+            pill_color_hex=group_pill_color,
         )
 
     subs.save(output_path)

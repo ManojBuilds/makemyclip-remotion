@@ -167,28 +167,20 @@ export const LANGUAGES = [
 
 // Preview asset paths from R2 (3s loops on black background)
 export const PREVIEW_IMAGES: Record<string, string> = {
-  impact:
-    "https://pub-dab84dec13074258806f788a00943c46.r2.dev/previews/black_template_impact.webp",
-  creator:
-    "https://pub-dab84dec13074258806f788a00943c46.r2.dev/previews/black_template_creator.webp",
-  cinema:
-    "https://pub-dab84dec13074258806f788a00943c46.r2.dev/previews/black_template_cinema.webp",
-  focus:
-    "https://pub-dab84dec13074258806f788a00943c46.r2.dev/previews/black_template_focus.webp",
-  neon:
-    "https://pub-dab84dec13074258806f788a00943c46.r2.dev/previews/black_template_neon.webp",
+  cinema: "https://pub-dab84dec13074258806f788a00943c46.r2.dev/previews/black_template_cinema.webp",
+  creator: "https://pub-dab84dec13074258806f788a00943c46.r2.dev/previews/black_template_creator.webp",
+  focus: "https://pub-dab84dec13074258806f788a00943c46.r2.dev/previews/black_template_focus.webp",
+  impact: "https://pub-dab84dec13074258806f788a00943c46.r2.dev/previews/black_template_impact.webp",
+  neon: "https://pub-dab84dec13074258806f788a00943c46.r2.dev/previews/black_template_neon.webp",
+  luxury: "https://pub-dab84dec13074258806f788a00943c46.r2.dev/previews/black_template_luxury.webp",
 }
 
 // Ultra-lightweight optimized MP4 preview paths from R2 (~8KB per clip)
 export const PREVIEW_VIDEOS: Record<string, string> = {
-  impact:
-    "https://pub-dab84dec13074258806f788a00943c46.r2.dev/previews/black_template_impact.mp4",
-  creator:
-    "https://pub-dab84dec13074258806f788a00943c46.r2.dev/previews/black_template_creator.mp4",
-  cinema:
-    "https://pub-dab84dec13074258806f788a00943c46.r2.dev/previews/black_template_cinema.mp4",
-  focus:
-    "https://pub-dab84dec13074258806f788a00943c46.r2.dev/previews/black_template_focus.mp4",
-  neon:
-    "https://pub-dab84dec13074258806f788a00943c46.r2.dev/previews/black_template_neon.mp4",
+  cinema: "https://pub-dab84dec13074258806f788a00943c46.r2.dev/previews/black_template_cinema.mp4",
+  creator: "https://pub-dab84dec13074258806f788a00943c46.r2.dev/previews/black_template_creator.mp4",
+  focus: "https://pub-dab84dec13074258806f788a00943c46.r2.dev/previews/black_template_focus.mp4",
+  impact: "https://pub-dab84dec13074258806f788a00943c46.r2.dev/previews/black_template_impact.mp4",
+  neon: "https://pub-dab84dec13074258806f788a00943c46.r2.dev/previews/black_template_neon.mp4",
+  luxury: "https://pub-dab84dec13074258806f788a00943c46.r2.dev/previews/black_template_luxury.mp4",
 }

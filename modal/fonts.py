@@ -94,6 +94,12 @@ FONT_NAME_MAP: dict[str, str] = {
     "Playfair Display Bold": "Playfair Display",
     "Playfair-Display-Bold": "Playfair Display",
     "Playfair": "Playfair Display",
+
+    # Telegraf
+    "Telegraf": "Telegraf",
+    "Telegraf Regular": "Telegraf",
+    "Telegraf-Regular": "Telegraf",
+    "telegraf": "Telegraf",
 }
 
 

@@ -27,6 +27,7 @@ import {
   SelectValue,
 } from "@/components/ui/select"
 import { Skeleton } from "@/components/ui/skeleton"
+import { Switch } from "@/components/ui/switch"
 
 
 // Helper function to format duration in MM:SS
@@ -37,14 +38,9 @@ function formatDuration(seconds: number | null | undefined): string {
   return `${mins}:${secs.toString().padStart(2, "0")}`
 }
 
-// Helper function to clean up source title into a short readable label
 function formatShortSource(title: string | null | undefined): string {
   if (!title) return "Uploaded Video"
-  let clean = title.trim()
-  if (clean.length > 28) {
-    clean = clean.substring(0, 25) + "..."
-  }
-  return clean
+  return title.trim()
 }
 
 // ─── Caption Video Preview Card ───────────────────────────────────────────────
@@ -90,11 +86,10 @@ function CaptionPresetCard({
             : "border border-[#E5E7EB] hover:border-[#2563EB]/40 hover:shadow-md hover:-translate-y-[2px]"
         )}
       >
-        {/* Selected badge with animated checkmark */}
+        {/* Selected badge with checkmark icon */}
         {selected && (
-          <div className="absolute top-2.5 right-2.5 z-30 flex items-center gap-1 rounded-full bg-[#2563EB] px-2 py-0.5 text-[10px] font-semibold text-white shadow-md animate-in fade-in zoom-in-95 duration-180">
-            <Check className="h-3 w-3 stroke-[3] animate-in zoom-in-50 duration-180" />
-            <span>Selected</span>
+          <div className="absolute top-2.5 right-2.5 z-30 flex h-6 w-6 items-center justify-center rounded-full bg-[#2563EB] text-white shadow-md animate-in fade-in zoom-in-95 duration-180">
+            <Check className="h-3.5 w-3.5 stroke-[3] animate-in zoom-in-50 duration-180" />
           </div>
         )}
 
@@ -186,6 +181,7 @@ export function ConfirmDialog({
   const isOverLimit = duration ? duration > limit : false
 
   const [selectedTemplate, setSelectedTemplate] = useState<string>("impact")
+  const [wordHighlight, setWordHighlight] = useState<boolean>(true)
   const [sourceLang, setSourceLang] = useState<string>("auto")
   const [translateLang, setTranslateLang] = useState<string>("none")
   const [isThumbnailLoading, setIsThumbnailLoading] = useState(true)
@@ -196,6 +192,7 @@ export function ConfirmDialog({
   useEffect(() => {
     if (open) {
       setSelectedTemplate("impact")
+      setWordHighlight(CAPTION_TEMPLATES.impact?.wordHighlightDefault ?? true)
       setSourceLang("auto")
       setTranslateLang("none")
       setIsThumbnailLoading(true)
@@ -209,6 +206,10 @@ export function ConfirmDialog({
 
   const handleSelectPreset = (id: string) => {
     setSelectedTemplate(id)
+    const tpl = CAPTION_TEMPLATES[id]
+    if (tpl) {
+      setWordHighlight(tpl.wordHighlightDefault)
+    }
   }
 
   const handleConfirm = () => {
@@ -218,7 +219,13 @@ export function ConfirmDialog({
     }
 
     const styling = CAPTION_TEMPLATES[selectedTemplate]
-    if (styling) onConfirm(styling, sourceLang, translateLang)
+    if (styling) {
+      onConfirm(
+        { ...styling, word_highlight: wordHighlight } as any,
+        sourceLang,
+        translateLang
+      )
+    }
   }
 
   // Calculate estimated clips
@@ -264,7 +271,7 @@ export function ConfirmDialog({
 
             {/* 1. Video Section Preview */}
             <div className="space-y-2">
-              <div className="group relative h-[155px] w-full overflow-hidden rounded-[16px] border border-[#E5E7EB] bg-slate-950 shadow-xs">
+              <div className="group relative aspect-video w-full overflow-hidden rounded-[16px] border border-[#E5E7EB] bg-slate-950 shadow-xs">
                 {thumbnail ? (
                   <>
                     {isThumbnailLoading && (
@@ -309,49 +316,12 @@ export function ConfirmDialog({
                 </div>
               </div>
 
-              {/* Clean Short Source Line */}
-              <div className="flex items-center justify-between px-1 text-xs text-slate-500">
-                <span className="truncate font-medium">
-                  Detected: <span className="font-semibold text-slate-800">{displayLanguageName}</span>
-                  {formattedDuration ? ` • ${formattedDuration}` : ""}
-                  {videoTitle ? ` • ${shortSourceTitle}` : ""}
-                </span>
-              </div>
-
-              {/* Subtle Helper Sentence */}
-              <p className="px-1 text-[11px] font-normal leading-normal text-slate-400">
-                AI will automatically detect highlights, track speakers and generate animated captions.
-              </p>
-            </div>
-
-            {/* 2. AI Analysis - Compact Stat Cards */}
-            <div className="grid grid-cols-3 gap-2.5">
-              {/* Card 1 */}
-              <div className="flex flex-col items-center justify-center rounded-[14px] border border-[#E5E7EB] bg-slate-50/70 py-2 px-2.5 text-center transition-all hover:bg-slate-50">
-                <span className="text-xs">⚡</span>
-                <span className="mt-0.5 text-base font-bold tracking-tight text-slate-900">
-                  {fetchingMetadata ? "..." : estimatedClipsText}
-                </span>
-                <span className="text-[10px] font-medium text-slate-400">Clips</span>
-              </div>
-
-              {/* Card 2 */}
-              <div className="flex flex-col items-center justify-center rounded-[14px] border border-[#E5E7EB] bg-slate-50/70 py-2 px-2.5 text-center transition-all hover:bg-slate-50">
-                <span className="text-xs">⏱</span>
-                <span className="mt-0.5 text-base font-bold tracking-tight text-slate-900">
-                  ~2 min
-                </span>
-                <span className="text-[10px] font-medium text-slate-400">Processing</span>
-              </div>
-
-              {/* Card 3 */}
-              <div className="flex flex-col items-center justify-center rounded-[14px] border border-[#E5E7EB] bg-slate-50/70 py-2 px-2.5 text-center transition-all hover:bg-slate-50">
-                <span className="text-xs">🌍</span>
-                <span className="mt-0.5 truncate text-base font-bold tracking-tight text-slate-900 max-w-full">
-                  {displayLanguageName}
-                </span>
-                <span className="text-[10px] font-medium text-slate-400">Detected</span>
-              </div>
+              {/* Video Title */}
+              {videoTitle && (
+                <div className="px-1 text-xs font-medium text-slate-600 truncate" title={videoTitle}>
+                  {shortSourceTitle}
+                </div>
+              )}
             </div>
 
             {/* Plan limit alert if over limit */}
@@ -446,6 +416,23 @@ export function ConfirmDialog({
                         </SelectContent>
                       </Select>
                     </div>
+                  </div>
+
+                  {/* Word-Level Highlighting Toggle Switch */}
+                  <div className="flex items-center justify-between pt-2 border-t border-slate-100">
+                    <div>
+                      <Label htmlFor="word-highlight" className="block text-[11px] font-semibold text-slate-700 cursor-pointer">
+                        Word-Level Highlighting
+                      </Label>
+                      <p className="text-[10px] text-slate-400">
+                        Highlight active words individually during speech
+                      </p>
+                    </div>
+                    <Switch
+                      id="word-highlight"
+                      checked={wordHighlight}
+                      onCheckedChange={setWordHighlight}
+                    />
                   </div>
                 </div>
               )}
