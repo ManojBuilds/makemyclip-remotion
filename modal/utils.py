@@ -16,13 +16,24 @@ logger = logging.getLogger("makemyclip")
 T = TypeVar("T")
 
 
+def normalize_url(url: str | None) -> str:
+    """Ensure ``url`` has an http:// or https:// scheme if missing."""
+    if not url or not isinstance(url, str):
+        return ""
+    u = url.strip()
+    if u and not u.startswith(("http://", "https://")):
+        return f"https://{u}"
+    return u
+
+
 def is_youtube_url(url: str) -> bool:
     """Return True if ``url`` points to a YouTube video."""
-    return "youtube.com" in url or "youtu.be" in url
+    normalized = normalize_url(url)
+    return "youtube.com" in normalized or "youtu.be" in normalized
 
 
-def validate_url(url: str, *, label: str = "url") -> None:
-    """Raise ``ValueError`` for obviously invalid URLs.
+def validate_url(url: str, *, label: str = "url") -> str:
+    """Validate and return normalized URL (starting with http:// or https://).
 
     Catches the most common misconfigurations *before* expensive GPU work
     begins — a malformed URL would otherwise only surface after downloading
@@ -30,10 +41,12 @@ def validate_url(url: str, *, label: str = "url") -> None:
     """
     if not url or not isinstance(url, str):
         raise ValueError(f"{label} must be a non-empty string")
-    if not url.startswith(("http://", "https://")):
+    normalized = normalize_url(url)
+    if not normalized.startswith(("http://", "https://")):
         raise ValueError(
             f"{label} must start with http:// or https://, got: {url[:80]!r}"
         )
+    return normalized
 
 
 def retry(

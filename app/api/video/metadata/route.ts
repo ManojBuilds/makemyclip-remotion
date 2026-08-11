@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server"
 import { getServerSession } from "@/lib/auth-server"
-import { fetchYouTubeMetadata } from "@/lib/youtube"
+import { fetchYouTubeMetadata, normalizeVideoUrl } from "@/lib/youtube"
 
 export async function POST(request: Request) {
   try {
@@ -14,7 +14,8 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "URL is required" }, { status: 400 })
     }
 
-    const metadata = await fetchYouTubeMetadata(url)
+    const normalizedUrl = normalizeVideoUrl(url)
+    const metadata = await fetchYouTubeMetadata(normalizedUrl)
     return NextResponse.json({ success: true, metadata })
   } catch (error) {
     console.error("Error fetching YouTube metadata:", error)

@@ -45,7 +45,7 @@ class AudioTranscriber:
         logger.info("video_url: %s...", req.video_url[:100])
 
         # --- Validate inputs ---
-        validate_url(req.video_url, label="video_url")
+        vurl = validate_url(req.video_url, label="video_url")
 
         # Configure AssemblyAI key
         aai.settings.api_key = os.environ.get("ASSEMBLYAI_API_KEY")
@@ -55,7 +55,6 @@ class AudioTranscriber:
             )
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            vurl = req.video_url
 
             # 1. Download source media
             with StageTimer("download_media"):

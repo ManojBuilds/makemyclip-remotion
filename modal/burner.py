@@ -398,8 +398,9 @@ class CaptionBurner:
     @modal.fastapi_endpoint(method="POST")
     def endpoint(self, req: BurnCaptionsRequest):
         """Public endpoint for caption burning."""
+        vurl = validate_url(req.video_url, label="video_url")
         res = self.burn.remote(
-            req.video_url,
+            vurl,
             req.transcript,
             req.styling,
             show_watermark=req.show_watermark,

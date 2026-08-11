@@ -5,21 +5,13 @@ import type { WordTimestamp, ClipCaption } from "@/lib/db/schema"
 import { eq, inArray } from "drizzle-orm"
 import { getDownloadPresignedUrl } from "@/lib/r2"
 import { transcribeFromUrl } from "@/lib/assemblyai"
-
-function isHttpUrl(value: string): boolean {
-  try {
-    const u = new URL(value)
-    return u.protocol === "http:" || u.protocol === "https:"
-  } catch {
-    return false
-  }
-}
+import { isHttpUrl, normalizeVideoUrl } from "@/lib/youtube"
 
 async function resolveSourceVideoUrl(
   sourceVideoKeyOrUrl: string,
   expiresInSeconds: number
 ) {
-  if (isHttpUrl(sourceVideoKeyOrUrl)) return sourceVideoKeyOrUrl
+  if (isHttpUrl(sourceVideoKeyOrUrl)) return normalizeVideoUrl(sourceVideoKeyOrUrl)
   return getDownloadPresignedUrl(sourceVideoKeyOrUrl, expiresInSeconds)
 }
 

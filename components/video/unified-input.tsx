@@ -12,6 +12,7 @@ import { useDashboardUser } from "@/components/dashboard-context"
 import { getPlanLimit } from "@/lib/config"
 import { ConfirmDialog } from "./confirm-dialog"
 import { CaptionTemplate } from "./caption_templates"
+import { normalizeVideoUrl } from "@/lib/youtube"
 import {
   Tooltip,
   TooltipContent,
@@ -21,9 +22,10 @@ import {
 
 const isValidYoutubeUrl = (url: string): boolean => {
   if (!url) return false
+  const normalized = normalizeVideoUrl(url)
   const re =
     /^(?:https?:\/\/)?(?:www\.)?(?:youtube\.com\/(?:watch\?(?:.*&)?v=|embed\/|shorts\/)|youtu\.be\/)([a-zA-Z0-9_-]{11})/
-  return re.test(url.trim())
+  return re.test(normalized)
 }
 
 type UnifiedInputProps = {
@@ -232,8 +234,9 @@ export function UnifiedInput({
         return
       }
       if (onUrlSubmit) {
+        const normalizedUrl = normalizeVideoUrl(youtubeUrl)
         const success = await onUrlSubmit(
-          youtubeUrl,
+          normalizedUrl,
           styling,
           transcribeLang,
           translateLang,
@@ -246,7 +249,7 @@ export function UnifiedInput({
       } else {
         setLocalSubmitting(true)
         try {
-          sessionStorage.setItem("pending_youtube_url", youtubeUrl)
+          sessionStorage.setItem("pending_youtube_url", normalizeVideoUrl(youtubeUrl))
           sessionStorage.setItem("pending_transcribe_language", transcribeLang)
           sessionStorage.setItem("pending_translate_language", translateLang)
           router.push("/projects")

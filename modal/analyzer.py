@@ -267,12 +267,11 @@ class VideoAnalyzer:
     @modal.fastapi_endpoint(method="POST")
     def analyze(self, req: AnalyzeVideoRequest):
         """Public endpoint: Runs full video analysis across 10-min parallel chunks."""
-        validate_url(req.video_url, label="video_url")
+        vurl = validate_url(req.video_url, label="video_url")
         logger.info("=== FULL VIDEO ANALYSIS REQUEST ===")
         logger.info("project_id: %s, duration: %.1fs", req.project_id, req.duration)
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            vurl = req.video_url
             fps = 25.0
             duration_secs = req.duration
 

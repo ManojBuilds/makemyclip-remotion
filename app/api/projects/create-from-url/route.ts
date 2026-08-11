@@ -4,7 +4,7 @@ import { db } from "@/lib/db"
 import { projects, user } from "@/lib/db/schema"
 import { inngest } from "@/lib/inngest/client"
 import { getServerSession } from "@/lib/auth-server"
-import { fetchYouTubeMetadata } from "@/lib/youtube"
+import { fetchYouTubeMetadata, normalizeVideoUrl } from "@/lib/youtube"
 import { getPlanLimit } from "@/lib/config"
 
 export async function POST(req: Request) {
@@ -28,10 +28,7 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "URL is required" }, { status: 400 })
     }
 
-    let normalizedUrl = url.trim()
-    if (!/^https?:\/\//i.test(normalizedUrl)) {
-      normalizedUrl = `https://${normalizedUrl}`
-    }
+    const normalizedUrl = normalizeVideoUrl(url)
 
     // 1. Fetch YouTube metadata (title + duration) only if it wasn't pre-fetched by the client
     //    so we can validate credits and persist the real values on the project record.

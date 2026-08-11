@@ -2016,7 +2016,7 @@ class AIReframe:
         from pathlib import Path
 
         # --- Validate inputs ---
-        validate_url(req.video_url, label="video_url")
+        vurl = validate_url(req.video_url, label="video_url")
 
         logger.info("=== REFRAME REQUEST ===")
         logger.info("video_url: %s...", req.video_url[:100])
@@ -2031,7 +2031,6 @@ class AIReframe:
         )
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            vurl = req.video_url
             is_preview = req.quality == "preview"
 
             # 1. Download from YouTube if needed
@@ -2356,13 +2355,12 @@ class AIReframe:
         import numpy as np
         from scipy import signal
 
-        validate_url(req.video_url, label="video_url")
+        vurl = validate_url(req.video_url, label="video_url")
         logger.info("=== BATCH REFRAME REQUEST === (%d clips)", len(req.clips))
 
         results = []
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            vurl = req.video_url
             is_preview = req.quality == "preview"
 
             # 1. Download from YouTube if needed (ONCE for all clips)

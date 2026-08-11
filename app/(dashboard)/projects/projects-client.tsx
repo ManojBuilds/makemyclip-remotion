@@ -16,6 +16,7 @@ import { Button } from "@/components/ui/button"
 import { Card, CardContent } from "@/components/ui/card"
 
 import { UpgradeModal } from "@/components/ui/upgrade-modal"
+import { normalizeVideoUrl } from "@/lib/youtube"
 
 export function ProjectsClient({
   projects,
@@ -67,14 +68,15 @@ export function ProjectsClient({
     duration?: number | null,
     title?: string | null
   ): Promise<boolean> => {
-    if (!url) return false
+    const normalizedUrl = normalizeVideoUrl(url)
+    if (!normalizedUrl) return false
     setIsSubmittingUrl(true)
     try {
       const res = await fetch("/api/projects/create-from-url", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          url,
+          url: normalizedUrl,
           styling,
           transcribeLanguage,
           translateLanguage,
@@ -147,32 +149,6 @@ export function ProjectsClient({
       toast.error("Upload failed", { description: message })
     }
   }
-
-  // Redirect from landing page with pending URL
-  useEffect(() => {
-    if (typeof window !== "undefined") {
-      const pending = sessionStorage.getItem("pending_youtube_url")
-      const pendingTranscribe = sessionStorage.getItem(
-        "pending_transcribe_language"
-      )
-      const pendingTranslate = sessionStorage.getItem(
-        "pending_translate_language"
-      )
-      if (pending) {
-        sessionStorage.removeItem("pending_youtube_url")
-        sessionStorage.removeItem("pending_transcribe_language")
-        sessionStorage.removeItem("pending_translate_language")
-        // eslint-disable-next-line react-hooks/set-state-in-effect
-        handleUrlSubmit(
-          pending,
-          undefined,
-          pendingTranscribe || "auto",
-          pendingTranslate || "none"
-        )
-      }
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
 
   const isUploading =
     status !== "idle" && status !== "error" && status !== "done"

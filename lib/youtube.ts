@@ -7,11 +7,26 @@
  */
 
 /**
+ * Normalizes a video URL by trimming and ensuring it has an http:// or https:// scheme.
+ */
+export function normalizeVideoUrl(value: string | null | undefined): string {
+  if (!value || typeof value !== "string") return ""
+  let trimmed = value.trim()
+  if (!trimmed) return ""
+  if (!/^https?:\/\//i.test(trimmed)) {
+    trimmed = `https://${trimmed}`
+  }
+  return trimmed
+}
+
+/**
  * Returns true if the value parses as an http(s) URL.
  */
 export function isHttpUrl(value: string): boolean {
   try {
-    const u = new URL(value)
+    const normalized = normalizeVideoUrl(value)
+    if (!normalized) return false
+    const u = new URL(normalized)
     return u.protocol === "http:" || u.protocol === "https:"
   } catch {
     return false
@@ -42,10 +57,8 @@ export type YouTubeMetadata = {
 export function extractYouTubeVideoId(url: string): string | null {
   let parsed: URL
   try {
-    let urlString = url.trim()
-    if (!/^https?:\/\//i.test(urlString)) {
-      urlString = "https://" + urlString
-    }
+    const urlString = normalizeVideoUrl(url)
+    if (!urlString) return null
     parsed = new URL(urlString)
   } catch {
     return null
