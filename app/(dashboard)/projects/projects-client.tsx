@@ -17,6 +17,7 @@ import { Card, CardContent } from "@/components/ui/card"
 
 import { UpgradeModal } from "@/components/ui/upgrade-modal"
 import { normalizeVideoUrl } from "@/lib/youtube"
+import { trackVideoUploadStarted } from "@/lib/posthog"
 
 export function ProjectsClient({
   projects,
@@ -71,6 +72,12 @@ export function ProjectsClient({
     const normalizedUrl = normalizeVideoUrl(url)
     if (!normalizedUrl) return false
     setIsSubmittingUrl(true)
+
+    trackVideoUploadStarted({
+      source: "youtube",
+      videoDurationEst: duration ? Math.round(duration) : undefined,
+    })
+
     try {
       const res = await fetch("/api/projects/create-from-url", {
         method: "POST",

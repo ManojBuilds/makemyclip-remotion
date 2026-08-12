@@ -1,6 +1,7 @@
 "use client"
 
 import { useState, useCallback } from "react"
+import { trackVideoUploadStarted } from "@/lib/posthog"
 
 type UploadState = {
   status: "idle" | "preparing" | "uploading" | "completing" | "done" | "error"
@@ -55,6 +56,13 @@ export function useUpload() {
           }
           video.src = URL.createObjectURL(file)
         })
+
+        trackVideoUploadStarted({
+          source: "file",
+          fileSizeMb: Math.round(file.size / (1024 * 1024)),
+          videoDurationEst: Math.round(duration),
+        })
+
 
         const presignRes = await fetch("/api/upload/presign", {
           method: "POST",

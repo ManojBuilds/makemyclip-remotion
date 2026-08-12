@@ -3,6 +3,7 @@ import { dodo } from "@/lib/dodo"
 import { db } from "@/lib/db"
 import { user } from "@/lib/db/schema"
 import { eq } from "drizzle-orm"
+import { trackServerPaymentCompleted } from "@/lib/posthog-server"
 
 interface DodoCustomer {
   customer_id: string
@@ -13,6 +14,7 @@ interface DodoSubscriptionData {
   customer?: DodoCustomer
   status: string
   product_id: string
+  price_cents?: number
 }
 
 interface DodoCreditData {
@@ -85,7 +87,7 @@ export async function POST(req: Request) {
         const plan = planMapping[productId] || "free"
 
         if (userEmail) {
-          await db
+          const [updatedUser] = await db
             .update(user)
             .set({
               dodoCustomerId: customerId,
@@ -94,6 +96,16 @@ export async function POST(req: Request) {
               updatedAt: new Date(),
             })
             .where(eq(user.email, userEmail))
+            .returning()
+
+          if (status === "active" && updatedUser?.id) {
+            await trackServerPaymentCompleted({
+              distinctId: updatedUser.id,
+              planId: plan,
+              amountCents: subData.price_cents || 0,
+              customerId,
+            })
+          }
         }
         break
       }

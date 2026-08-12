@@ -21,6 +21,11 @@ import { cn } from "@/lib/utils"
 import { toast } from "sonner"
 import type { Clip } from "@/lib/types"
 import {
+  trackClipDownloaded,
+  trackCheckoutInitiated,
+  trackClipRenderStarted,
+} from "@/lib/posthog"
+import {
   DropdownMenu,
   DropdownMenuTrigger,
   DropdownMenuContent,
@@ -600,11 +605,13 @@ function ClipCardBase({
                     link.click()
                     document.body.removeChild(link)
                     window.URL.revokeObjectURL(blobUrl)
+                    trackClipDownloaded({ clipId: clip.id })
                     toast.dismiss(toastId)
                     toast.success("Download started!")
                   } catch (err) {
                     console.error("Direct download failed, using fallback:", err)
                     window.open(clip.previewVideoUrl, "_blank", "noopener,noreferrer")
+                    trackClipDownloaded({ clipId: clip.id })
                     toast.dismiss(toastId)
                     toast.success("Opening preview video in new tab.")
                   } finally {
@@ -623,7 +630,10 @@ function ClipCardBase({
               <Button
                 variant="default"
                 size="sm"
-                onClick={() => setShowUpgradeModal(true)}
+                onClick={() => {
+                  trackCheckoutInitiated({ planId: "pro_upgrade" })
+                  setShowUpgradeModal(true)
+                }}
                 className="flex h-9 w-full items-center justify-center gap-2 rounded-xl px-4 text-xs font-bold shadow-sm transition-all duration-300 active:scale-95 sm:h-10 sm:w-auto sm:px-5"
               >
                 <Sparkles className="size-3.5 text-primary-foreground" />

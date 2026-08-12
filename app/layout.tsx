@@ -1,11 +1,11 @@
 import { Geist_Mono, TikTok_Sans } from "next/font/google"
 import type { Metadata } from "next"
-import { Analytics } from "@vercel/analytics/next"
 import { ClerkProvider } from "@clerk/nextjs"
 
 import "./globals.css"
 import { Toaster } from "sonner"
 import { ThemeProvider } from "@/components/theme-provider"
+import { PostHogProvider } from "@/components/providers/posthog-provider"
 import { cn } from "@/lib/utils"
 
 const siteName = "Kivio #1 AI Video Clipping Agent"
@@ -91,11 +91,13 @@ export default function RootLayout({
         )}
       >
         <body>
-          <ThemeProvider>{children}</ThemeProvider>
-          <Toaster position="top-right" richColors closeButton />
-          <Analytics />
+          <PostHogProvider>
+            <ThemeProvider>{children}</ThemeProvider>
+            <Toaster position="top-right" richColors closeButton />
+          </PostHogProvider>
         </body>
       </html>
     </ClerkProvider>
   )
 }
+

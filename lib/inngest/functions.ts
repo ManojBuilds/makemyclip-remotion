@@ -6,6 +6,10 @@ import { eq, inArray } from "drizzle-orm"
 import { getDownloadPresignedUrl } from "@/lib/r2"
 import { transcribeFromUrl } from "@/lib/assemblyai"
 import { isHttpUrl, normalizeVideoUrl } from "@/lib/youtube"
+import {
+  trackServerVideoAnalysisCompleted,
+  trackServerClipRenderCompleted,
+} from "@/lib/posthog-server"
 
 async function resolveSourceVideoUrl(
   sourceVideoKeyOrUrl: string,
@@ -417,6 +421,13 @@ export const processVideo = inngest.createFunction(
           updatedAt: new Date(),
         })
         .where(eq(user.id, projectData.userId))
+
+      await trackServerVideoAnalysisCompleted({
+        distinctId: projectData.userId,
+        projectId,
+        durationSeconds,
+        clipsCount: aiClips?.length ?? 0,
+      })
     })
 
     return { success: true, projectId, clipsCount: aiClips?.length ?? 0 }
@@ -887,6 +898,20 @@ export const exportClip = inngest.createFunction(
             lastRenderedAt: new Date(),
           })
           .where(eq(clips.id, clipId))
+
+        if (clip?.projectId) {
+          const [proj] = await db
+            .select({ userId: projects.userId })
+            .from(projects)
+            .where(eq(projects.id, clip.projectId))
+          if (proj?.userId) {
+            await trackServerClipRenderCompleted({
+              distinctId: proj.userId,
+              projectId: clip.projectId,
+              clipId,
+            })
+          }
+        }
       })
 
       return { success: true, clipId }
