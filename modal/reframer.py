@@ -2048,7 +2048,7 @@ class AIReframe:
                     tmpdir,
                     start_time=req.start_time,
                     end_time=req.end_time,
-                    max_height=720 if is_preview else 1080,
+                    max_height=1080,
                     skip_probe=is_preview,  # Still skip format probe for preview to save ~4s
                 )
             elif vurl.startswith("http://") or vurl.startswith("https://"):
@@ -2135,53 +2135,79 @@ class AIReframe:
                 "Running tracking/extraction with crop_mode=%s...",
                 req.crop_mode,
             )
-            tracks, scores, audio, pyf, pya, scene_bounds = self.get_tracks_and_scores(
-                vurl,
-                effective_start,
-                duration_secs,
-                tmpdir,
-                fps=fps,
-                audio_url=segment_audio,
-            )
-            logger.info(
-                "Face tracking done in %.1fs, found %d tracks",
-                time.time() - t0,
-                len(tracks),
-            )
+            try:
+                tracks, scores, audio, pyf, pya, scene_bounds = self.get_tracks_and_scores(
+                    vurl,
+                    effective_start,
+                    duration_secs,
+                    tmpdir,
+                    fps=fps,
+                    audio_url=segment_audio,
+                )
+                logger.info(
+                    "Face tracking done in %.1fs, found %d tracks",
+                    time.time() - t0,
+                    len(tracks),
+                )
 
-            # 4. Render vertical
-            crop_mode = req.crop_mode
-            reported_crop_mode = crop_mode
-            if crop_mode == "auto":
-                reported_crop_mode = self.classify_layout(
+                # 4. Render vertical
+                crop_mode = req.crop_mode
+                reported_crop_mode = crop_mode
+                if crop_mode == "auto":
+                    reported_crop_mode = self.classify_layout(
+                        tracks,
+                        scores,
+                        video_info.get("width", 1920),
+                        video_info.get("height", 1080),
+                    )
+                    logger.info("Auto-detected layout (reported): %s", reported_crop_mode)
+
+                orig_name = f"orig_{uuid.uuid4()}.mp4"
+                local_orig = os.path.join(tmpdir, orig_name)
+
+                t1 = time.time()
+                logger.info("Rendering vertical video at %s fps...", fps)
+                frame_layout = self.render_vertical(
                     tracks,
                     scores,
-                    video_info.get("width", 1920),
-                    video_info.get("height", 1080),
+                    pyf,
+                    pya,
+                    local_orig,
+                    duration=duration_secs,
+                    fps=fps,
+                    crop_mode=crop_mode,
+                    scene_bounds=scene_bounds,
+                    video_path=vurl,
+                    start_time_in_video=effective_start,
                 )
-                logger.info("Auto-detected layout (reported): %s", reported_crop_mode)
 
-            orig_name = f"orig_{uuid.uuid4()}.mp4"
-            local_orig = os.path.join(tmpdir, orig_name)
-
-            t1 = time.time()
-            logger.info("Rendering vertical video at %s fps...", fps)
-            frame_layout = self.render_vertical(
-                tracks,
-                scores,
-                pyf,
-                pya,
-                local_orig,
-                duration=duration_secs,
-                fps=fps,
-                crop_mode=crop_mode,
-                scene_bounds=scene_bounds,
-                video_path=vurl,
-                start_time_in_video=effective_start,
-            )
-
-            if not os.path.exists(local_orig) or os.path.getsize(local_orig) == 0:
-                raise RenderError(f"Render failed: output video file not found or empty at {local_orig}")
+                if not os.path.exists(local_orig) or os.path.getsize(local_orig) == 0:
+                    raise RenderError(f"Render failed: output video file not found or empty at {local_orig}")
+            except Exception as reframer_err:
+                logger.warning(
+                    "reframe_video AI tracking/rendering failed (%s). Falling back to letterbox mode...",
+                    reframer_err,
+                    exc_info=True,
+                )
+                orig_name = f"orig_{uuid.uuid4()}.mp4"
+                local_orig = os.path.join(tmpdir, orig_name)
+                crop_mode = "letterbox"
+                reported_crop_mode = "letterbox"
+                pya = os.path.join(tmpdir, "pyavi")
+                os.makedirs(pya, exist_ok=True)
+                frame_layout = self.render_vertical(
+                    [],
+                    [],
+                    None,
+                    pya,
+                    local_orig,
+                    duration=duration_secs,
+                    fps=fps,
+                    crop_mode="letterbox",
+                    scene_bounds=[(0, max(1, int(round(duration_secs * fps))))],
+                    video_path=vurl,
+                    start_time_in_video=effective_start,
+                )
 
             # Annotate layout inside the transcript!
             if req.transcript:
@@ -2377,7 +2403,7 @@ class AIReframe:
                     tmpdir,
                     start_time=global_start,
                     end_time=global_end,
-                    max_height=720 if is_preview else 1080,
+                    max_height=1080,
                     skip_probe=is_preview,
                 )
                 logger.info(
@@ -2623,10 +2649,14 @@ class AIReframe:
                         clip_req.start_time,
                         clip_req.end_time,
                     )
+                    clip_start_rel = clip_req.start_time - cluster_start
+                    clip_end_rel = clip_req.end_time - cluster_start
+                    clip_duration = clip_end_rel - clip_start_rel
+                    abs_clip_start = clip_req.start_time - segment_offset
+                    clip_pretrim = os.path.join(
+                        cluster_workdir, f"pretrim_{clip_id}.mp4"
+                    )
                     try:
-                        clip_start_rel = clip_req.start_time - cluster_start
-                        clip_end_rel = clip_req.end_time - cluster_start
-                        clip_duration = clip_end_rel - clip_start_rel
 
                         # --- Frame-index anchor for slicing cluster_tracks ---
                         # analysis.json tracks are indexed on the ORIGINAL video's
@@ -2895,16 +2925,164 @@ class AIReframe:
                             }
                         )
                     except Exception as e:
-                        logger.error(
-                            "Failed to process clip %s: %s", clip_id, e, exc_info=True
+                        logger.warning(
+                            "Clip %s AI reframing failed (%s). Falling back to letterbox mode...",
+                            clip_id,
+                            e,
+                            exc_info=True,
                         )
-                        cluster_results.append(
-                            {
-                                "clip_id": clip_id,
-                                "success": False,
-                                "error": str(e),
-                            }
-                        )
+                        try:
+                            if not os.path.exists(clip_pretrim):
+                                pretrim_codec = (
+                                    ["h264_nvenc", "-preset", "p1"]
+                                    if self.use_nvenc
+                                    else ["libx264", "-preset", "ultrafast", "-crf", "18"]
+                                )
+                                subprocess.run(
+                                    [
+                                        "ffmpeg",
+                                        "-y",
+                                        "-ss",
+                                        str(abs_clip_start),
+                                        "-i",
+                                        vurl,
+                                        "-t",
+                                        str(clip_duration),
+                                        "-c:v",
+                                        *pretrim_codec,
+                                        "-c:a",
+                                        "aac",
+                                        "-b:a",
+                                        "192k",
+                                        "-avoid_negative_ts",
+                                        "make_zero",
+                                        clip_pretrim,
+                                        "-loglevel",
+                                        "warning",
+                                    ],
+                                    check=True,
+                                    timeout=_FFMPEG_LONG_TIMEOUT_S,
+                                )
+
+                            orig_name = f"orig_{uuid.uuid4()}.mp4"
+                            local_orig = os.path.join(tmpdir, orig_name)
+
+                            t1 = time.time()
+                            reported_crop_mode = "letterbox"
+                            frame_layout = self.render_vertical(
+                                [],
+                                [],
+                                None,
+                                pya,
+                                local_orig,
+                                duration=clip_duration,
+                                fps=fps,
+                                crop_mode="letterbox",
+                                scene_bounds=[(0, max(1, int(round(clip_duration * fps))))],
+                                video_path=clip_pretrim,
+                                start_time_in_video=0.0,
+                            )
+
+                            if not os.path.exists(local_orig) or os.path.getsize(local_orig) == 0:
+                                raise RenderError(f"Render failed: fallback video file not found or empty at {local_orig}")
+
+                            if clip_req.transcript:
+                                clip_req.transcript = annotate_transcript_layout(
+                                    clip_req.transcript, frame_layout, "letterbox", fps
+                                )
+
+                            clip_audio = os.path.join(
+                                cluster_workdir, f"clip_audio_{clip_id}.aac"
+                            )
+                            if not os.path.exists(clip_audio):
+                                subprocess.run(
+                                    [
+                                        "ffmpeg",
+                                        "-y",
+                                        "-i",
+                                        clip_pretrim,
+                                        "-vn",
+                                        "-c:a",
+                                        "aac",
+                                        "-b:a",
+                                        "192k",
+                                        clip_audio,
+                                        "-loglevel",
+                                        "panic",
+                                    ],
+                                    check=True,
+                                    timeout=_FFMPEG_SHORT_TIMEOUT_S,
+                                )
+
+                            synced = local_orig.replace(".mp4", "_synced.mp4")
+                            video_codec = (
+                                ["h264_nvenc", "-preset", "p4", "-cq", "22"]
+                                if self.use_nvenc
+                                else ["libx264", "-preset", "ultrafast", "-crf", "22"]
+                            )
+                            subprocess.run(
+                                [
+                                    "ffmpeg",
+                                    "-y",
+                                    "-i",
+                                    local_orig,
+                                    "-i",
+                                    clip_audio,
+                                    "-map",
+                                    "0:v:0",
+                                    "-map",
+                                    "1:a:0",
+                                    "-r",
+                                    str(fps),
+                                    "-c:v",
+                                    *video_codec,
+                                    "-pix_fmt",
+                                    "yuv420p",
+                                    "-profile:v",
+                                    "high",
+                                    "-c:a",
+                                    "aac",
+                                    "-b:a",
+                                    "128k",
+                                    "-af",
+                                    "aresample=async=1000:min_hard_comp=0.100000:first_pts=0",
+                                    "-movflags",
+                                    "+faststart",
+                                    synced,
+                                    "-loglevel",
+                                    "panic",
+                                ],
+                                check=True,
+                                timeout=_FFMPEG_LONG_TIMEOUT_S,
+                            )
+                            os.replace(synced, local_orig)
+
+                            render_time = time.time() - t1
+                            logger.info("Clip %s fallback letterbox rendered in %.1fs", clip_id, render_time)
+
+                            deferred_uploads.append(
+                                {
+                                    "clip_id": clip_id,
+                                    "local_orig": local_orig,
+                                    "orig_name": orig_name,
+                                    "clip_req": clip_req,
+                                    "crop_mode": "letterbox",
+                                    "reported_crop_mode": "letterbox",
+                                    "actual_w": actual_w,
+                                    "actual_h": actual_h,
+                                }
+                            )
+                        except Exception as fallback_err:
+                            logger.error(
+                                "Fallback letterbox rendering also failed for clip %s: %s", clip_id, fallback_err, exc_info=True
+                            )
+                            cluster_results.append(
+                                {
+                                    "clip_id": clip_id,
+                                    "success": False,
+                                    "error": f"Reframing failed ({e}) and fallback failed ({fallback_err})",
+                                }
+                            )
 
                 # Free cluster memory after all clips in this cluster are processed
                 if cluster_frames is not None and hasattr(cluster_frames, "_mmap") and cluster_frames._mmap is not None:

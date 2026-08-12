@@ -73,7 +73,7 @@ export const processVideo = inngest.createFunction(
         }
       })
 
-    // Step 2: Transcribe audio with Deepgram Nova-3
+    // Step 2: Transcribe audio with AssemblyAI
     const transcription = await step.run("transcribe-video", async () => {
       console.log(
         `[processVideo] Step: transcribe-video for project: ${projectId}`
@@ -87,15 +87,15 @@ export const processVideo = inngest.createFunction(
 
       const existingForSameKeyPromise = key
         ? db
-            .select({
-              fullText: transcriptions.fullText,
-              words: transcriptions.words,
-              paragraphs: transcriptions.paragraphs,
-            })
-            .from(transcriptions)
-            .innerJoin(projects, eq(transcriptions.projectId, projects.id))
-            .where(eq(projects.sourceVideoKey, key))
-            .limit(1)
+          .select({
+            fullText: transcriptions.fullText,
+            words: transcriptions.words,
+            paragraphs: transcriptions.paragraphs,
+          })
+          .from(transcriptions)
+          .innerJoin(projects, eq(transcriptions.projectId, projects.id))
+          .where(eq(projects.sourceVideoKey, key))
+          .limit(1)
         : Promise.resolve([])
 
       const [existing, existingForSameKeyList] = await Promise.all([
@@ -178,11 +178,11 @@ export const processVideo = inngest.createFunction(
 
       const existingAnalysisPromise = key
         ? db
-            .select({ analysisPath: projects.analysisPath })
-            .from(projects)
-            .where(eq(projects.sourceVideoKey, key))
-            .limit(1)
-            .then(res => res[0])
+          .select({ analysisPath: projects.analysisPath })
+          .from(projects)
+          .where(eq(projects.sourceVideoKey, key))
+          .limit(1)
+          .then(res => res[0])
         : Promise.resolve(null)
 
       const [proj, existingAnalysis] = await Promise.all([

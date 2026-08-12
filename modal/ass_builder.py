@@ -570,7 +570,7 @@ def _emit_events(
     elif phrase_layout == "letterbox":
         pos_y = 0.66
     elif phrase_layout in ("reframe", "single"):
-        pos_y = 0.82
+        pos_y = 0.68
 
     y = _resolve_y_anchor(preset, pos_y, fs)
 
@@ -677,7 +677,7 @@ def generate_ass(
         elif crop_mode == "letterbox":
             template["position_y"] = 0.66
         elif crop_mode in ("reframe", "single", "auto"):
-            template["position_y"] = 0.82
+            template["position_y"] = 0.68
 
     if crop_mode == "letterbox":
         for snake, camel in (
