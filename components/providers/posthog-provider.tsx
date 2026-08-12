@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect } from "react"
+import { useEffect, Suspense } from "react"
 import { usePathname, useSearchParams } from "next/navigation"
 import { useUser } from "@clerk/nextjs"
 import posthog from "posthog-js"
@@ -14,8 +14,8 @@ if (typeof window !== "undefined" && process.env.NODE_ENV === "production") {
 
   if (token) {
     posthog.init(token, {
-      api_host: process.env.NEXT_PUBLIC_POSTHOG_HOST ? "/ingest" : "https://us.i.posthog.com",
-      ui_host: posthogHost,
+      api_host:
+        process.env.NEXT_PUBLIC_POSTHOG_HOST || "https://us.i.posthog.com",
       autocapture: false,
       capture_pageview: false,
       capture_pageleave: true,
@@ -69,7 +69,9 @@ export function PostHogProvider({ children }: { children: React.ReactNode }) {
   return (
     <PHProvider client={posthog}>
       <PostHogUserSync />
-      <PostHogPageView />
+      <Suspense fallback={null}>
+        <PostHogPageView />
+      </Suspense>
       {children}
     </PHProvider>
   )
