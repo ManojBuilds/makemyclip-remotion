@@ -6,8 +6,8 @@ import { useUser } from "@clerk/nextjs"
 import posthog from "posthog-js"
 import { PostHogProvider as PHProvider } from "posthog-js/react"
 
-// Initialize PostHog client side once
-if (typeof window !== "undefined") {
+// Initialize PostHog client side once (only in production)
+if (typeof window !== "undefined" && process.env.NODE_ENV === "production") {
   const token = process.env.NEXT_PUBLIC_POSTHOG_PROJECT_TOKEN
   const posthogHost =
     process.env.NEXT_PUBLIC_POSTHOG_HOST || "https://us.i.posthog.com"
@@ -19,11 +19,6 @@ if (typeof window !== "undefined") {
       autocapture: false,
       capture_pageview: false,
       capture_pageleave: true,
-      loaded: (ph) => {
-        if (process.env.NODE_ENV === "development") {
-          ph.debug()
-        }
-      },
     })
   }
 }

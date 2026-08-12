@@ -3,6 +3,11 @@ import { PostHog } from "posthog-node"
 let serverPostHogClient: PostHog | null = null
 
 export function getPostHogServerClient(): PostHog | null {
+  // Only track events in production environment
+  if (process.env.NODE_ENV !== "production") {
+    return null
+  }
+
   if (serverPostHogClient) return serverPostHogClient
 
   const token = process.env.NEXT_PUBLIC_POSTHOG_PROJECT_TOKEN
