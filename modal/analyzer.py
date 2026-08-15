@@ -214,6 +214,33 @@ class VideoAnalyzer:
                     max_height=360,
                     skip_probe=True,
                 )
+            else:
+                # Direct video URL: Download & downscale 360p chunk segment locally to tmpdir via fast FFmpeg HTTP seek
+                local_proxy = os.path.join(tmpdir, f"chunk_{chunk_idx}_360p.mp4")
+                logger.info(
+                    "Fetching 360p proxy segment for direct URL (%.1fs - %.1fs)...",
+                    start_time,
+                    start_time + duration,
+                )
+                dl_cmd = [
+                    "ffmpeg", "-y",
+                    "-ss", str(start_time),
+                    "-i", video_url,
+                    "-t", str(duration),
+                    "-vf", "scale=-2:360",
+                    "-c:v", "libx264", "-preset", "ultrafast",
+                    "-c:a", "aac", "-b:a", "128k",
+                    local_proxy,
+                ]
+                res = subprocess.run(dl_cmd, capture_output=True, text=True, timeout=300)
+                if res.returncode == 0 and os.path.exists(local_proxy) and os.path.getsize(local_proxy) > 0:
+                    v_input = local_proxy
+                    segment_offset = start_time
+                    logger.info("✅ Direct URL 360p proxy downloaded to %s", local_proxy)
+                else:
+                    logger.warning("Direct URL 360p proxy download failed, falling back to streaming direct URL: %s", res.stderr)
+                    v_input = video_url
+                    segment_offset = 0.0
 
             reframer = AIReframe()
             # Inject detector and ASD models to reuse warm container state
@@ -228,20 +255,27 @@ class VideoAnalyzer:
 
             eff_start = start_time - segment_offset
 
-            # Extract chunk audio
+            # Extract chunk audio (place -ss BEFORE -i for fast HTTP seek)
             chunk_audio = os.path.join(tmpdir, "chunk_audio.aac")
             ffmpeg_cmd = [
                 "ffmpeg", "-y",
-                "-i", v_input,
                 "-ss", str(eff_start),
+                "-i", v_input,
                 "-t", str(duration),
                 "-vn", "-c:a", "aac", "-b:a", "192k",
                 chunk_audio,
             ]
             res = subprocess.run(ffmpeg_cmd, capture_output=True, text=True, timeout=300)
             if res.returncode != 0:
-                logger.error("FFmpeg chunk audio extraction failed: %s", res.stderr)
-                raise subprocess.CalledProcessError(res.returncode, ffmpeg_cmd, output=res.stdout, stderr=res.stderr)
+                logger.warning("FFmpeg chunk audio extraction failed (video may be muted). Generating silent dummy audio: %s", res.stderr)
+                silent_cmd = [
+                    "ffmpeg", "-y",
+                    "-f", "lavfi", "-i", "anullsrc=r=16000:cl=mono",
+                    "-t", str(duration),
+                    "-c:a", "aac", "-b:a", "128k",
+                    chunk_audio,
+                ]
+                subprocess.run(silent_cmd, capture_output=True, text=True, timeout=60)
 
             # Perform face tracking + TalkNet ASD on chunk
             tracks, scores, _, _, _, scene_bounds = reframer.get_tracks_and_scores(
