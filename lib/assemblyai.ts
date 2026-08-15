@@ -4,13 +4,17 @@ export type TranscriptionResult = {
   fullText: string
   words: WordTimestamp[]
   paragraphs: string[]
+  sentiments?: any[]
+  chapters?: any[]
+  highlights?: any[]
+  viralClips?: any[]
 }
 
 /**
  * Transcribe a remote video/audio URL or YouTube link using AssemblyAI via Modal.
  *
  * @param audioUrl  A publicly-accessible (or presigned) R2 URL or a YouTube link.
- * @returns         Parsed transcription with full text, word-level timestamps, and paragraphs.
+ * @returns         Parsed transcription with full text, word-level timestamps, paragraphs, AssemblyAI audio intelligence, and pre-scored viral short clips.
  */
 export async function transcribeFromUrl(
   audioUrl: string,
@@ -62,6 +66,10 @@ export async function transcribeFromUrl(
       fullText: data.fullText,
       words: data.words,
       paragraphs: data.paragraphs,
+      sentiments: data.sentiments,
+      chapters: data.chapters,
+      highlights: data.highlights,
+      viralClips: data.viralClips,
     }
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : String(error)

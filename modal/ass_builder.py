@@ -13,6 +13,7 @@ chains and makes new presets trivial to add.
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 from typing import Callable, Iterable
 
@@ -713,20 +714,24 @@ def generate_ass(
     raw_items = _flatten_transcript(transcript)
     do_upper = template.get("uppercase") or preset in ALWAYS_UPPERCASE
 
-    words = [
-        {
-            "word": (
-                (item.get("punctuated_word") or item.get("word", "")).upper()
-                if do_upper
-                else (item.get("punctuated_word") or item.get("word", ""))
-            ),
-            "start": item.get("start", 0.0),
-            "end": item.get("end", 0.0),
-            "speaker": item.get("speaker", "speaker_1") or "speaker_1",
-            "layout": item.get("layout"),
-        }
-        for item in raw_items
-    ]
+    sound_event_re = re.compile(r"\[.*?\]|\(.*?\)")
+    words = []
+    for item in raw_items:
+        raw_word = item.get("punctuated_word") or item.get("word", "")
+        cleaned_word = sound_event_re.sub("", raw_word)
+        cleaned_word = re.sub(r"\s+", " ", cleaned_word).strip()
+        if not cleaned_word:
+            continue
+        word_text = cleaned_word.upper() if do_upper else cleaned_word
+        words.append(
+            {
+                "word": word_text,
+                "start": item.get("start", 0.0),
+                "end": item.get("end", 0.0),
+                "speaker": item.get("speaker", "speaker_1") or "speaker_1",
+                "layout": item.get("layout"),
+            }
+        )
 
     if not words:
         subs.save(output_path)

@@ -42,12 +42,95 @@ export type AIClipSuggestion = {
   cropMode?: "reframe" | "letterbox" | "split" | "course" | "auto"
 }
 
+export interface VisualAudioMetrics {
+  talkNetScore: number
+  speechVelocityWPM: number
+  speakerSwitchCount: number
+  energyLabel: "High" | "Medium" | "Normal"
+}
+
 export interface Sentence {
   index: number
   text: string
   start: number
   end: number
   speaker: number | null
+  visualMetrics?: VisualAudioMetrics
+}
+
+/**
+ * Enriches sentence objects with Words-Per-Minute (WPM) speech velocity,
+ * TalkNet audio-visual speech confidence from analysis.json, and energy labels.
+ */
+export function enrichSentencesWithMetrics(
+  sentences: Sentence[],
+  analysisJson?: any
+): Sentence[] {
+  if (!sentences || sentences.length === 0) return []
+
+  const fps =
+    Number(analysisJson?.fps) ||
+    Number(analysisJson?.video_info?.fps) ||
+    25.0
+  const tracks = Array.isArray(analysisJson?.tracks) ? analysisJson.tracks : []
+
+  return sentences.map((sent, idx) => {
+    const wordCount = sent.text.trim().split(/\s+/).length
+    const duration = Math.max(0.5, sent.end - sent.start)
+    const wpm = Math.round((wordCount / duration) * 60)
+
+    let maxTalkNetScore = 0.5
+    if (tracks.length > 0) {
+      const startFrame = Math.floor(sent.start * fps)
+      const endFrame = Math.ceil(sent.end * fps)
+      let foundScores: number[] = []
+
+      for (const track of tracks) {
+        const frames: number[] = track.frames || []
+        const scores: number[] = track.scores || []
+
+        for (let i = 0; i < frames.length; i++) {
+          if (frames[i] >= startFrame && frames[i] <= endFrame) {
+            if (typeof scores[i] === "number" && !isNaN(scores[i])) {
+              foundScores.push(scores[i])
+            }
+          }
+        }
+      }
+
+      if (foundScores.length > 0) {
+        maxTalkNetScore = Math.max(...foundScores)
+      }
+    }
+
+    let switches = 0
+    for (let i = Math.max(0, idx - 3); i <= Math.min(sentences.length - 2, idx + 3); i++) {
+      if (
+        sentences[i].speaker !== null &&
+        sentences[i + 1].speaker !== null &&
+        sentences[i].speaker !== sentences[i + 1].speaker
+      ) {
+        switches++
+      }
+    }
+
+    let energyLabel: "High" | "Medium" | "Normal" = "Normal"
+    if (wpm >= 210 || maxTalkNetScore >= 0.75 || switches >= 2) {
+      energyLabel = "High"
+    } else if (wpm < 110 && maxTalkNetScore < 0.35) {
+      energyLabel = "Medium"
+    }
+
+    return {
+      ...sent,
+      visualMetrics: {
+        talkNetScore: Number(maxTalkNetScore.toFixed(2)),
+        speechVelocityWPM: wpm,
+        speakerSwitchCount: switches,
+        energyLabel,
+      },
+    }
+  })
 }
 
 const MIN_CLIP_SECONDS = 10
@@ -70,6 +153,9 @@ const MODELS = [
   "gemini-flash-latest",
   "gemini-flash-lite-latest",
 ]
+
+const MODEL_PRIMARY = MODELS[0]
+
 
 const CHUNKED_EXTRACTION_THRESHOLD_MINUTES = 25
 
@@ -373,6 +459,84 @@ const responseSchema: Schema = {
 
 // ─── Extraction Helper ────────────────────────────────────────────────────
 
+// ─── Concurrency & Timeline Helpers ──────────────────────────────────────────
+
+async function runWithConcurrency<T, R>(
+  items: T[],
+  concurrencyLimit: number,
+  fn: (item: T, index: number) => Promise<R>
+): Promise<PromiseSettledResult<R>[]> {
+  const results: PromiseSettledResult<R>[] = new Array(items.length)
+  let currentIdx = 0
+
+  const worker = async () => {
+    while (currentIdx < items.length) {
+      const idx = currentIdx++
+      try {
+        const res = await fn(items[idx], idx)
+        results[idx] = { status: "fulfilled", value: res }
+      } catch (err) {
+        results[idx] = { status: "rejected", reason: err }
+      }
+    }
+  }
+
+  const workers = Array.from(
+    { length: Math.min(concurrencyLimit, items.length) },
+    () => worker()
+  )
+  await Promise.all(workers)
+  return results
+}
+
+function enforceTimelineDiversity(
+  clips: AIClipSuggestion[],
+  totalDuration: number,
+  maxClips: number
+): AIClipSuggestion[] {
+  if (clips.length <= maxClips) return clips
+
+  const early: AIClipSuggestion[] = []
+  const mid: AIClipSuggestion[] = []
+  const late: AIClipSuggestion[] = []
+
+  const t1 = totalDuration / 3
+  const t2 = (totalDuration * 2) / 3
+
+  for (const clip of clips) {
+    if (clip.startTime < t1) early.push(clip)
+    else if (clip.startTime < t2) mid.push(clip)
+    else late.push(clip)
+  }
+
+  const targetPerBucket = Math.ceil(maxClips / 3)
+  const selected: AIClipSuggestion[] = []
+
+  const takeFrom = (bucket: AIClipSuggestion[], count: number) => {
+    for (const c of bucket) {
+      if (selected.length >= maxClips) break
+      if (!selected.includes(c)) {
+        selected.push(c)
+        count--
+        if (count <= 0) break
+      }
+    }
+  }
+
+  takeFrom(early, targetPerBucket)
+  takeFrom(mid, targetPerBucket)
+  takeFrom(late, targetPerBucket)
+
+  for (const c of clips) {
+    if (selected.length >= maxClips) break
+    if (!selected.includes(c)) selected.push(c)
+  }
+
+  return selected.sort((a, b) => b.viralScore - a.viralScore)
+}
+
+// ─── Extraction Helper ────────────────────────────────────────────────────
+
 async function extractClipsInternal(
   sliceSentences: Sentence[],
   words: WordTimestamp[],
@@ -383,10 +547,12 @@ async function extractClipsInternal(
   windowLabel = ""
 ): Promise<AIClipSuggestion[]> {
   const formattedTranscript = sliceSentences
-    .map(
-      (s, idx) =>
-        `[#${idx + 1}] [${formatTime(s.start)}] 🗣️ Speaker ${s.speaker !== null && s.speaker !== undefined ? s.speaker : "0"}: "${s.text.trim()}"`
-    )
+    .map((s, idx) => {
+      const energyTag = s.visualMetrics?.energyLabel === "High" ? " [🔥 High Energy]" : ""
+      const wpmTag = s.visualMetrics?.speechVelocityWPM ? ` [WPM: ${s.visualMetrics.speechVelocityWPM}]` : ""
+      const scoreTag = s.visualMetrics?.talkNetScore ? ` [TalkNet: ${Math.round(s.visualMetrics.talkNetScore * 100)}%]` : ""
+      return `[#${idx + 1}] [${formatTime(s.start)}]${energyTag}${wpmTag}${scoreTag} 🗣️ Speaker ${s.speaker !== null && s.speaker !== undefined ? s.speaker : "0"}: "${s.text.trim()}"`
+    })
     .join("\n")
 
   const buildPrompt = (isRetry: boolean, isUnderTargetRetry: boolean) =>
@@ -404,6 +570,7 @@ VIRAL CRITERIA & EDITORIAL RULES:
 1. **SCROLL-STOPPING HOOK (First 3 Seconds)**:
    - The first sentence MUST be an immediate curiosity gap, bold statement, controversial take, or engaging question.
    - REJECT clips starting with filler ("Um", "So basically", "Well", "Like I said").
+   - **Multi-Modal Tags**: High-energy tags ([🔥 High Energy], high [WPM: 240+], or high [TalkNet]) mark passionate speech or key moments. Use them to locate top hooks!
    - **Pre-Context Rule**: If sentence #1 uses unexplained pronouns ("he", "she", "it", "that guy"), you MUST pull the start index back to include the setup. Starting mid-thought is invalid.
 
 2. **HIGH-ENERGY SPEAKER DYNAMICS**:
@@ -550,6 +717,10 @@ Return ONLY a raw JSON array matching the schema. No markdown wrapper.
             )
           }
 
+          const globalStart = globalSentences[finalSi]
+          const talkNetBonus = (globalStart?.visualMetrics?.talkNetScore ?? 0.5) * 1.0
+          const wpmBonus = (globalStart?.visualMetrics?.speechVelocityWPM ?? 150) > 210 ? 0.5 : 0
+
           const rawHook = Number(raw.hookStrength) || 5
           const rawQuot = Number(raw.quotability) || 5
           const rawEmot = Number(raw.emotionalIntensity) || 5
@@ -559,7 +730,7 @@ Return ONLY a raw JSON array matching the schema. No markdown wrapper.
               10,
               Math.max(
                 0,
-                rawHook * 0.35 + rawQuot * 0.25 + rawEmot * 0.20 + rawClar * 0.20
+                rawHook * 0.30 + rawQuot * 0.20 + rawEmot * 0.20 + rawClar * 0.15 + talkNetBonus + wpmBonus
               )
             ).toFixed(1)
           )
@@ -650,141 +821,160 @@ Return ONLY a raw JSON array matching the schema. No markdown wrapper.
   throw lastError || new Error("Failed to extract clips")
 }
 
+export async function enrichAssemblyAIClipsWithGemini(
+  rawViralClips: any[],
+  words: WordTimestamp[]
+): Promise<AIClipSuggestion[]> {
+  try {
+    const candidateSummaries = rawViralClips.map((c: any, i: number) => {
+      const s = c.startTime !== undefined ? Number(c.startTime) : (Number(c.start_ms || 0) / 1000.0)
+      const e = c.endTime !== undefined ? Number(c.endTime) : (Number(c.end_ms || 0) / 1000.0)
+      const cWords = words.filter((w) => w.start >= s && w.end <= e).map((w) => w.word).join(" ")
+      return `Clip ${i + 1} (${s.toFixed(1)}s - ${e.toFixed(1)}s):\nHeadline: ${c.headline || c.summary || ""}\nTranscript: ${cWords.slice(0, 600)}`
+    }).join("\n\n")
+
+    const prompt = `You are an expert social media editor for TikTok, IG Reels, and YouTube Shorts.
+Analyze these pre-extracted viral video clip candidates and return a JSON object matching the schema.
+For each candidate clip, generate:
+- title: Short, curiosity-inducing clickbait title (max 7 words)
+- hookText: Bold 1-3 word scroll-stopping caption for the first 3 seconds
+- viralReason: 1 sentence explaining why this clip will go viral
+- description: Engaging social media post description
+- hashtags: Top 5 space-separated hashtags (e.g. #shorts #viral)
+- clipType: one of ["hot_take", "funny_exchange", "quotable", "debate", "aha_moment"]
+
+Candidates:
+${candidateSummaries}`
+
+    const enrichmentSchema: Schema = {
+      type: Type.OBJECT,
+      properties: {
+        clips: {
+          type: Type.ARRAY,
+          items: {
+            type: Type.OBJECT,
+            properties: {
+              title: { type: Type.STRING },
+              hookText: { type: Type.STRING },
+              viralReason: { type: Type.STRING },
+              description: { type: Type.STRING },
+              hashtags: { type: Type.STRING },
+              clipType: { type: Type.STRING },
+            },
+          },
+        },
+      },
+    }
+
+    const response = await ai.models.generateContent({
+      model: MODEL_PRIMARY,
+      contents: prompt,
+      config: {
+        responseMimeType: "application/json",
+        responseSchema: enrichmentSchema,
+        temperature: 0.4,
+      },
+    })
+
+    const text = response.text
+    if (text) {
+      const parsed = JSON.parse(text)
+      const suggestions: AIClipSuggestion[] = parsed.clips || (Array.isArray(parsed) ? parsed : [])
+      if (Array.isArray(suggestions) && suggestions.length > 0) {
+        return rawViralClips.map((c: any, i: number) => {
+          const gem = suggestions[i] || {}
+          const startSec = c.startTime !== undefined ? Number(c.startTime) : (Number(c.start_ms || 0) / 1000.0)
+          const endSec = c.endTime !== undefined ? Number(c.endTime) : (Number(c.end_ms || 0) / 1000.0)
+          const durSec = Number(c.duration_seconds || (endSec - startSec))
+          const rawScore = Number(c.viral_score || c.viralScore || 85.0)
+          const normalizedScore = Number(Math.min(10.0, Math.max(1.0, rawScore > 10 ? rawScore / 10.0 : rawScore)).toFixed(1))
+
+          return {
+            title: gem.title || c.headline || "Viral Short Highlight",
+            hookText: gem.hookText || c.hook_quote || "Watch this",
+            startTime: startSec,
+            endTime: endSec,
+            durationSeconds: durSec,
+            viralScore: gem.viralScore || normalizedScore,
+            viralReason: gem.viralReason || c.signals?.pacing_note || "High viral potential.",
+            description: gem.description || c.summary || "Featured viral short clip.",
+            hashtags: gem.hashtags || "#shorts #viral",
+            clipType: (gem.clipType || c.clipType || "hot_take") as LongFormClipType,
+            speakerDynamic: gem.speakerDynamic || c.signals?.pacing_note || "Speaker exchange",
+          }
+        })
+      }
+    }
+  } catch (err) {
+    console.warn(`[enrichAssemblyAIClipsWithGemini] Gemini enrichment failed, using AssemblyAI defaults:`, err)
+  }
+
+  return rawViralClips.map((c: any) => {
+    const startSec = c.startTime !== undefined ? Number(c.startTime) : (Number(c.start_ms || 0) / 1000.0)
+    const endSec = c.endTime !== undefined ? Number(c.endTime) : (Number(c.end_ms || 0) / 1000.0)
+    const durSec = Number(c.duration_seconds || (endSec - startSec))
+    const rawScore = Number(c.viral_score || c.viralScore || 85.0)
+    const normalizedScore = Number(Math.min(10.0, Math.max(1.0, rawScore > 10 ? rawScore / 10.0 : rawScore)).toFixed(1))
+    return {
+      title: c.headline || c.title || "Viral Short Highlight",
+      hookText: c.hook_quote || c.hookText || "Watch this",
+      startTime: startSec,
+      endTime: endSec,
+      durationSeconds: durSec,
+      viralScore: normalizedScore,
+      viralReason: c.signals?.pacing_note || c.viralReason || "High viral potential.",
+      description: c.summary || c.headline || "Featured viral short clip.",
+      hashtags: "#shorts #viral",
+      clipType: "hot_take" as LongFormClipType,
+      speakerDynamic: c.signals?.pacing_note || "Speaker exchange",
+    }
+  })
+}
+
 // ─── Main export ───────────────────────────────────────────────────────────
 
 /**
  * Analyzes a transcript and returns ranked viral clip suggestions.
+ * Exclusively relies on candidate clip boundaries and uses Gemini solely for metadata enrichment.
  */
 export async function analyzeViralMoments(
   fullText: string,
   words: WordTimestamp[],
-  videoContext?: string
+  videoContext?: string,
+  analysisJson?: any,
+  preScoredViralClips?: any[]
 ): Promise<AIClipSuggestion[]> {
-  const sentences = groupWordsIntoSentences(words)
-  const totalDuration =
-    words.length > 0 ? words[words.length - 1].end - words[0].start : 0
-  const clipCount = getTargetClipCount(totalDuration)
+  let rawViralClips = preScoredViralClips || analysisJson?.viralClips
 
-  console.log(
-    `[analyzeViralMoments] Duration: ${totalDuration.toFixed(1)}s | Sentences: ${sentences.length} | Target clips: ${clipCount.target}`
-  )
+  if (!Array.isArray(rawViralClips) || rawViralClips.length === 0) {
+    if (words && words.length > 0) {
+      console.log(`[analyzeViralMoments] No pre-scored AssemblyAI viral clips found. Constructing candidate clip windows...`)
+      const totalDuration = words[words.length - 1].end - words[0].start
+      const clipLengthSec = 35
+      const candidateList: any[] = []
+      let currStart = words[0].start
 
-  const isLongVideo = totalDuration / 60 >= CHUNKED_EXTRACTION_THRESHOLD_MINUTES
-
-  if (isLongVideo) {
-    const windowSizeSec = 35 * 60
-    const overlapSec = 2.5 * 60
-    const windows: Sentence[][] = []
-    let currentStart = sentences[0]?.start ?? 0
-    const overallEnd = sentences[sentences.length - 1]?.end ?? 0
-
-    while (currentStart < overallEnd) {
-      const currentEnd = currentStart + windowSizeSec
-      const slice = sentences.filter((s) => s.start >= currentStart && s.start < currentEnd)
-      if (slice.length > 0) {
-        windows.push(slice)
-      } else {
-        break
+      while (currStart < totalDuration - 10 && candidateList.length < 8) {
+        const currEnd = Math.min(currStart + clipLengthSec, words[words.length - 1].end)
+        if (currEnd - currStart >= 10) {
+          candidateList.push({
+            startTime: currStart,
+            endTime: currEnd,
+            duration_seconds: currEnd - currStart,
+            viral_score: 85,
+            headline: "Viral Short Highlight",
+          })
+        }
+        currStart += clipLengthSec - 5
       }
-      currentStart = currentEnd - overlapSec
-    }
-
-    console.log(
-      `[analyzeViralMoments] Running parallel windowed extraction across ${windows.length} windows simultaneously...`
-    )
-
-    const windowPromises = windows.map(async (windowSentences, wIdx) => {
-      const windowDuration =
-        windowSentences[windowSentences.length - 1].end - windowSentences[0].start
-      const windowClipCount = getTargetClipCount(windowDuration)
-
-      console.log(
-        `[analyzeViralMoments] Launching window ${wIdx + 1}/${windows.length} | Duration: ${windowDuration.toFixed(1)}s | Target: ${windowClipCount.target}`
-      )
-
-      return await extractClipsInternal(
-        windowSentences,
-        words,
-        sentences,
-        windowClipCount,
-        totalDuration,
-        videoContext,
-        `[Window ${wIdx + 1}/${windows.length}]`
-      )
-    })
-
-    const results = await Promise.allSettled(windowPromises)
-    const allClips: AIClipSuggestion[] = []
-
-    results.forEach((res, idx) => {
-      if (res.status === "fulfilled") {
-        allClips.push(...res.value)
-      } else {
-        console.warn(
-          `[analyzeViralMoments] Window ${idx + 1}/${windows.length} extraction failed:`,
-          res.reason
-        )
-      }
-    })
-
-    // Merge, deduplicate, sort, trim
-    const sortedClips = allClips.sort((a, b) => b.viralScore - a.viralScore)
-    const dedupedClips = dedupeOverlappingClips(sortedClips)
-    const droppedCount = sortedClips.length - dedupedClips.length
-    if (droppedCount > 0) {
-      console.log(
-        `[analyzeViralMoments] Deduped ${droppedCount} overlapping clips across all windows.`
-      )
-    }
-
-    const finalClips = dedupedClips.slice(0, clipCount.max)
-    console.log(
-      `[analyzeViralMoments] Chunked extraction finished. Returned ${finalClips.length} clips (max allowed: ${clipCount.max}).`
-    )
-
-    if (finalClips.length > 0) {
-      return finalClips
-    }
-  } else {
-    // Single-call path
-    try {
-      return await extractClipsInternal(
-        sentences,
-        words,
-        sentences,
-        clipCount,
-        totalDuration,
-        videoContext
-      )
-    } catch (err) {
-      console.warn(
-        `[analyzeViralMoments] Single-call extraction failed, using fallback. Error:`,
-        err
-      )
+      rawViralClips = candidateList
+    } else {
+      return []
     }
   }
 
-  // Last-resort fallback: return the whole video as a single clip
-  console.warn(
-    "⚠️ [analyzeViralMoments] All attempts/windows failed. Returning fallback clip."
-  )
-
-  const s = words[0]?.start ?? 0
-  const e = words[words.length - 1]?.end ?? 60
-
-  return [
-    {
-      title: "Featured Highlight",
-      hookText: "You need to see this",
-      startTime: s,
-      endTime: e,
-      durationSeconds: Math.max(0, e - s),
-      viralScore: 7.5,
-      viralReason: "Covers the key segment of the video.",
-      description: "A hand-picked featured highlight from the video.",
-      hashtags: "#highlight #viral",
-      clipType: "aha_moment",
-      speakerDynamic: "Key takeaway from the video.",
-    },
-  ]
+  console.log(`[analyzeViralMoments] Using ONLY Gemini metadata enrichment for ${rawViralClips.length} candidate clips...`)
+  const enriched = await enrichAssemblyAIClipsWithGemini(rawViralClips, words)
+  return enriched.sort((a, b) => b.viralScore - a.viralScore)
 }
+

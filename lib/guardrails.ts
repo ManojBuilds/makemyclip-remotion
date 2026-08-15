@@ -262,6 +262,79 @@ function fixReasoningMismatches(
   return { endIdx }
 }
 
+// ─── Pattern 5: Leading filler header trimmer ─────────────────────────────────
+//
+// If the clip's starting sentence is a low-value intro filler ("so basically",
+// "like I said", "you know", "well", "now"), and sentence[startIdx + 1] is a
+// stronger, self-contained statement, snap startIdx to startIdx + 1 to drop
+// throat-clearing fillers.
+const LEADING_FILLER_HEADER_RE =
+  /^[\s.,!?]*(so|well|like|you know|i mean|so basically|like i said|now|right|anyway|um+|uh+|look|listen)[\s.,!?]*/i
+
+function fixLeadingFillerHeader(
+  sentences: Sentence[],
+  startIdx: number,
+  endIdx: number
+): { startIdx: number; note?: string } {
+  if (startIdx >= endIdx || startIdx >= sentences.length - 1) return { startIdx }
+
+  const opener = sentences[startIdx]
+  const next = sentences[startIdx + 1]
+  if (!opener || !next) return { startIdx }
+
+  const openerWordCount = opener.text.trim().split(/\s+/).length
+  const openerIsFiller =
+    FILLER_ONLY_RE.test(opener.text.trim()) ||
+    (openerWordCount <= 5 && LEADING_FILLER_HEADER_RE.test(opener.text.trim()))
+
+  const nextIsSubstantive = next.text.trim().split(/\s+/).length >= 4
+
+  if (openerIsFiller && nextIsSubstantive) {
+    return {
+      startIdx: startIdx + 1,
+      note: `Leading filler header trimmed: opener (#${opener.index}, "${opener.text.trim()}") was low-value throat-clearing filler. Clip now starts directly on clean hook (#${next.index}).`,
+    }
+  }
+
+  return { startIdx }
+}
+
+// ─── Pattern 6: High-energy speaker switch payoff alignment ─────────────
+//
+// If clip ends on a setup or question by Speaker A, and Speaker B reacts or
+// gives a punchy mic-drop line within 3 seconds right after, extend endIdx to
+// include Speaker B's payoff line.
+function fixSpeakerSwitchPayoff(
+  sentences: Sentence[],
+  startIdx: number,
+  endIdx: number
+): { endIdx: number; note?: string } {
+  if (endIdx >= sentences.length - 1) return { endIdx }
+
+  const closer = sentences[endIdx]
+  const next = sentences[endIdx + 1]
+  if (!closer || !next) return { endIdx }
+
+  const endsWithQuestion = /\?\s*$/.test(closer.text.trim())
+  const speakerSwitched = next.speaker !== null && closer.speaker !== null && next.speaker !== closer.speaker
+  const timingGap = next.start - closer.end
+  const nextWordCount = next.text.trim().split(/\s+/).length
+
+  const isEligible =
+    timingGap <= 3.0 &&
+    ((endsWithQuestion && nextWordCount >= 3 && nextWordCount <= 25) ||
+      (speakerSwitched && timingGap <= 2.0 && nextWordCount >= 2 && nextWordCount <= 12))
+
+  if (isEligible) {
+    return {
+      endIdx: endIdx + 1,
+      note: `Speaker switch payoff aligned: extended clip end to include reaction/answer (#${next.index}, "${next.text.trim()}") from Speaker ${next.speaker ?? "0"}.`,
+    }
+  }
+
+  return { endIdx }
+}
+
 // ─── Public entry point ─────────────────────────────────────────────────────
 
 export interface GuardrailResult {
@@ -286,7 +359,10 @@ export function applyBoundaryGuardrails(
 ): GuardrailResult {
   const notes: string[] = []
 
-  const { startIdx: s1, note: n1 } = fixUnansweredPrompt(sentences, startIdx)
+  const { startIdx: s0, note: n0 } = fixLeadingFillerHeader(sentences, startIdx, endIdx)
+  if (n0) notes.push(n0)
+
+  const { startIdx: s1, note: n1 } = fixUnansweredPrompt(sentences, s0)
   if (n1) notes.push(n1)
 
   const { startIdx: s2, note: n2 } = fixStalledRestart(sentences, s1, endIdx)
@@ -303,11 +379,15 @@ export function applyBoundaryGuardrails(
   )
   if (n4) notes.push(n4)
 
+  const { endIdx: e3, note: n5 } = fixSpeakerSwitchPayoff(sentences, s2, e2)
+  if (n5) notes.push(n5)
+
   // Safety: never let start cross end after adjustments.
-  const finalStart = Math.min(s2, e2)
-  const finalEnd = Math.max(s2, e2)
+  const finalStart = Math.min(s2, e3)
+  const finalEnd = Math.max(s2, e3)
 
   return { startIdx: finalStart, endIdx: finalEnd, notes }
 }
 
 import type { Sentence } from "./gemini"
+

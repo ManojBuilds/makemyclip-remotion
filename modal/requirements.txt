@@ -21,8 +21,9 @@ scenedetect==0.6.4
 # pysubs2 is also pip_install'd in config.py — listed here for documentation
 pysubs2
 
-# Transcription
+# Transcription / AI
 assemblyai
+google-genai
 
 # YouTube downloads
 yt-dlp

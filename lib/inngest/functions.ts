@@ -2,7 +2,7 @@ import { inngest } from "./client"
 import { db } from "@/lib/db"
 import { projects, transcriptions, clips, user } from "@/lib/db/schema"
 import type { WordTimestamp, ClipCaption } from "@/lib/db/schema"
-import { eq, inArray } from "drizzle-orm"
+import { eq, inArray, sql } from "drizzle-orm"
 import { getDownloadPresignedUrl } from "@/lib/r2"
 import { transcribeFromUrl } from "@/lib/assemblyai"
 import { isHttpUrl, normalizeVideoUrl } from "@/lib/youtube"
@@ -73,295 +73,277 @@ export const processVideo = inngest.createFunction(
         }
       })
 
-    // Step 2: Transcribe audio with AssemblyAI
-    const transcription = await step.run("transcribe-video", async () => {
-      console.log(
-        `[processVideo] Step: transcribe-video for project: ${projectId}`
-      )
+    // Parallel Execution: Run audio transcription + Gemini metadata enrichment and video analysis concurrently
+    const [transcription, videoAnalysis] = await Promise.all([
+      step.run("transcribe-video", async () => {
+        console.log(
+          `[processVideo] Step: transcribe-video for project: ${projectId}`
+        )
 
-      const existingPromise = db
-        .select()
-        .from(transcriptions)
-        .where(eq(transcriptions.projectId, projectId))
-        .limit(1)
-
-      const existingForSameKeyPromise = key
-        ? db
-          .select({
-            fullText: transcriptions.fullText,
-            words: transcriptions.words,
-            paragraphs: transcriptions.paragraphs,
-          })
+        const existingPromise = db
+          .select()
           .from(transcriptions)
-          .innerJoin(projects, eq(transcriptions.projectId, projects.id))
-          .where(eq(projects.sourceVideoKey, key))
+          .where(eq(transcriptions.projectId, projectId))
           .limit(1)
-        : Promise.resolve([])
 
-      const [existing, existingForSameKeyList] = await Promise.all([
-        existingPromise,
-        existingForSameKeyPromise
-      ])
+        const existingForSameKeyPromise = key
+          ? db
+            .select({
+              fullText: transcriptions.fullText,
+              words: transcriptions.words,
+              paragraphs: transcriptions.paragraphs,
+            })
+            .from(transcriptions)
+            .innerJoin(projects, eq(transcriptions.projectId, projects.id))
+            .where(eq(projects.sourceVideoKey, key))
+            .limit(1)
+          : Promise.resolve([])
 
-      if (existing.length > 0) {
-        console.log(
-          `[processVideo] Transcription already exists for project ${projectId}. Skipping transcribeFromUrl.`
-        )
-        return {
-          fullText: existing[0].fullText,
-          words: existing[0].words as WordTimestamp[],
-          paragraphs: existing[0].paragraphs,
+        const [existing, existingForSameKeyList] = await Promise.all([
+          existingPromise,
+          existingForSameKeyPromise
+        ])
+
+        if (existing.length > 0) {
+          console.log(
+            `[processVideo] Transcription already exists for project ${projectId}. Skipping transcribeFromUrl.`
+          )
+          return {
+            fullText: existing[0].fullText,
+            words: existing[0].words as WordTimestamp[],
+            paragraphs: existing[0].paragraphs,
+            viralClips: undefined as any[] | undefined,
+          }
         }
-      }
 
-      if (key && existingForSameKeyList?.length > 0) {
-        const existingForSameKey = existingForSameKeyList[0]
+        if (key && existingForSameKeyList?.length > 0) {
+          const existingForSameKey = existingForSameKeyList[0]
+          console.log(
+            `[processVideo] Transcription found in another project with the same key: ${key}. Reusing it.`
+          )
+          await db.insert(transcriptions).values({
+            projectId,
+            fullText: existingForSameKey.fullText,
+            words: existingForSameKey.words,
+            paragraphs: existingForSameKey.paragraphs,
+          })
+          return {
+            fullText: existingForSameKey.fullText,
+            words: existingForSameKey.words as WordTimestamp[],
+            paragraphs: existingForSameKey.paragraphs,
+            viralClips: undefined as any[] | undefined,
+          }
+        }
+
+        // Generate a presigned URL so Deepgram can fetch the video from R2
+        // Use a generous 1-hour expiry for large files
+        const presignedUrl =
+          videoUrl || (await getDownloadPresignedUrl(key, 3600))
+
+        // Call AssemblyAI for transcription and Gemini metadata enrichment via Modal
         console.log(
-          `[processVideo] Transcription found in another project with the same key: ${key}. Reusing it.`
+          `[processVideo] Calling AssemblyAI with transcribeLanguage=${transcribeLanguage}, translateLanguage=${translateLanguage}...`
         )
+        const result = await transcribeFromUrl(
+          presignedUrl,
+          transcribeLanguage,
+          translateLanguage
+        )
+        console.log(
+          `[processVideo] Transcription complete. Length: ${result.fullText.length} chars`
+        )
+
+        // Persist the transcription to the database
         await db.insert(transcriptions).values({
           projectId,
-          fullText: existingForSameKey.fullText,
-          words: existingForSameKey.words,
-          paragraphs: existingForSameKey.paragraphs,
+          fullText: result.fullText,
+          words: result.words,
+          paragraphs: result.paragraphs,
         })
+
         return {
-          fullText: existingForSameKey.fullText,
-          words: existingForSameKey.words as WordTimestamp[],
-          paragraphs: existingForSameKey.paragraphs,
+          fullText: result.fullText,
+          words: result.words,
+          paragraphs: result.paragraphs,
+          viralClips: result.viralClips,
         }
-      }
+      }),
 
-      // Generate a presigned URL so Deepgram can fetch the video from R2
-      // Use a generous 1-hour expiry for large files
-      const presignedUrl =
-        videoUrl || (await getDownloadPresignedUrl(key, 3600))
+      step.run("analyze-video-modal", async () => {
+        const analyzerEndpoint = process.env.MODAL_ANALYZER_ENDPOINT || "https://ms8460149--makemyclip-ai-rendering-videoanalyzer-analyze.modal.run"
+        console.log(`[processVideo] Step: analyze-video-modal calling endpoint: ${analyzerEndpoint}`)
 
-      // Call Deepgram Nova-3 for transcription
-      console.log(
-        `[processVideo] Calling AssemblyAI with transcribeLanguage=${transcribeLanguage}, translateLanguage=${translateLanguage}...`
-      )
-      const result = await transcribeFromUrl(
-        presignedUrl,
-        transcribeLanguage,
-        translateLanguage
-      )
-      console.log(
-        `[processVideo] Transcription complete. Length: ${result.fullText.length} chars`
-      )
-
-      // Persist the transcription to the database
-      await db.insert(transcriptions).values({
-        projectId,
-        fullText: result.fullText,
-        words: result.words,
-        paragraphs: result.paragraphs,
-      })
-
-      return {
-        fullText: result.fullText,
-        words: result.words,
-        paragraphs: result.paragraphs,
-      }
-    })
-
-    // Step 2.5: Full-video Analysis Pass on Modal (5fps face tracking, TalkNet ASD, Scene Detection)
-    const videoAnalysis = await step.run("analyze-video-modal", async () => {
-      const analyzerEndpoint = process.env.MODAL_ANALYZER_ENDPOINT || "https://ms8460149--makemyclip-ai-rendering-videoanalyzer-analyze.modal.run"
-      console.log(`[processVideo] Step: analyze-video-modal calling endpoint: ${analyzerEndpoint}`)
-
-      const projPromise = db
-        .select({ analysisPath: projects.analysisPath })
-        .from(projects)
-        .where(eq(projects.id, projectId))
-        .then(res => res[0])
-
-      const existingAnalysisPromise = key
-        ? db
+        const projPromise = db
           .select({ analysisPath: projects.analysisPath })
           .from(projects)
-          .where(eq(projects.sourceVideoKey, key))
-          .limit(1)
-          .then(res => res[0])
-        : Promise.resolve(null)
-
-      const [proj, existingAnalysis] = await Promise.all([
-        projPromise,
-        existingAnalysisPromise
-      ])
-
-      if (proj?.analysisPath) {
-        console.log(`[processVideo] Analysis path already exists for project ${projectId}: ${proj.analysisPath}. Skipping analyze-video-modal.`)
-        return { success: true, analysisUrl: proj.analysisPath }
-      }
-
-      if (key && existingAnalysis?.analysisPath) {
-        console.log(`[processVideo] Analysis path found in another project with the same key: ${key}. Reusing it.`)
-        await db
-          .update(projects)
-          .set({
-            analysisPath: existingAnalysis.analysisPath,
-          })
           .where(eq(projects.id, projectId))
-        return { success: true, analysisUrl: existingAnalysis.analysisPath }
-      }
+          .then(res => res[0])
 
-      const presignedUrl = videoUrl || (await getDownloadPresignedUrl(key, 3600))
-      const videoDuration = duration || 600
+        const existingAnalysisPromise = key
+          ? db
+            .select({ analysisPath: projects.analysisPath })
+            .from(projects)
+            .where(eq(projects.sourceVideoKey, key))
+            .limit(1)
+            .then(res => res[0])
+          : Promise.resolve(null)
 
-      try {
-        const response = await fetch(analyzerEndpoint, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            video_url: presignedUrl,
-            project_id: projectId,
-            duration: videoDuration,
-            detect_skip: 5,
-          }),
-        })
+        const [proj, existingAnalysis] = await Promise.all([
+          projPromise,
+          existingAnalysisPromise
+        ])
 
-        if (!response.ok) {
-          const errText = await response.text()
-          console.error(`[processVideo] Modal VideoAnalyzer failed with status ${response.status}: ${errText}`)
-          await db.update(projects).set({ status: "error" }).where(eq(projects.id, projectId))
-          throw new Error(`VideoAnalyzer failed with status ${response.status}: ${errText}`)
+        if (proj?.analysisPath) {
+          console.log(`[processVideo] Analysis path already exists for project ${projectId}: ${proj.analysisPath}. Skipping analyze-video-modal.`)
+          return { success: true, analysisUrl: proj.analysisPath }
         }
 
-        const resJson = await response.json()
-        if (resJson.success && resJson.analysis_url) {
-          console.log(`[processVideo] Saved analysis.json to R2: ${resJson.analysis_url}`)
+        if (key && existingAnalysis?.analysisPath) {
+          console.log(`[processVideo] Analysis path found in another project with the same key: ${key}. Reusing it.`)
           await db
             .update(projects)
             .set({
-              analysisPath: resJson.analysis_url,
+              analysisPath: existingAnalysis.analysisPath,
             })
             .where(eq(projects.id, projectId))
-          return { success: true, analysisUrl: resJson.analysis_url }
+          return { success: true, analysisUrl: existingAnalysis.analysisPath }
         }
 
-        await db.update(projects).set({ status: "error" }).where(eq(projects.id, projectId))
-        throw new Error(resJson.error || "Modal VideoAnalyzer failed to produce analysis.json")
-      } catch (error) {
-        await db.update(projects).set({ status: "error" }).where(eq(projects.id, projectId))
-        throw error
-      }
-    })
+        const presignedUrl = videoUrl || (await getDownloadPresignedUrl(key, 3600))
+        const videoDuration = duration || 600
 
-    const aiClips = await step.run("analyze-moments", async () => {
-      console.log(`[processVideo] Step: analyze-moments using Gemini...`)
+        try {
+          const response = await fetch(analyzerEndpoint, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              video_url: presignedUrl,
+              project_id: projectId,
+              duration: videoDuration,
+              detect_skip: 5,
+            }),
+          })
 
-      const { analyzeViralMoments } = await import("@/lib/gemini")
+          if (!response.ok) {
+            const errText = await response.text()
+            console.error(`[processVideo] Modal VideoAnalyzer failed with status ${response.status}: ${errText}`)
+            throw new Error(`VideoAnalyzer failed with status ${response.status}: ${errText}`)
+          }
+
+          const resJson = await response.json()
+          if (resJson.success && resJson.analysis_url) {
+            console.log(`[processVideo] Saved analysis.json to R2: ${resJson.analysis_url}`)
+            await db
+              .update(projects)
+              .set({
+                analysisPath: resJson.analysis_url,
+              })
+              .where(eq(projects.id, projectId))
+            return { success: true, analysisUrl: resJson.analysis_url }
+          }
+
+          throw new Error(resJson.error || "Modal VideoAnalyzer failed to produce analysis.json")
+        } catch (error) {
+          await db.update(projects).set({ status: "error" }).where(eq(projects.id, projectId))
+          throw error
+        }
+      }),
+    ])
+
+    const aiClips = await step.run("save-clips-db", async () => {
+      console.log(`[processVideo] Step: save-clips-db saving AssemblyAI & Gemini enriched clips to DB...`)
+
       const { clips } = await import("@/lib/db/schema")
+      const { createId } = await import("@paralleldrive/cuid2")
 
-      // Extract clips using Gemini
-      let identifiedClips = await analyzeViralMoments(
-        transcription.fullText || "",
-        transcription.words
-      )
+      const rawClips: any[] = transcription.viralClips || []
       console.log(
-        `[processVideo] Gemini identified ${identifiedClips.length} clips`
+        `[processVideo] Modal transcribe step returned ${rawClips.length} pre-enriched viral clips`
       )
 
-      if (!identifiedClips || identifiedClips.length === 0) {
+      if (!rawClips || rawClips.length === 0) {
         console.warn(
-          `[processVideo] WARNING: analyzeViralMoments returned 0 clips. Creating a manual fallback clip.`
+          `[processVideo] WARNING: Modal transcription returned 0 clips. No clips to save.`
         )
-        const startTime =
-          transcription.words.length > 0 ? transcription.words[0].start : 0
-        const endTime =
-          transcription.words.length > 0
-            ? transcription.words[transcription.words.length - 1].end
-            : 10
-        identifiedClips = [
-          {
-            title: "Featured Highlight",
-            hookText: "You need to see this",
-            startTime: startTime,
-            endTime: endTime,
-            durationSeconds: Math.max(0, endTime - startTime),
-            viralScore: 75,
-            viralReason:
-              "This clip covers the key segment of the video, optimized to ensure successful rendering.",
-            description: "A hand-picked featured highlight from the video.",
-            hashtags: "#highlight #viral",
-            clipType: "aha_moment",
-            speakerDynamic: "Key takeaway from the video.",
-            cropMode: "auto",
-          },
-        ]
+        return []
       }
 
-      // Save clips to the database directly in 'rendering' status
-      const identifiedClipsWithIds =
-        identifiedClips.length > 0
-          ? await (async () => {
-            const { createId } = await import("@paralleldrive/cuid2")
-            const insertedClips = await db
-              .insert(clips)
-              .values(
-                identifiedClips.map((clip) => {
-                  const clipWords = transcription.words
-                    .filter(
-                      (w: WordTimestamp) =>
-                        w.end >= clip.startTime && w.start <= clip.endTime
-                    )
-                    .map((w: WordTimestamp) => ({
-                      word: w.word.replace(/[.,!?]$/, "").toLowerCase(),
-                      punctuated_word: w.word,
-                      start: Math.max(0, w.start - clip.startTime),
-                      end: Math.max(0, w.end - clip.startTime),
-                      confidence: w.confidence || 0.99,
-                      speaker: w.speaker?.toString() || "0",
-                    }))
+      const insertedClips = await db
+        .insert(clips)
+        .values(
+          rawClips.map((clip: any) => {
+            const startSec =
+              clip.startTime !== undefined
+                ? Number(clip.startTime)
+                : Number(clip.start_ms || 0) / 1000.0
+            const endSec =
+              clip.endTime !== undefined
+                ? Number(clip.endTime)
+                : Number(clip.end_ms || 0) / 1000.0
+            const rawScore = Number(clip.viral_score || clip.viralScore || 85)
+            const normalizedScore = Number(
+              Math.min(100, Math.max(1, rawScore > 10 ? rawScore : rawScore * 10)).toFixed(0)
+            )
 
-                  // Group into a single caption block for the clip (or you could group by sentence)
-                  const captions = [
-                    {
-                      id: createId(),
-                      transcript: clipWords
-                        .map((w) => w.punctuated_word)
-                        .join(" "),
-                      start: 0,
-                      end: Math.max(0, clip.endTime - clip.startTime),
-                      confidence: 0.99,
-                      channel: 0,
-                      words: clipWords,
-                    },
-                  ]
-
-                  return {
-                    projectId,
-                    title: clip.title,
-                    hookText: clip.hookText,
-                    startTime: clip.startTime,
-                    endTime: clip.endTime,
-                    viralScore: Math.round(clip.viralScore || 0),
-                    viralReason: clip.viralReason,
-                    description: clip.description,
-                    hashtags: clip.hashtags,
-                    clipType: clip.clipType,
-                    speakerDynamic: clip.speakerDynamic,
-                    cropMode: clip.cropMode,
-                    status: "rendering" as const,
-                    captions,
-                    captionStyle: projectStyling?.preset || "impact",
-                  }
-                })
+            const clipWords = transcription.words
+              .filter(
+                (w: WordTimestamp) => w.end >= startSec && w.start <= endSec
               )
-              .returning()
+              .map((w: WordTimestamp) => ({
+                word: w.word.replace(/[.,!?]$/, "").toLowerCase(),
+                punctuated_word: w.word,
+                start: Math.max(0, w.start - startSec),
+                end: Math.max(0, w.end - startSec),
+                confidence: w.confidence || 0.99,
+                speaker: w.speaker?.toString() || "0",
+              }))
 
-            return insertedClips.map((c, i) => ({
-              ...c,
-              ...identifiedClips[i], // keep the original prompt data just in case
-            }))
-          })()
-          : []
+            const captions = [
+              {
+                id: createId(),
+                transcript: clipWords.map((w) => w.punctuated_word).join(" "),
+                start: 0,
+                end: Math.max(0, endSec - startSec),
+                confidence: 0.99,
+                channel: 0,
+                words: clipWords,
+              },
+            ]
+
+            return {
+              projectId,
+              title: clip.title || clip.headline || "Viral Short Highlight",
+              hookText: clip.hookText || clip.hook_quote || "Watch this",
+              startTime: startSec,
+              endTime: endSec,
+              viralScore: Math.round(normalizedScore),
+              viralReason:
+                clip.viralReason ||
+                clip.signals?.pacing_note ||
+                "High viral potential.",
+              description:
+                clip.description ||
+                clip.summary ||
+                "Featured viral short clip.",
+              hashtags: clip.hashtags || "#shorts #viral",
+              clipType: clip.clipType || "hot_take",
+              speakerDynamic:
+                clip.speakerDynamic ||
+                clip.signals?.pacing_note ||
+                "Speaker exchange",
+              cropMode: clip.cropMode || "auto",
+              status: "rendering" as const,
+              captions,
+              captionStyle: projectStyling?.preset || "impact",
+            }
+          })
+        )
+        .returning()
 
       console.log(
-        `[processVideo] Saved ${identifiedClipsWithIds.length} clips to DB`
+        `[processVideo] Saved ${insertedClips.length} clips directly to DB`
       )
-      return identifiedClipsWithIds
+      return insertedClips
     })
 
     // Step 4: Trigger batch reframer
@@ -738,13 +720,13 @@ export const batchReframeProject = inngest.createFunction(
         throw new Error("Batch reframe returned failure status")
       }
 
-      // Step 5: Update all clips database records
+      // Step 5: Update all clips database records concurrently
       await step.run("update-clips-database", async () => {
         const now = new Date()
-        for (const res of batchResult.results) {
+        const updatePromises = batchResult.results.map((res: any) => {
           if (res.success) {
             console.log(`[batchReframeProject] Updating clip ${res.clip_id} to rendered`)
-            await db
+            return db
               .update(clips)
               .set({
                 status: "rendered",
@@ -758,12 +740,13 @@ export const batchReframeProject = inngest.createFunction(
               .where(eq(clips.id, res.clip_id))
           } else {
             console.error(`[batchReframeProject] Clip ${res.clip_id} processing failed: ${res.error}`)
-            await db
+            return db
               .update(clips)
               .set({ status: "error" })
               .where(eq(clips.id, res.clip_id))
           }
-        }
+        })
+        await Promise.all(updatePromises)
       })
 
       // Step 6: Send email notification via Resend that clips are ready
@@ -899,18 +882,12 @@ export const exportClip = inngest.createFunction(
           })
           .where(eq(clips.id, clipId))
 
-        if (clip?.projectId) {
-          const [proj] = await db
-            .select({ userId: projects.userId })
-            .from(projects)
-            .where(eq(projects.id, clip.projectId))
-          if (proj?.userId) {
-            await trackServerClipRenderCompleted({
-              distinctId: proj.userId,
-              projectId: clip.projectId,
-              clipId,
-            })
-          }
+        if (project?.userId) {
+          await trackServerClipRenderCompleted({
+            distinctId: project.userId,
+            projectId: clip.projectId,
+            clipId,
+          })
         }
       })
 
@@ -930,3 +907,5 @@ export const exportClip = inngest.createFunction(
     }
   }
 )
+
+

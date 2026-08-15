@@ -76,6 +76,8 @@ class TranscribeRequest(BaseModel):
     video_url: str
     transcribe_language: Optional[str] = "auto"
     translate_language: Optional[str] = "none"
+    prompt: Optional[str] = None
+    keyterms: Optional[List[str]] = None
 
 
 class AnalyzeVideoRequest(BaseModel):

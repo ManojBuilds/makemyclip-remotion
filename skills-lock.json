@@ -8,6 +8,12 @@
       "computedHash": "86910a69b953a20ffef7bb915ae481ec463d1c491e3256a4beec157ec92df5e0",
       "wellKnownDigest": "sha256:191b00c82c3491e4084d5b95c701c0cea030b630aa4672c45311c7891072f852"
     },
+    "assemblyai": {
+      "source": "AssemblyAI/assemblyai-skill",
+      "sourceType": "github",
+      "skillPath": "skills/assemblyai/SKILL.md",
+      "computedHash": "283d0a44d11a6ae226c4bed91315c119a73bf9e8ef09c1dcb1fcaa20f67679c6"
+    },
     "clerk": {
       "source": "clerk/skills",
       "sourceType": "github",
