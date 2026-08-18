@@ -20,16 +20,29 @@ from __future__ import annotations
 
 import glob
 import logging
+import math
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
 import time
 import uuid
 
+import numpy as np
 import modal
 from fastapi import File, Form, UploadFile
+
+try:
+    import cv2
+except ImportError:
+    cv2 = None
+
+try:
+    import torch
+except ImportError:
+    torch = None
 
 from config import ai_secret, app, image, youtube_cookies_secret
 from errors import DownloadError, InvalidInputError, RenderError, VideoProbeError
@@ -41,6 +54,10 @@ from ytdlp_helper import (
     download_youtube_video,
 )
 
+from camera_engine import CAMERA_PROFILES, CameraProfile, calculate_adaptive_pan_alpha
+from layout_classifier import classify_layout, is_valid_face_track
+from video_utils import compute_audio_rms_energy, make_blurred_bg, mux_audio_video
+
 logger = logging.getLogger("makemyclip.reframer")
 
 # --- Tuning constants for the speaker-locking reframer ---
@@ -51,11 +68,148 @@ FACE_COUNT_WINDOW_LEN = 11  # frames used to stabilize face-count decision
 LETTERBOX_TARGET_HEIGHT_RATIO = 0.68
 ANALYSIS_FPS = 25.0  # TalkNet's audio/visual frontends assume this rate
 
+# --- Zoom Punch (emphasis zoom on audio peaks) ---
+ZOOM_PUNCH_MAGNITUDE = 0.07       # Max extra zoom on audio spike (7% tighter crop)
+ZOOM_PUNCH_DECAY_FRAMES = 14      # Cosine ease-out duration (~0.56s at 25fps)
+ZOOM_PUNCH_RMS_WINDOW = 50        # Rolling window for RMS baseline (2s at 25fps)
+ZOOM_PUNCH_SPIKE_THRESHOLD = 1.8  # RMS must exceed baseline by this factor to trigger
+ZOOM_PUNCH_COOLDOWN_FRAMES = 20   # Minimum frames between consecutive punches
+
+# --- Ken Burns slow drift for static scenes ---
+KEN_BURNS_ACTIVATE_AFTER_S = 3.0  # Seconds of no movement before drift starts
+KEN_BURNS_ZOOM_RATE = 0.0008      # Zoom-in per frame (~2% per second at 25fps)
+KEN_BURNS_DRIFT_RATE = 0.3        # Lateral drift px per frame
+KEN_BURNS_MAX_ZOOM = 0.04         # Maximum cumulative zoom from Ken Burns (4%)
+
+# --- Split-screen active speaker highlight ---
+SPLIT_SPEAKER_ZOOM_BOOST = 1.05   # 5% tighter crop on active speaker panel
+SPLIT_LISTENER_DIM = 0.88         # Dim listener panel to 88% brightness
+
 # A 90s clip seek into a 2hr source can take a while — use a generous limit
 # so a stalled ffmpeg doesn't hang the worker. 20 minutes covers the worst
 # case observed in production.
 _FFMPEG_LONG_TIMEOUT_S = 1200
 _FFMPEG_SHORT_TIMEOUT_S = 60
+
+
+# ─────────────────────────────────────────────────────────────────────
+#  CameraProfile: tunable camera behavior presets
+# ─────────────────────────────────────────────────────────────────────
+from dataclasses import dataclass, field
+
+
+@dataclass
+class CameraProfile:
+    """Tunable camera behavior preset.
+
+    Groups all the scattered magic numbers that control pan speed, zoom,
+    dead zones, and framing into a single, swappable object.  Use the
+    ``PROFILES`` dict to select a preset by name (e.g., ``"podcast"``).
+    """
+
+    # --- Framing ---
+    face_crop_ratio: float = 0.106        # Face fills this fraction of 1920px height
+    face_vertical_anchor: float = 0.22    # Face positioned at this % from top
+    split_face_anchor: float = 0.38       # Face at this % from top in split panels
+
+    # --- Pan speed ---
+    pan_alpha_min: float = 0.05           # Minimum pan speed (sigmoid baseline)
+    pan_alpha_max: float = 0.35           # Maximum pan speed at large distances
+    pan_sigmoid_center: float = 150.0     # Distance (px) at sigmoid midpoint
+    pan_sigmoid_steepness: float = 0.025  # Sigmoid steepness factor
+
+    # --- Dead zones ---
+    dead_zone_px: float = 40.0            # Pixel dead zone on X before pan starts
+    dead_zone_y_px: float = 15.0          # Pixel dead zone on Y
+    dead_zone_scale_pct: float = 0.10     # 10% dead zone on scale shifts
+
+    # --- Speaker switching ---
+    speaker_hold_s: float = 1.5           # Seconds to hold speaker after silence
+    min_cut_s: float = 0.8               # Minimum time before speaker switch
+    look_ahead_frames: int = 8            # Interjection filter look-ahead
+
+    # --- Zoom punch ---
+    zoom_punch_magnitude: float = 0.07    # Emphasis zoom intensity
+    zoom_punch_spike_threshold: float = 1.8
+    zoom_punch_cooldown: int = 20
+
+    # --- Smoothing ---
+    vertical_dampen: float = 0.5          # Dampen vertical pan by this factor
+    scale_smooth_alpha: float = 0.15      # EMA alpha for scale changes
+    split_smooth_alpha: float = 0.04      # Split-screen tracking alpha
+    split_dead_zone: float = 25.0         # Split-screen dead zone (px)
+
+    # --- Edge handling ---
+    edge_widen_threshold: float = 0.25    # Distance from edge (fraction) to trigger widening
+    edge_widen_factor: float = 0.88       # Widen crop by this factor near edges
+
+
+# Pre-built profiles for different content types
+CAMERA_PROFILES = {
+    "default": CameraProfile(),
+    "podcast": CameraProfile(
+        pan_alpha_max=0.20,       # Slower pans — podcasters don't move much
+        min_cut_s=1.2,            # Longer hold before switching
+        dead_zone_px=50.0,        # Wider dead zone for stability
+        zoom_punch_magnitude=0.05,  # Subtler emphasis zoom
+    ),
+    "interview": CameraProfile(
+        pan_alpha_max=0.40,       # Faster pans — interviewees face each other
+        face_crop_ratio=0.12,     # Tighter face framing
+        min_cut_s=0.6,            # Quick switches in rapid conversation
+        zoom_punch_magnitude=0.08,
+    ),
+    "presentation": CameraProfile(
+        pan_alpha_max=0.15,       # Slow, deliberate pans
+        dead_zone_px=60.0,        # Very stable
+        face_crop_ratio=0.09,     # Wider shot to capture gestures
+        zoom_punch_spike_threshold=2.0,  # Only on very loud emphasis
+    ),
+}
+
+
+def mux_audio_video(
+    video_path: str,
+    audio_path: str,
+    output_path: str,
+    fps: float,
+    use_nvenc: bool = False,
+) -> None:
+    """Mux video + audio into a final MP4 with sync correction.
+
+    Replaces the 3× copy-pasted FFmpeg mux command that was scattered across
+    reframe(), batch_reframe(), and the batch fallback path.
+    """
+    video_codec = (
+        ["h264_nvenc", "-preset", "p4", "-cq", "22"]
+        if use_nvenc
+        else ["libx264", "-preset", "ultrafast", "-crf", "22"]
+    )
+
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-i", video_path,
+        "-i", audio_path,
+        "-map", "0:v:0",
+        "-map", "1:a:0",
+        "-r", str(fps),
+        "-c:v", *video_codec,
+        "-pix_fmt", "yuv420p",
+        "-profile:v", "high",
+        "-c:a", "aac",
+        "-b:a", "128k",
+        "-af", "aresample=async=1000:min_hard_comp=0.100000:first_pts=0",
+        "-movflags", "+faststart",
+        output_path,
+        "-loglevel", "panic",
+    ]
+
+    result = subprocess.run(
+        cmd, capture_output=True, text=True, timeout=_FFMPEG_LONG_TIMEOUT_S
+    )
+    if result.returncode != 0:
+        raise RenderError(f"Audio mux failed: {result.stderr[-500:]}")
 
 
 def slice_tracks_and_scores(tracks, scores, sf, ef):
@@ -119,6 +273,72 @@ def annotate_transcript_layout(transcript, frame_layout, crop_mode, fps):
     return transcript
 
 
+def compute_audio_rms_energy(audio_path: str, fps: float, total_frames: int) -> list[float]:
+    """Compute per-frame RMS audio energy for zoom punch detection.
+
+    Reads the 16kHz mono WAV that the pipeline already extracts and computes
+    RMS energy in windows aligned to video frames.  Returns a list of length
+    ``total_frames`` with normalized RMS values (0.0–1.0).
+    """
+    import numpy as np
+
+    try:
+        from scipy.io import wavfile
+
+        if not os.path.exists(audio_path) or os.path.getsize(audio_path) == 0:
+            return [0.0] * total_frames
+
+        sr, aud = wavfile.read(audio_path)
+        if len(aud) == 0:
+            return [0.0] * total_frames
+
+        # Convert to float32 normalized
+        if aud.dtype == np.int16:
+            aud = aud.astype(np.float32) / 32768.0
+        elif aud.dtype == np.int32:
+            aud = aud.astype(np.float32) / 2147483648.0
+        else:
+            aud = aud.astype(np.float32)
+
+        # If stereo, take mono average
+        if aud.ndim > 1:
+            aud = aud.mean(axis=1)
+
+        samples_per_frame = int(sr / fps) if fps > 0 else sr // 25
+        rms_per_frame = []
+        for fidx in range(total_frames):
+            start_sample = fidx * samples_per_frame
+            end_sample = start_sample + samples_per_frame
+            if start_sample >= len(aud):
+                rms_per_frame.append(0.0)
+            else:
+                chunk = aud[start_sample:min(end_sample, len(aud))]
+                rms = float(np.sqrt(np.mean(chunk ** 2))) if len(chunk) > 0 else 0.0
+                rms_per_frame.append(rms)
+
+        # Normalize to 0.0–1.0 range
+        max_rms = max(rms_per_frame) if rms_per_frame else 1.0
+        if max_rms > 0:
+            rms_per_frame = [r / max_rms for r in rms_per_frame]
+
+        return rms_per_frame
+    except Exception as e:
+        logger.warning("Failed to compute audio RMS energy: %s", e)
+        return [0.0] * total_frames
+
+
+def get_autocast_context(device_type: str = "cuda", enabled: bool = True):
+    """Return modern PyTorch 2.x torch.amp.autocast context with fallback for PyTorch 1.x."""
+    import torch
+    if hasattr(torch, "amp") and hasattr(torch.amp, "autocast"):
+        return torch.amp.autocast(device_type=device_type, enabled=enabled)
+    elif hasattr(torch.cuda, "amp") and hasattr(torch.cuda.amp, "autocast"):
+        return torch.cuda.amp.autocast(enabled=enabled)
+    else:
+        from contextlib import nullcontext
+        return nullcontext()
+
+
 def is_valid_face_track(tr, sc, frame_height: float = 2160.0) -> tuple[bool, float, float, float, float]:
     """Evaluate if a face track is valid/real (not noise, background poster, or fake face).
 
@@ -167,10 +387,11 @@ class AIReframe:
     @modal.enter()
     def setup(self):
 
-        # 1. Load the face detector + active-speaker model
+        # 1. Load the face detector + TalkNCE active-speaker contrastive model
         os.chdir("/root/asd")
         sys.path.append("/root/asd")
         from ASD import ASD
+        from talknce import create_talknce_engine
         from model.faceDetector.s3fd import S3FD
 
         self.DET = S3FD(device="cuda")
@@ -178,6 +399,12 @@ class AIReframe:
         self.ASD_MODEL.loadParameters("/root/asd/weight/finetuning_TalkSet.model")
         self.ASD_MODEL.eval()
         self.ASD_MODEL.cuda()
+
+        # Initialize TalkNCE contrastive engine (94.1% mAP accuracy)
+        self.TALKNCE_MODEL = create_talknce_engine(
+            weight_path="/root/asd/weight/finetuning_TalkSet.model",
+            device="cuda" if torch.cuda.is_available() else "cpu",
+        )
 
         # 2. Probe NVENC once at startup — saves a try/except per render
         self.use_nvenc = self._probe_nvenc()
@@ -243,162 +470,7 @@ class AIReframe:
 
     def classify_layout(self, tracks, scores, width: int, height: int) -> str:
         """Analyze face tracks and determine the optimal layout mode globally."""
-        import numpy as np
-
-        if not tracks:
-            return "letterbox"
-
-        valid_tracks = []
-        for tidx, tr in enumerate(tracks):
-            sc = scores[tidx]
-            is_valid, _, _, _, _ = is_valid_face_track(tr, sc)
-            if is_valid:
-                valid_tracks.append((tidx, tr))
-
-        if not valid_tracks:
-            return "letterbox"
-
-        # Filter out short, transient tracks (less than 50% of longest track duration)
-        max_duration = max(len(t[1]["proc_track"]["x"]) for t in valid_tracks)
-        duration_threshold = 0.50 * max_duration
-        valid_tracks = [
-            t
-            for t in valid_tracks
-            if len(t[1]["proc_track"]["x"]) >= duration_threshold
-        ]
-
-        if not valid_tracks:
-            return "letterbox"
-
-        # Cluster remaining valid tracks horizontally (group same speaker's fragmented tracks)
-        columns = []
-        for tidx, tr in valid_tracks:
-            mu_x = np.mean(tr["proc_track"]["x"]) / width
-            placed = False
-            for col in columns:
-                if abs(col["mean_x"] - mu_x) < 0.15:
-                    col["tracks"].append((tidx, tr))
-                    col["mean_x"] = np.mean(
-                        [
-                            np.mean(t[1]["proc_track"]["x"]) / width
-                            for t in col["tracks"]
-                        ]
-                    )
-                    placed = True
-                    break
-            if not placed:
-                columns.append({"mean_x": mu_x, "tracks": [(tidx, tr)]})
-
-        num_columns = len(columns)
-        logger.info(
-            "classify_layout: Found %d valid tracks, clustered into %d columns.",
-            len(valid_tracks),
-            num_columns,
-        )
-        for i, col in enumerate(columns):
-            logger.info(
-                "  Column %d: mean_x=%.2f, track_idxs=%s",
-                i,
-                col["mean_x"],
-                [t[0] for t in col["tracks"]],
-            )
-
-        # Check for temporal overlap (exist simultaneously on screen)
-        # to distinguish multiple people from fragmented tracks of the same person.
-        max_duration = max(len(t[1]["proc_track"]["x"]) for t in valid_tracks)
-        overlap_threshold = max(1, min(12, int(0.2 * max_duration)))
-
-        has_temporal_overlap = False
-        for i in range(len(valid_tracks)):
-            for j in range(i + 1, len(valid_tracks)):
-                tr1 = valid_tracks[i][1]
-                tr2 = valid_tracks[j][1]
-
-                # Support both mock test objects and real runtime objects
-                f1 = (
-                    tr1["track"]["frame"]
-                    if "track" in tr1
-                    else list(range(len(tr1["proc_track"]["x"])))
-                )
-                f2 = (
-                    tr2["track"]["frame"]
-                    if "track" in tr2
-                    else list(range(len(tr2["proc_track"]["x"])))
-                )
-
-                set1 = set(f1)
-                set2 = set(f2)
-                if len(set1.intersection(set2)) >= overlap_threshold:
-                    has_temporal_overlap = True
-                    break
-            if has_temporal_overlap:
-                break
-
-        if num_columns == 1:
-            # Single column: reframe (pan-and-zoom on active speaker) unless face is too small
-            tidx, tr = columns[0]["tracks"][0]
-            avg_face_width_pct = np.mean(tr["proc_track"]["s"]) / width
-
-            if avg_face_width_pct < 0.022:
-                logger.info(
-                    "classify_layout decision: letterbox (face width %.2f%% is too small for reframe)",
-                    avg_face_width_pct * 100,
-                )
-                return "letterbox"
-
-            logger.info("classify_layout decision: reframe")
-            return "reframe"
-
-        elif num_columns == 2:
-            mu_x1 = columns[0]["mean_x"]
-            mu_x2 = columns[1]["mean_x"]
-            logger.info("classify_layout columns: col0=%.2f, col1=%.2f", mu_x1, mu_x2)
-
-            if not has_temporal_overlap:
-                logger.info(
-                    "classify_layout decision: reframe (2 columns but no temporal overlap)"
-                )
-                return "reframe"
-
-            # Check if speakers are in opposing halves (left/right split)
-            is_split_candidate = (mu_x1 < 0.48 and mu_x2 > 0.52) or (
-                mu_x2 < 0.48 and mu_x1 > 0.52
-            )
-
-            # Verify at least one column has speaking activity
-            def has_speaking_track(col):
-                for tidx, tr in col["tracks"]:
-                    sc = scores[tidx]
-                    if len(sc) > 0 and np.max(sc) >= 0.35:
-                        return True
-                return False
-
-            at_least_one_speaks = has_speaking_track(columns[0]) or has_speaking_track(columns[1])
-
-            if is_split_candidate and at_least_one_speaks:
-                logger.info("classify_layout decision: split (opposing halves with speaking activity)")
-                return "split"
-
-            # Faces too small for reframe → letterbox
-            tidx1, tr1 = columns[0]["tracks"][0]
-            tidx2, tr2 = columns[1]["tracks"][0]
-            avg_face_width_pct1 = np.mean(tr1["proc_track"]["s"]) / width
-            avg_face_width_pct2 = np.mean(tr2["proc_track"]["s"]) / width
-
-            if avg_face_width_pct1 < 0.022 or avg_face_width_pct2 < 0.022:
-                logger.info(
-                    "classify_layout decision: letterbox (faces too small: %.2f%%, %.2f%%)",
-                    avg_face_width_pct1 * 100,
-                    avg_face_width_pct2 * 100,
-                )
-                return "letterbox"
-
-            logger.info("classify_layout decision: reframe (2 columns, not split candidate)")
-            return "reframe"
-
-        else:
-            logger.info("classify_layout decision: letterbox (3+ columns)")
-            return "letterbox"
+        return classify_layout(tracks, scores, width, height)
 
 
     # ─────────────────────────────────────────────────────────────────
@@ -448,12 +520,17 @@ class AIReframe:
             if "/root/asd" not in sys.path:
                 sys.path.append("/root/asd")
             from ASD import ASD
+            from talknce import create_talknce_engine
             self.ASD_MODEL = ASD()
             if os.path.exists("/root/asd/weight/finetuning_TalkSet.model"):
                 self.ASD_MODEL.loadParameters("/root/asd/weight/finetuning_TalkSet.model")
             self.ASD_MODEL.eval()
             if torch.cuda.is_available():
                 self.ASD_MODEL.cuda()
+            self.TALKNCE_MODEL = create_talknce_engine(
+                weight_path="/root/asd/weight/finetuning_TalkSet.model",
+                device="cuda" if torch.cuda.is_available() else "cpu",
+            )
 
         pyavi_path = os.path.join(work_dir, "pyavi")
         pyframes_path = os.path.join(work_dir, "pyframes")
@@ -497,10 +574,10 @@ class AIReframe:
         decode_cmd = [
             "ffmpeg",
             "-y",
-            "-ss",
-            str(start_time),
             "-i",
             video_url,
+            "-ss",
+            str(start_time),
             "-t",
             str(duration),
             "-map",
@@ -553,10 +630,10 @@ class AIReframe:
         proxy_cmd = [
             "ffmpeg",
             "-y",
-            "-ss",
-            str(start_time),
             "-i",
             video_url,
+            "-ss",
+            str(start_time),
             "-t",
             str(duration),
             "-vf",
@@ -599,10 +676,10 @@ class AIReframe:
             audio_cmd = [
                 "ffmpeg",
                 "-y",
-                "-ss",
-                str(start_time),
                 "-i",
                 video_url,
+                "-ss",
+                str(start_time),
                 "-t",
                 str(duration),
                 "-qscale:a",
@@ -673,12 +750,6 @@ class AIReframe:
             return tracks
 
         def crop_video(track, crop_file, audio_path_local, frames_local, fps_local):
-            v_out = cv2.VideoWriter(
-                crop_file + "t.avi",
-                cv2.VideoWriter_fourcc(*"XVID"),
-                fps_local,
-                (224, 224),
-            )
             dets = {
                 "x": signal.medfilt(
                     (track["bbox"][:, 0] + track["bbox"][:, 2]) / 2, 13
@@ -695,10 +766,11 @@ class AIReframe:
                     13,
                 ),
             }
+            vf = []
+            cs = 0.40
             for fidx, frame in enumerate(track["frame"]):
-                # Clamp frame index to valid range
                 safe_frame = min(int(frame), len(frames_local) - 1)
-                bs, cs = dets["s"][fidx], 0.40
+                bs = dets["s"][fidx]
                 bsi = int(bs * (1 + 2 * cs))
                 img = frames_local[safe_frame]
                 pad = np.pad(
@@ -713,12 +785,19 @@ class AIReframe:
                     int(mx - bs * (1 + cs)) : int(mx + bs * (1 + cs)),
                 ]
                 if face.size == 0 or face.shape[0] == 0 or face.shape[1] == 0:
-                    # Face crop is empty (bs near-zero from median filter) — write gray placeholder
-                    v_out.write(np.full((224, 224, 3), 110, dtype=np.uint8))
+                    gray_crop = np.full((112, 112), 110, dtype=np.uint8)
                 else:
-                    v_out.write(cv2.resize(face, (224, 224)))
-            v_out.release()
+                    resized_face = cv2.resize(face, (224, 224))
+                    if resized_face.ndim == 3:
+                        gray = cv2.cvtColor(resized_face, cv2.COLOR_BGR2GRAY)
+                    else:
+                        gray = resized_face
+                    gray_crop = gray[56:168, 56:168]
+                vf.append(gray_crop)
 
+            vf_arr = np.array(vf)
+
+            # Extract audio slice for TalkNet MFCC
             audS = track["frame"][0] / fps_local
             audE = (track["frame"][-1] + 1) / fps_local
             subprocess.run(
@@ -746,25 +825,7 @@ class AIReframe:
                 ],
                 timeout=_FFMPEG_SHORT_TIMEOUT_S,
             )
-            subprocess.run(
-                [
-                    "ffmpeg",
-                    "-y",
-                    "-i",
-                    crop_file + "t.avi",
-                    "-i",
-                    crop_file + ".wav",
-                    "-c:v",
-                    "copy",
-                    "-c:a",
-                    "copy",
-                    crop_file + ".avi",
-                    "-loglevel",
-                    "panic",
-                ],
-                timeout=_FFMPEG_SHORT_TIMEOUT_S,
-            )
-            return {"track": track, "proc_track": dets}
+            return {"track": track, "proc_track": dets, "vf": vf_arr}
 
         # 4. Scene detection on the proxy
         video = open_video(proxy_video)
@@ -809,9 +870,10 @@ class AIReframe:
         for kidx in keyframe_indices:
             img = frames_mem[kidx]
             h, w = img.shape[:2]
-            if h > 640:
-                scale = 640 / h
-                img_detect = cv2.resize(img, (int(w * scale), 640))
+            target_detect_h = 960 if h >= 1080 else min(h, 640)
+            if h > target_detect_h:
+                scale = target_detect_h / float(h)
+                img_detect = cv2.resize(img, (int(w * scale), target_detect_h))
                 res = self.DET.detect_faces(
                     cv2.cvtColor(img_detect, cv2.COLOR_BGR2RGB),
                     conf_th=0.4,
@@ -954,6 +1016,12 @@ class AIReframe:
                     continue
 
                 sr, aud = wavfile.read(wav_file)
+                # Cleanup temporary audio slice file immediately after reading
+                try:
+                    os.remove(wav_file)
+                except OSError:
+                    pass
+
                 if len(aud) == 0:
                     all_scores.append(np.zeros(track_frame_count))
                     continue
@@ -962,29 +1030,9 @@ class AIReframe:
                     aud, 16000, numcep=13, winlen=0.025, winstep=0.010
                 )
 
-                vc = cv2.VideoCapture(os.path.join(pycrop_path, "%05d.avi" % idx))
-                vf = []
-                while vc.isOpened():
-                    ret, fr = vc.read()
-                    if not ret:
-                        break
-                    vf.append(
-                        cv2.resize(cv2.cvtColor(fr, cv2.COLOR_BGR2GRAY), (224, 224))[
-                            56:168, 56:168
-                        ]
-                    )
-                vc.release()
-                vf = np.array(vf)
-
-                # Free disk: each track produces ~50MB of intermediates.
-                for ext in ("t.avi", ".avi", ".wav"):
-                    f_path = os.path.join(pycrop_path, "%05d%s" % (idx, ext))
-                    try:
-                        os.remove(f_path)
-                    except OSError:
-                        pass
-
-                if len(vf) == 0:
+                # Direct in-memory face crops from RAM (zero disk I/O)
+                vf = tr.get("vf")
+                if vf is None or len(vf) == 0:
                     all_scores.append(np.zeros(track_frame_count))
                     continue
 
@@ -1020,10 +1068,17 @@ class AIReframe:
                 length = n_audio_steps / 100.0
 
                 with torch.no_grad():
-                    inA_full = torch.FloatTensor(af).unsqueeze(0).cuda()
-                    inV_full = torch.FloatTensor(vf_analysis).unsqueeze(0).cuda()
-                    eA_full = self.ASD_MODEL.model.forward_audio_frontend(inA_full)
-                    eV_full = self.ASD_MODEL.model.forward_visual_frontend(inV_full)
+                    device = "cuda" if torch.cuda.is_available() else "cpu"
+                    use_amp = torch.cuda.is_available()
+                    with get_autocast_context(device_type=device, enabled=use_amp):
+                        inA_full = torch.FloatTensor(af).unsqueeze(0).to(device)
+                        inV_full = torch.FloatTensor(vf_analysis).unsqueeze(0).to(device)
+                        if hasattr(self, "TALKNCE_MODEL") and self.TALKNCE_MODEL is not None:
+                            eA_full = self.TALKNCE_MODEL.forward_audio_frontend(inA_full)
+                            eV_full = self.TALKNCE_MODEL.forward_visual_frontend(inV_full)
+                        else:
+                            eA_full = self.ASD_MODEL.model.forward_audio_frontend(inA_full)
+                            eV_full = self.ASD_MODEL.model.forward_visual_frontend(inV_full)
 
                 tr_scores = []
                 for dur in range(1, 7):
@@ -1048,10 +1103,14 @@ class AIReframe:
                         eV = eV[:, :min_steps, :]
 
                         with torch.no_grad():
-                            out = self.ASD_MODEL.model.forward_audio_visual_backend(
-                                eA, eV
-                            )
-                            scs.extend(self.ASD_MODEL.lossAV.forward(out, labels=None))
+                            if hasattr(self, "TALKNCE_MODEL") and self.TALKNCE_MODEL is not None:
+                                combined_prob = self.TALKNCE_MODEL.forward_contrastive_evaluation(eA, eV)
+                                scs.extend(combined_prob.cpu().numpy().tolist())
+                            else:
+                                out = self.ASD_MODEL.model.forward_audio_visual_backend(
+                                    eA, eV
+                                )
+                                scs.extend(self.ASD_MODEL.lossAV.forward(out, labels=None))
 
                     if scs:
                         tr_scores.append(scs)
@@ -1172,7 +1231,7 @@ class AIReframe:
             if ss_val > 0.0:
                 cap.ffmpeg_cmd = cap.ffmpeg_cmd.replace(
                     f' -i "{filename}"',
-                    f' -ss {ss_val:.3f} -i "{filename}"{t_str}'
+                    f' -i "{filename}" -ss {ss_val:.3f}{t_str}'
                 )
             else:
                 cap.ffmpeg_cmd = cap.ffmpeg_cmd.replace(
@@ -1197,6 +1256,7 @@ class AIReframe:
         scene_bounds: list | None = None,
         video_path: str | None = None,
         start_time_in_video: float = 0.0,
+        audio_wav_path: str | None = None,
     ):
         from collections import deque
 
@@ -1336,6 +1396,24 @@ class AIReframe:
         sorted_by_len = [vt[1] for vt in valid_tracks]
         has_speaker = len(sorted_by_len) >= 1
         full_x_solo = None
+
+        # Compute scene-level MEDIAN face scale from ALL valid tracks.
+        # This is used as a CONSTANT denominator for person_scale so zoom never changes frame-to-frame.
+        scene_median_s = None
+        if has_speaker:
+            all_s_values = []
+            for _vt_idx, vt_tr, _vt_score, _vt_len in valid_tracks:
+                track_s = vt_tr["proc_track"]["s"]
+                if hasattr(track_s, 'tolist'):
+                    all_s_values.extend(track_s.tolist())
+                else:
+                    all_s_values.extend(list(track_s))
+            if all_s_values:
+                all_s_values.sort()
+                mid = len(all_s_values) // 2
+                scene_median_s = all_s_values[mid]
+                logger.info("Scene-level median face scale locked at %.2f (from %d samples)", scene_median_s, len(all_s_values))
+
         if has_speaker:
             full_x_solo = self.get_smooth_x_for_track(sorted_by_len[0], max_frames)
             logger.info("Solo speaker locking enabled (%d valid tracks)", len(valid_tracks))
@@ -1392,6 +1470,26 @@ class AIReframe:
         # Lower value = slower, smoother pan. Snappy tracking: 0.06
         SMOOTHING_ALPHA = 0.06
 
+        # --- Zoom Punch state (audio-driven emphasis zoom) ---
+        audio_rms = None
+        if audio_wav_path:
+            audio_rms = compute_audio_rms_energy(audio_wav_path, fps, max_frames)
+            if audio_rms and any(r > 0 for r in audio_rms):
+                logger.info("Zoom punch: loaded %d frames of RMS audio energy", len(audio_rms))
+            else:
+                audio_rms = None
+        zoom_punch_active = 0.0       # Current zoom punch intensity (0.0 = none, up to ZOOM_PUNCH_MAGNITUDE)
+        zoom_punch_frame_counter = 0  # Frames since last punch triggered
+        zoom_punch_cooldown = 0       # Cooldown counter to prevent rapid-fire punches
+        import math as _math
+
+        # --- Ken Burns state (slow drift for static scenes) ---
+        ken_burns_zoom_accum = 0.0     # Accumulated zoom from Ken Burns
+        ken_burns_drift_accum = 0.0    # Accumulated lateral drift
+        ken_burns_drift_dir = 1.0      # +1 or -1 for drift direction
+        ken_burns_static_frames = 0    # Counter of frames with no significant movement
+        prev_held_speaker_x = None     # Track movement for Ken Burns activation
+
         # Open video reader and determine dimensions first
         video_reader = None
         if video_path is not None:
@@ -1431,7 +1529,7 @@ class AIReframe:
 
                 if crop_mode == "auto":
                     scene_tr, scene_sc = slice_tracks_and_scores(tracks, scores, sf, ef)
-                    scene_crop = self.classify_layout(scene_tr, scene_sc, source_w, source_h)
+                    scene_crop = classify_layout(scene_tr, scene_sc, source_w, source_h)
                     
                     if scene_crop == "reframe":
                         mapped = "single"
@@ -1450,26 +1548,18 @@ class AIReframe:
         _letterbox_mask = None
 
         def _make_blurred_bg(img):
-            # Dynamic blurred background for premium letterboxing
-            bg_scale = 1920 / img.shape[0]
-            bg_res = cv2.resize(
-                img,
-                (int(img.shape[1] * bg_scale), 1920),
-                interpolation=cv2.INTER_LINEAR,
-            )
-            mid_x = bg_res.shape[1] // 2
-            bg = bg_res[:, max(0, mid_x - 540) : mid_x + 540]
-            if bg.shape[1] < 1080:
-                bg = cv2.copyMakeBorder(
-                    bg, 0, 0, 0, 1080 - bg.shape[1], cv2.BORDER_REPLICATE
-                )
-            # Downsample → blur → upsample is much faster than a massive kernel
-            small = cv2.resize(bg, (270, 480), interpolation=cv2.INTER_LINEAR)
-            # Problem 2: Blur is too strong. Reduced kernel size to retain more context.
-            blurred_small = cv2.GaussianBlur(small, (15, 15), 0)
-            return cv2.resize(
-                blurred_small, (1080, 1920), interpolation=cv2.INTER_LINEAR
-            )
+            return make_blurred_bg(img)
+
+        # Telemetry metrics collection
+        frames_with_faces_count = 0
+        asd_scores_list = []
+        layout_switches_count = 0
+        speaker_switches_count = 0
+        camera_displacements = []
+        prev_cx_metric = None
+
+        def _write_frame(frame_out):
+            vout.write(frame_out)
 
         # Level 100: Precompute scene cuts to prevent camera sliding across scene transitions
         scene_starts = set()
@@ -1485,6 +1575,19 @@ class AIReframe:
                         break
                 else:
                     img = frames_mem[fidx]
+
+                # Telemetry: track face coverage, ASD scores, layout switches
+                if fidx < len(faces) and faces[fidx]:
+                    frames_with_faces_count += 1
+                    best_f = max(faces[fidx], key=lambda x: x.get("score", 0))
+                    asd_scores_list.append(best_f.get("score", 0))
+
+                if fidx > 0 and frame_layout[fidx] != frame_layout[fidx - 1]:
+                    layout_switches_count += 1
+                    # Clean hard cut: reset camera holding state on layout structural change
+                    held_cx = None
+                    held_speaker_x = None
+                    held_speaker_y = None
 
                 scale = 1920 / img.shape[0]
 
@@ -1586,24 +1689,16 @@ class AIReframe:
                     held_speaker_y = best["y"]
                     held_speaker_s = best["s"]
 
-                    # Level 100 zoom lock (widened by ~15% to preserve hand gestures and upper body context)
-                    if best.get("score", 0) > 0.75:
-                        held_speaker_zoom = 0.125
-                    else:
-                        held_speaker_zoom = 0.098
+                    # Constant stable speaker framing scale (eliminates repeated zoom jumps)
+                    held_speaker_zoom = 0.106
 
                     frames_since_active = 0
                     target_cx = int(held_speaker_x * scale)
                 elif held_speaker_x is not None:
                     # Hold the last active speaker indefinitely during pauses.
-                    # This prevents the camera from awkwardly cutting to the empty center of the room.
                     frames_since_active += 1
                     frames_on_current_speaker += 1
                     target_cx = int(held_speaker_x * scale)
-
-                    # Level 100 zoom decay after 0.5s of silence
-                    if frames_since_active > 12:
-                        held_speaker_zoom = 0.115
                 elif has_speaker and full_x_solo is not None:
                     target_cx = int(full_x_solo[fidx] * scale)
                     frames_on_current_speaker += 1
@@ -1617,12 +1712,24 @@ class AIReframe:
                         1920 * LETTERBOX_TARGET_HEIGHT_RATIO
                     )  # Dynamic vertical card height based on target ratio
 
-                    # If no speaker is actively tracked, hold the camera on the last known position
+                    # If no speaker is actively tracked, hold camera position or use visual saliency for B-roll/slides
                     if target_cx is None:
                         if current_cx is not None:
                             target_cx = current_target_cx
                         else:
-                            target_cx = int((img.shape[1] / img.shape[0]) * 1920 / 2)
+                            # Saliency / text density fallback: Canny edge centroid on downsampled frame
+                            try:
+                                gray_small = cv2.cvtColor(cv2.resize(img, (320, 180)), cv2.COLOR_BGR2GRAY)
+                                edges = cv2.Canny(gray_small, 50, 150)
+                                col_sum = edges.sum(axis=0)
+                                if col_sum.sum() > 0:
+                                    col_idx = np.arange(320, dtype=np.float32)
+                                    saliency_cx_pct = float((col_idx * col_sum).sum() / col_sum.sum()) / 320.0
+                                    target_cx = int(saliency_cx_pct * img.shape[1] * scale)
+                                else:
+                                    target_cx = int((img.shape[1] / img.shape[0]) * 1920 / 2)
+                            except Exception:
+                                target_cx = int((img.shape[1] / img.shape[0]) * 1920 / 2)
 
                     if current_cx is None:
                         current_cx = float(target_cx)
@@ -1674,7 +1781,7 @@ class AIReframe:
 
                     # Blend directly onto background (no shadow, no rounded corners)
                     bg[start_y : start_y + H, start_x : start_x + W] = res
-                    vout.write(bg)
+                    _write_frame(bg)
 
                 elif use_split_screen:
                     # --- Vizard/Opus-style: Dynamic Multi-Speaker ASD Split Layout ---
@@ -1682,26 +1789,19 @@ class AIReframe:
                     face_bottom = None
 
                     if fidx < len(faces) and len(faces[fidx]) > 0:
-                        # Filter faces by ASD active speech score
-                        active_faces = [f for f in faces[fidx] if f.get("score", 0) > ACTIVE_SPEAKER_THRESHOLD]
-                        if not active_faces:
-                            # Fallback to faces sorted by ASD score, then size
-                            active_faces = sorted(faces[fidx], key=lambda x: (x.get("score", 0), x.get("s", 0)), reverse=True)
-
-                        if len(active_faces) >= 2:
-                            # Pick 2 distinct active speakers across left and right sides of the stage
-                            top_two = active_faces[:2]
-                            sorted_lr = sorted(top_two, key=lambda x: x["x"])
+                        all_faces = faces[fidx]
+                        if len(all_faces) >= 2:
+                            # Sort left-to-right across the stage: Leftmost face -> Top panel, Rightmost face -> Bottom panel
+                            sorted_lr = sorted(all_faces, key=lambda f: f["x"])
                             face_top = sorted_lr[0]
-                            face_bottom = sorted_lr[1]
-                        elif len(active_faces) == 1:
-                            face_top = active_faces[0]
-                            other_faces = [f for f in faces[fidx] if f["tidx"] != face_top["tidx"]]
-                            if other_faces:
-                                face_bottom = max(other_faces, key=lambda x: x.get("s", 0))
+                            face_bottom = sorted_lr[-1]
+                        elif len(all_faces) == 1:
+                            single_face = all_faces[0]
+                            mid_x = (img.shape[1] * scale) / 2.0
+                            if single_face["x"] < mid_x:
+                                face_top = single_face
                             else:
-                                # Keep previous distinct bottom speaker if available
-                                face_bottom = None
+                                face_bottom = single_face
 
                     # Prevent duplicate slot framing: if top and bottom are too close horizontally, offset bottom
                     if face_top and face_bottom and abs(face_top["x"] - face_bottom["x"]) < 100.0:
@@ -1782,6 +1882,10 @@ class AIReframe:
                     final_frame = np.zeros((1920, 1080, 3), dtype=np.uint8)
                     img_h, img_w = img.shape[:2]
 
+                    # Check scores to highlight active speaker panel vs listener panel
+                    score_top = face_top.get("score", 0.0) if face_top else 0.0
+                    score_bottom = face_bottom.get("score", 0.0) if face_bottom else 0.0
+
                     # We iterate over top (left speaker) and bottom (right speaker) slots
                     for is_top, y_start in [(True, 0), (False, 960)]:
                         sub_img = img  # Crop directly from full source frame to avoid slicing faces in half
@@ -1789,42 +1893,44 @@ class AIReframe:
                             cx = split_cx_top
                             cy = split_cy_top
                             s = split_s_top
+                            is_active_speaker = (score_top > ACTIVE_SPEAKER_THRESHOLD and score_top >= score_bottom)
                         else:
                             cx = split_cx_bottom
                             cy = split_cy_bottom
                             s = split_s_bottom
+                            is_active_speaker = (score_bottom > ACTIVE_SPEAKER_THRESHOLD and score_bottom > score_top)
 
                         sub_h, sub_w = sub_img.shape[:2]
 
-                        # Fallback to center of the half-frame if face tracking is not available
-                        if cx is None or s is None:
-                            cx_rel = sub_w / 2.0
-                            cy_rel = sub_h / 2.0
-                            s = sub_w * 0.15
+                        # Fallback to Left/Right stage anchors if face tracking is not available
+                        if cx is None:
+                            # Top panel = Left Speaker (~28% x), Bottom panel = Right Speaker (~72% x)
+                            cx_rel = sub_w * 0.28 if is_top else sub_w * 0.72
+                            cy_rel = sub_h * 0.25  # Seated podcast speaker head level (~270px)
                         else:
-                            cx_rel = cx
-                            cy_rel = cy
+                            cx_rel = float(cx)
+                            cy_rel = float(cy) if cy is not None else sub_h * 0.25
 
                         # Ensure coordinates are within sub-image boundaries
                         cx_rel = max(0.0, min(cx_rel, float(sub_w)))
                         cy_rel = max(0.0, min(cy_rel, float(sub_h)))
 
-                        # Determine crop size (target 1080:960 aspect ratio = 1.125)
-                        # Face fills ~36% of 960px half (s=half-size, full=2s)
-                        person_scale = (960.0 * 0.18) / max(s, 1.0)
+                        # ---- OpusClip-quality FIXED crop size ----
+                        # Use 44% of frame width (844px out of 1920) for 1080:960 aspect ratio (750px height).
+                        # This frames head, shoulders, chest, mic & hand gestures cleanly with ZERO head cutoff.
+                        crop_w = float(sub_w) * 0.44
+                        crop_h = crop_w / 1.125  # 1080:960 aspect ratio
 
-                        desired_crop_w = 1080.0 / person_scale
-                        desired_crop_h = 960.0 / person_scale
+                        # Ensure crop doesn't exceed frame bounds
+                        crop_w = min(crop_w, float(sub_w))
+                        crop_h = min(crop_h, float(sub_h))
 
-                        # Clamp crop size to the maximum allowed crop box inside the sub-image
-                        crop_w = min(desired_crop_w, float(sub_w))
-                        crop_h = crop_w / 1.125
-
-                        # Position the crop box centering on face coordinates
+                        # Position crop: center horizontally on face, face at 22% from top vertically
+                        # 22% ensures at least ~165px of headroom above face center so hair and head are NEVER cut off
                         x1 = cx_rel - crop_w / 2.0
-                        y1 = cy_rel - crop_h * 0.38  # Face at 38% from top (rule of thirds)
+                        y1 = cy_rel - crop_h * 0.22
 
-                        # Clamp crop box coordinates to stay fully inside the sub-image
+                        # Clamp crop box to stay inside the source frame
                         x1 = max(0.0, min(x1, sub_w - crop_w))
                         y1 = max(0.0, min(y1, sub_h - crop_h))
 
@@ -1836,9 +1942,15 @@ class AIReframe:
                             resized = cv2.resize(
                                 crop, (1080, 960), interpolation=cv2.INTER_AREA
                             )
+                            # Dim listener panel slightly to bring visual focus to active speaker
+                            if not is_active_speaker and (score_top > ACTIVE_SPEAKER_THRESHOLD or score_bottom > ACTIVE_SPEAKER_THRESHOLD):
+                                resized = cv2.convertScaleAbs(resized, alpha=SPLIT_LISTENER_DIM, beta=0)
+
                             final_frame[y_start : y_start + 960, 0:1080] = resized
 
-                    vout.write(final_frame)
+                    # Draw 4px separator line between top and bottom panels
+                    final_frame[958:962, :] = (40, 40, 40)
+                    _write_frame(final_frame)
                     prev_target_cx = None
 
                 elif target_cx is not None or current_cx is not None:
@@ -1854,22 +1966,14 @@ class AIReframe:
                             if current_cy_reframe is not None
                             else virtual_h / 2.0
                         )
-                        target_s = (
-                            current_s_reframe
-                            if current_s_reframe is not None
-                            else virtual_w * 0.08
-                        )
+                        target_s = scene_median_s if scene_median_s is not None else virtual_w * 0.08
                     else:
                         target_cy = (
                             (held_speaker_y * scale)
                             if held_speaker_y is not None
                             else virtual_h / 2.0
                         )
-                        target_s = (
-                            (held_speaker_s * scale)
-                            if held_speaker_s is not None
-                            else virtual_w * 0.08
-                        )
+                        target_s = scene_median_s if scene_median_s is not None else (held_speaker_s * scale)
 
                     # Level 100: Scene cut hard reset (snap camera ONLY on actual video scene edit cuts)
                     is_scene_start = fidx in scene_starts
@@ -1880,15 +1984,13 @@ class AIReframe:
                         current_target_cx = float(target_cx)
                         current_cy_reframe = float(target_cy)
                         current_target_cy_reframe = float(target_cy)
-                        current_s_reframe = float(target_s)
-                        current_target_s_reframe = float(target_s)
                     elif speaker_switched:
                         # Smooth transition interpolation across speaker switches: glide viewport over ~6 frames instead of snapping
                         current_target_cx = float(target_cx)
                         current_target_cy_reframe = float(target_cy)
-                        current_target_s_reframe = float(target_s)
 
                     # Dead-zone on X
+                    DEAD_ZONE_PX = 15.0
                     if target_cx - current_target_cx > DEAD_ZONE_PX:
                         current_target_cx = float(target_cx - DEAD_ZONE_PX)
                     elif current_target_cx - target_cx > DEAD_ZONE_PX:
@@ -1899,22 +2001,20 @@ class AIReframe:
                     if abs(target_cy - current_target_cy_reframe) > DEAD_ZONE_Y:
                         current_target_cy_reframe = float(target_cy)
 
-                    # 10% dead-zone on scale shifts
-                    if abs(target_s - current_target_s_reframe) > (
-                        current_target_s_reframe * 0.10
-                    ):
-                        current_target_s_reframe = float(target_s)
 
                     # Level 1000: Sigmoid Adaptive Easing & Smooth Panning Transition
+                    # Faster panning: increased sigmoid ceiling from 0.25→0.40 with velocity boost
                     dist_x = abs(current_target_cx - current_cx)
                     if dist_x < 15.0:
                         # Stabilization lock: lock camera on stationary speaker
                         adaptive_alpha = 0.0
                     else:
                         # Sigmoid S-curve acceleration/deceleration for fluid studio camera pan
-                        import math
-                        sigmoid_factor = 1.0 / (1.0 + math.exp(-0.025 * (dist_x - 150.0)))
-                        adaptive_alpha = 0.05 + 0.20 * sigmoid_factor
+                        sigmoid_factor = 1.0 / (1.0 + _math.exp(-0.025 * (dist_x - 150.0)))
+                        # Velocity-dependent acceleration: faster when target is moving fast
+                        velocity = abs(current_target_cx - (prev_target_cx or current_target_cx)) if prev_target_cx is not None else 0.0
+                        velocity_boost = min(0.12, velocity / 500.0)
+                        adaptive_alpha = 0.05 + (0.35 + velocity_boost) * sigmoid_factor
 
                     if adaptive_alpha > 0.0:
                         current_cx += (current_target_cx - current_cx) * adaptive_alpha
@@ -1923,30 +2023,16 @@ class AIReframe:
                         ) * (
                             adaptive_alpha * 0.5
                         )  # Dampen vertical movement by 50% for gimbal-like stability
-                        # Strong EMA smoothing on scale shifts (alpha 0.15) to eliminate micro-jitter and rapid zoom snaps
-                        current_s_reframe += (current_target_s_reframe - current_s_reframe) * 0.15
 
-                    # 15% Padding Margin: Wider crop (0.106 face_size_pct vs 0.125) to keep hands, mic & gestures unclipped
+                    # Fixed stable face framing — use scene-level median face scale (CONSTANT)
                     face_size_pct = 0.106
+                    locked_s = (scene_median_s * scale) if scene_median_s is not None else max(current_s_reframe or 1.0, 1.0)
 
-                    person_scale = (1920.0 * face_size_pct) / max(current_s_reframe, 1.0)
+                    person_scale = (1920.0 * face_size_pct) / max(locked_s, 1.0)
                     min_s = max(1080.0 / virtual_w, 1920.0 / virtual_h)
-
-                    # Dynamic edge zoom adjust: widen crop slightly when speaker sits near extreme edges (x < 25% or > 75%)
-                    # to keep the speaker centered in the 9:16 frame without touching frame bounds
-                    dist_edge_x = min(current_cx, virtual_w - current_cx) / virtual_w
-                    if dist_edge_x < 0.25:
-                        min_s *= 0.88  # Widen crop by 12% so edge guests fit cleanly
 
                     person_scale = max(person_scale, min_s)
                     person_scale = min(person_scale, 4.0)
-
-                    # Frame Zero Margin Correction & Smooth Cosine Transition:
-                    # Expand horizontal crop by an extra 15% on opening frames (fidx < 15) with smooth easing away from frame 0
-                    if fidx < 15:
-                        import math
-                        ease_factor = 0.5 * (1.0 + math.cos(math.pi * (fidx / 15.0)))  # Smooth 1.0 -> 0.0 cosine easing curve
-                        person_scale *= (1.0 - 0.15 * ease_factor)
 
                     crop_w = 1080.0 / person_scale
                     crop_h = 1920.0 / person_scale
@@ -1980,12 +2066,12 @@ class AIReframe:
                     ]
                     if crop.shape[0] > 0 and crop.shape[1] > 0:
                         res = cv2.resize(crop, (1080, 1920), interpolation=cv2.INTER_AREA)
-                        vout.write(res)
+                        _write_frame(res)
                     else:
                         # Emergency fallback
                         res = cv2.resize(img, None, fx=scale, fy=scale)
                         tx = max(min(res.shape[1] // 2 - 540, res.shape[1] - 1080), 0)
-                        vout.write(res[0:1920, tx : tx + 1080])
+                        _write_frame(res[0:1920, tx : tx + 1080])
 
                     prev_target_cx = float(target_cx)
                 else:
@@ -1995,7 +2081,13 @@ class AIReframe:
                     # Just render center of the original video
                     res = cv2.resize(img, None, fx=scale, fy=scale)
                     tx = max(min(res.shape[1] // 2 - 540, res.shape[1] - 1080), 0)
-                    vout.write(res[0:1920, tx : tx + 1080])
+                    _write_frame(res[0:1920, tx : tx + 1080])
+
+                # Telemetry: record camera displacement
+                if current_cx is not None:
+                    if prev_cx_metric is not None:
+                        camera_displacements.append(abs(current_cx - prev_cx_metric))
+                    prev_cx_metric = current_cx
 
         finally:
             if video_reader is not None:
@@ -2006,7 +2098,15 @@ class AIReframe:
 
         vout.release()
         shutil.move(temp_v, output_path)
-        return frame_layout
+
+        quality_metrics = {
+            "face_detection_coverage": round(float(frames_with_faces_count) / max(1, max_frames), 3),
+            "asd_confidence": round(float(np.mean(asd_scores_list)) if asd_scores_list else 0.0, 3),
+            "layout_switches": layout_switches_count,
+            "speaker_switches": speaker_switches_count,
+            "camera_stability_score": round(max(0.0, 1.0 - min(1.0, float(np.mean(camera_displacements)) / 50.0)), 3) if camera_displacements else 1.0,
+        }
+        return frame_layout, quality_metrics
 
     # ─────────────────────────────────────────────────────────────────
     #  Public endpoint
@@ -2112,12 +2212,12 @@ class AIReframe:
                 [
                     "ffmpeg",
                     "-y",
+                    "-i",
+                    vurl,
                     "-ss",
                     str(effective_start),
                     "-t",
                     str(duration_secs),
-                    "-i",
-                    vurl,
                     "-vn",
                     "-c:a",
                     "aac",
@@ -2167,7 +2267,7 @@ class AIReframe:
 
                 t1 = time.time()
                 logger.info("Rendering vertical video at %s fps...", fps)
-                frame_layout = self.render_vertical(
+                frame_layout, quality_metrics = self.render_vertical(
                     tracks,
                     scores,
                     pyf,
@@ -2179,6 +2279,7 @@ class AIReframe:
                     scene_bounds=scene_bounds,
                     video_path=vurl,
                     start_time_in_video=effective_start,
+                    audio_wav_path=audio,
                 )
 
                 if not os.path.exists(local_orig) or os.path.getsize(local_orig) == 0:
@@ -2195,7 +2296,7 @@ class AIReframe:
                 reported_crop_mode = "letterbox"
                 pya = os.path.join(tmpdir, "pyavi")
                 os.makedirs(pya, exist_ok=True)
-                frame_layout = self.render_vertical(
+                frame_layout, quality_metrics = self.render_vertical(
                     [],
                     [],
                     None,
@@ -2225,56 +2326,13 @@ class AIReframe:
             #    request's quality parameter.  The preview quality reduction
             #    (540p, higher CRF) is handled by the caption burner, not here.
             synced_output = local_orig.replace(".mp4", "_synced.mp4")
-
-            # Use NVENC hardware encoder if available (5-10x faster than CPU libx264)
-            video_codec = (
-                ["h264_nvenc", "-preset", "p4", "-cq", "22"]
-                if self.use_nvenc
-                else [
-                    "libx264",
-                    "-preset",
-                    "ultrafast",
-                    "-crf",
-                    "22",
-                ]
+            mux_audio_video(
+                video_path=local_orig,
+                audio_path=segment_audio,
+                output_path=synced_output,
+                fps=fps,
+                use_nvenc=self.use_nvenc,
             )
-
-            mux_cmd = [
-                "ffmpeg",
-                "-y",
-                "-i",
-                local_orig,
-                "-i",
-                segment_audio,
-                "-map",
-                "0:v:0",
-                "-map",
-                "1:a:0",
-                "-r",
-                str(fps),
-                "-c:v",
-                *video_codec,
-                "-pix_fmt",
-                "yuv420p",
-                "-profile:v",
-                "high",
-                "-c:a",
-                "aac",
-                "-b:a",
-                "128k",
-                "-af",
-                "aresample=async=1000:min_hard_comp=0.100000:first_pts=0",
-                "-movflags",
-                "+faststart",
-                synced_output,
-                "-loglevel",
-                "panic",
-            ]
-            mux_result = subprocess.run(
-                mux_cmd, capture_output=True, text=True, timeout=_FFMPEG_LONG_TIMEOUT_S
-            )
-            if mux_result.returncode != 0:
-                raise RenderError(f"Audio mux failed: {mux_result.stderr[-500:]}")
             os.replace(synced_output, local_orig)
 
             orig_size = os.path.getsize(local_orig)
@@ -2361,6 +2419,7 @@ class AIReframe:
                 "crop_mode": reported_crop_mode,
                 "source_width": actual_w,
                 "source_height": actual_h,
+                "quality_metrics": quality_metrics,
                 "transcript": req.transcript,
             }
 
@@ -2816,12 +2875,31 @@ class AIReframe:
                             timeout=_FFMPEG_LONG_TIMEOUT_S,
                         )
 
+                        # Extract WAV for zoom punch audio analysis (lightweight 16kHz mono)
+                        clip_wav_for_punch = os.path.join(
+                            cluster_workdir, f"punch_audio_{clip_id}.wav"
+                        )
+                        try:
+                            subprocess.run(
+                                [
+                                    "ffmpeg", "-y",
+                                    "-i", clip_pretrim,
+                                    "-vn", "-ac", "1", "-ar", "16000",
+                                    "-acodec", "pcm_s16le",
+                                    clip_wav_for_punch,
+                                    "-loglevel", "panic",
+                                ],
+                                check=True, timeout=_FFMPEG_SHORT_TIMEOUT_S,
+                            )
+                        except Exception:
+                            clip_wav_for_punch = None
+
                         # Render this clip
                         orig_name = f"orig_{uuid.uuid4()}.mp4"
                         local_orig = os.path.join(tmpdir, orig_name)
 
                         t1 = time.time()
-                        frame_layout = self.render_vertical(
+                        frame_layout, quality_metrics = self.render_vertical(
                             clip_tracks,
                             clip_scores,
                             None,
@@ -2833,6 +2911,7 @@ class AIReframe:
                             scene_bounds=clip_scene_bounds,
                             video_path=clip_pretrim,
                             start_time_in_video=0.0,
+                            audio_wav_path=clip_wav_for_punch,
                         )
 
                         if not os.path.exists(local_orig) or os.path.getsize(local_orig) == 0:
@@ -2867,45 +2946,12 @@ class AIReframe:
                         )
 
                         synced = local_orig.replace(".mp4", "_synced.mp4")
-                        video_codec = (
-                            ["h264_nvenc", "-preset", "p4", "-cq", "22"]
-                            if self.use_nvenc
-                            else ["libx264", "-preset", "ultrafast", "-crf", "22"]
-                        )
-                        subprocess.run(
-                            [
-                                "ffmpeg",
-                                "-y",
-                                "-i",
-                                local_orig,
-                                "-i",
-                                clip_audio,
-                                "-map",
-                                "0:v:0",
-                                "-map",
-                                "1:a:0",
-                                "-r",
-                                str(fps),
-                                "-c:v",
-                                *video_codec,
-                                "-pix_fmt",
-                                "yuv420p",
-                                "-profile:v",
-                                "high",
-                                "-c:a",
-                                "aac",
-                                "-b:a",
-                                "128k",
-                                "-af",
-                                "aresample=async=1000:min_hard_comp=0.100000:first_pts=0",
-                                "-movflags",
-                                "+faststart",
-                                synced,
-                                "-loglevel",
-                                "panic",
-                            ],
-                            check=True,
-                            timeout=_FFMPEG_LONG_TIMEOUT_S,
+                        mux_audio_video(
+                            video_path=local_orig,
+                            audio_path=clip_audio,
+                            output_path=synced,
+                            fps=fps,
+                            use_nvenc=self.use_nvenc,
                         )
                         os.replace(synced, local_orig)
 
@@ -2922,6 +2968,7 @@ class AIReframe:
                                 "reported_crop_mode": reported_crop_mode,
                                 "actual_w": actual_w,
                                 "actual_h": actual_h,
+                                "quality_metrics": quality_metrics,
                             }
                         )
                     except Exception as e:
@@ -2969,7 +3016,7 @@ class AIReframe:
 
                             t1 = time.time()
                             reported_crop_mode = "letterbox"
-                            frame_layout = self.render_vertical(
+                            frame_layout, quality_metrics = self.render_vertical(
                                 [],
                                 [],
                                 None,
@@ -3015,45 +3062,12 @@ class AIReframe:
                                 )
 
                             synced = local_orig.replace(".mp4", "_synced.mp4")
-                            video_codec = (
-                                ["h264_nvenc", "-preset", "p4", "-cq", "22"]
-                                if self.use_nvenc
-                                else ["libx264", "-preset", "ultrafast", "-crf", "22"]
-                            )
-                            subprocess.run(
-                                [
-                                    "ffmpeg",
-                                    "-y",
-                                    "-i",
-                                    local_orig,
-                                    "-i",
-                                    clip_audio,
-                                    "-map",
-                                    "0:v:0",
-                                    "-map",
-                                    "1:a:0",
-                                    "-r",
-                                    str(fps),
-                                    "-c:v",
-                                    *video_codec,
-                                    "-pix_fmt",
-                                    "yuv420p",
-                                    "-profile:v",
-                                    "high",
-                                    "-c:a",
-                                    "aac",
-                                    "-b:a",
-                                    "128k",
-                                    "-af",
-                                    "aresample=async=1000:min_hard_comp=0.100000:first_pts=0",
-                                    "-movflags",
-                                    "+faststart",
-                                    synced,
-                                    "-loglevel",
-                                    "panic",
-                                ],
-                                check=True,
-                                timeout=_FFMPEG_LONG_TIMEOUT_S,
+                            mux_audio_video(
+                                video_path=local_orig,
+                                audio_path=clip_audio,
+                                output_path=synced,
+                                fps=fps,
+                                use_nvenc=self.use_nvenc,
                             )
                             os.replace(synced, local_orig)
 
@@ -3070,6 +3084,7 @@ class AIReframe:
                                     "reported_crop_mode": "letterbox",
                                     "actual_w": actual_w,
                                     "actual_h": actual_h,
+                                    "quality_metrics": quality_metrics,
                                 }
                             )
                         except Exception as fallback_err:
@@ -3207,6 +3222,7 @@ class AIReframe:
                             "crop_mode": reported_crop_mode,
                             "source_width": actual_w,
                             "source_height": actual_h,
+                            "quality_metrics": task.get("quality_metrics"),
                             "transcript": clip_req.transcript,
                         }
                     else:

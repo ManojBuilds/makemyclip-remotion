@@ -27,6 +27,16 @@ from r2_storage import upload_to_r2
 from utils import StageTimer, is_youtube_url, validate_url
 from ytdlp_helper import download_youtube_video
 
+try:
+    import cv2
+except ImportError:
+    cv2 = None
+
+try:
+    import torch
+except ImportError:
+    torch = None
+
 logger = logging.getLogger("makemyclip.analyzer")
 
 TARGET_ANALYZER_GPUS = 8       # Cap single video analysis to 8 GPUs max (leaves 2 free out of 10 GPU quota)
@@ -111,27 +121,42 @@ def stitch_chunk_tracks(chunk_results: list[dict], fps: float) -> tuple[list[dic
         for tr in local_tracks:
             # Shift frames to global timeline
             global_frames = [f + chunk_start_frame for f in tr["frames"]]
+            x0 = tr["proc_track"]["x"][0]
+            y0 = tr["proc_track"]["y"][0]
 
-            # Check if this track connects with any active track from previous chunk
-            connected = False
+            best_match_idx = -1
+            best_dist = float("inf")
+
             if global_tracks and chunk_idx > 0:
-                last_tr = global_tracks[-1]
-                # If frame gap is under 1 second and bboxes overlap closely
-                if (global_frames[0] - last_tr["track"]["frame"][-1]) <= int(fps):
-                    # Check spatial distance between center points
-                    dx = abs(tr["proc_track"]["x"][0] - last_tr["proc_track"]["x"][-1])
-                    dy = abs(tr["proc_track"]["y"][0] - last_tr["proc_track"]["y"][-1])
-                    if dx < 100 and dy < 100:
-                        # Append to existing track
-                        last_tr["track"]["frame"].extend(global_frames)
-                        last_tr["track"]["bbox"].extend(tr["bboxes"])
-                        last_tr["proc_track"]["x"].extend(tr["proc_track"]["x"])
-                        last_tr["proc_track"]["y"].extend(tr["proc_track"]["y"])
-                        last_tr["proc_track"]["s"].extend(tr["proc_track"]["s"])
-                        global_scores[-1].extend(tr["scores"])
-                        connected = True
+                # Search candidate tracks ending within 1 second of current track start
+                for g_idx, g_tr in enumerate(global_tracks):
+                    last_frame = g_tr["track"]["frame"][-1]
+                    frame_gap = global_frames[0] - last_frame
 
-            if not connected:
+                    if 0 <= frame_gap <= int(fps):
+                        last_x = g_tr["proc_track"]["x"][-1]
+                        last_y = g_tr["proc_track"]["y"][-1]
+                        dx = abs(x0 - last_x)
+                        dy = abs(y0 - last_y)
+
+                        # Threshold on normalized 0.0-1.0 coordinate space (12% width, 15% height)
+                        if dx < 0.12 and dy < 0.15:
+                            dist = math.hypot(dx, dy)
+                            if dist < best_dist:
+                                best_dist = dist
+                                best_match_idx = g_idx
+
+            if best_match_idx != -1:
+                # Append to best matching existing track
+                target_tr = global_tracks[best_match_idx]
+                target_tr["track"]["frame"].extend(global_frames)
+                target_tr["track"]["bbox"].extend(tr["bboxes"])
+                target_tr["proc_track"]["x"].extend(tr["proc_track"]["x"])
+                target_tr["proc_track"]["y"].extend(tr["proc_track"]["y"])
+                target_tr["proc_track"]["s"].extend(tr["proc_track"]["s"])
+                global_scores[best_match_idx].extend(tr["scores"])
+            else:
+                # Register as a new global track
                 global_tracks.append({
                     "track_id": next_global_id,
                     "track": {
@@ -146,6 +171,26 @@ def stitch_chunk_tracks(chunk_results: list[dict], fps: float) -> tuple[list[dic
                 })
                 global_scores.append(tr["scores"])
                 next_global_id += 1
+
+    # --- OpusClip Feature: Persistent Speaker Clustering ---
+    # Assign persistent speaker_id (e.g. Speaker 0 = Host, Speaker 1 = Guest) based on mean X position
+    columns = []
+    for g_tr in global_tracks:
+        mean_x = float(np.mean(g_tr["proc_track"]["x"]))
+        placed = False
+        for col in columns:
+            if abs(col["mean_x"] - mean_x) < 0.15:
+                col["tracks"].append(g_tr)
+                col["mean_x"] = float(np.mean([np.mean(t["proc_track"]["x"]) for t in col["tracks"]]))
+                placed = True
+                break
+        if not placed:
+            columns.append({"mean_x": mean_x, "tracks": [g_tr]})
+
+    columns.sort(key=lambda c: c["mean_x"])
+    for speaker_id, col in enumerate(columns):
+        for g_tr in col["tracks"]:
+            g_tr["speaker_id"] = speaker_id
 
     return global_tracks, global_scores
 
@@ -167,18 +212,24 @@ class VideoAnalyzer:
             sys.path.append("/root/asd")
 
         from ASD import ASD
+        from talknce import create_talknce_engine
         from model.faceDetector.s3fd import S3FD
 
-        logger.info("Initializing S3FD Face Detector and TalkNet ASD models...")
+        logger.info("Initializing S3FD Face Detector, TalkNet & TalkNCE ASD models...")
         self.DET = S3FD(device="cuda")
         self.ASD_MODEL = ASD()
         self.ASD_MODEL.loadParameters("/root/asd/weight/finetuning_TalkSet.model")
         self.ASD_MODEL.eval()
         self.ASD_MODEL.cuda()
 
+        self.TALKNCE_MODEL = create_talknce_engine(
+            weight_path="/root/asd/weight/finetuning_TalkSet.model",
+            device="cuda" if torch.cuda.is_available() else "cpu",
+        )
+
         from reframer import AIReframe
         self.use_nvenc = AIReframe._probe_nvenc()
-        logger.info("Analyzer models loaded successfully (NVENC=%s).", self.use_nvenc)
+        logger.info("Analyzer models loaded successfully (NVENC=%s, TalkNCE=Active).", self.use_nvenc)
 
     @modal.method()
     def analyze_chunk(
@@ -246,6 +297,7 @@ class VideoAnalyzer:
             # Inject detector and ASD models to reuse warm container state
             reframer.DET = self.DET
             reframer.ASD_MODEL = self.ASD_MODEL
+            reframer.TALKNCE_MODEL = getattr(self, "TALKNCE_MODEL", None)
             reframer.use_nvenc = getattr(self, "use_nvenc", False)
 
             # Probe chunk video dimensions for normalized coordinate calculation
@@ -302,19 +354,18 @@ class VideoAnalyzer:
     def analyze(self, req: AnalyzeVideoRequest):
         """Public endpoint: Runs full video analysis across 10-min parallel chunks."""
         vurl = validate_url(req.video_url, label="video_url")
-        logger.info("=== FULL VIDEO ANALYSIS REQUEST ===")
-        logger.info("project_id: %s, duration: %.1fs", req.project_id, req.duration)
+        logger.info("=== VIDEO ANALYSIS REQUEST ===")
+        logger.info("project_id: %s, start_time: %s, end_time: %s, duration: %s", req.project_id, req.start_time, req.end_time, req.duration)
 
         with tempfile.TemporaryDirectory() as tmpdir:
             fps = 25.0
-            duration_secs = req.duration
 
             if is_youtube_url(vurl):
                 # Optimize: Do NOT download full video on coordinator container.
                 # Use yt-dlp metadata extraction to get duration/fps lightweightly.
                 from ytdlp_helper import get_youtube_info
                 info_dict = get_youtube_info(vurl)
-                duration_secs = info_dict.get("duration") or req.duration
+                full_duration = info_dict.get("duration") or (req.duration or 300.0)
                 fps = info_dict.get("fps") or 25.0
                 width = info_dict.get("width") or 1280
                 height = info_dict.get("height") or 720
@@ -325,7 +376,18 @@ class VideoAnalyzer:
                 fps = info.get("fps", 25.0)
                 width = info.get("width", 1920)
                 height = info.get("height", 1080)
-                duration_secs = info.get("duration") or req.duration
+                full_duration = info.get("duration") or (req.duration or 300.0)
+
+            # Check if start_time / end_time range is specified
+            start_sec = req.start_time if req.start_time is not None else 0.0
+            if req.end_time is not None:
+                end_sec = min(req.end_time, full_duration)
+            elif req.duration is not None:
+                end_sec = min(start_sec + req.duration, full_duration)
+            else:
+                end_sec = full_duration
+
+            duration_secs = max(1.0, end_sec - start_sec)
 
             # Dynamically calculate chunk parameters targeting up to 8 GPUs
             if req.chunk_duration and req.chunk_duration != 600.0:
@@ -335,14 +397,14 @@ class VideoAnalyzer:
                 chunk_duration, num_chunks = calculate_optimal_chunk_duration(duration_secs)
 
             logger.info(
-                "Dynamic chunking selected: chunk_duration=%.1fs, num_chunks=%d across %.1fs video",
-                chunk_duration, num_chunks, duration_secs
+                "Segment selected: start=%.1fs, end=%.1fs (duration=%.1fs), chunk_duration=%.1fs, num_chunks=%d",
+                start_sec, end_sec, duration_secs, chunk_duration, num_chunks
             )
 
             chunk_tasks = []
             for idx in range(num_chunks):
-                c_start = idx * chunk_duration
-                c_dur = min(chunk_duration, duration_secs - c_start)
+                c_start = start_sec + idx * chunk_duration
+                c_dur = min(chunk_duration, end_sec - c_start)
                 chunk_tasks.append((req.video_url, c_start, c_dur, idx, num_chunks, fps, req.detect_skip))
 
             logger.info("Launching %d parallel chunk jobs via starmap (up to 8 GPUs)...", num_chunks)
@@ -357,12 +419,22 @@ class VideoAnalyzer:
             # Stitch tracks across chunk boundaries
             global_tracks, global_scores = stitch_chunk_tracks(chunk_results, fps)
 
-            # Extract global scene boundaries
+            # Extract global scene boundaries and pre-classify layout per scene
+            from layout_classifier import classify_layout
             global_scene_bounds = []
+            scene_layouts = []
             for c_res in chunk_results:
                 offset_frame = int(c_res["start_time"] * fps)
                 for sf, ef in c_res["scene_bounds"]:
-                    global_scene_bounds.append((sf + offset_frame, ef + offset_frame))
+                    global_sf = sf + offset_frame
+                    global_ef = ef + offset_frame
+                    global_scene_bounds.append((global_sf, global_ef))
+                    scene_layout = classify_layout(global_tracks, global_scores, int(width), int(height))
+                    scene_layouts.append({
+                        "start_frame": global_sf,
+                        "end_frame": global_ef,
+                        "recommended_layout": scene_layout,
+                    })
 
             # Build comprehensive analysis object
             analysis_data = {
@@ -380,8 +452,10 @@ class VideoAnalyzer:
                     "target_fps": 5.0,
                     "num_tracks": len(global_tracks),
                     "tracking_time_s": round(elapsed_tracking, 2),
+                    "asd_engine": "TalkNCE",
                 },
                 "scene_bounds": global_scene_bounds,
+                "scene_layouts": scene_layouts,
                 "tracks": serialize_tracks_and_scores(global_tracks, global_scores, fps),
             }
 

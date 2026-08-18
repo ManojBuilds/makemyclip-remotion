@@ -40,6 +40,9 @@ _LOCAL_SOURCES = (
     "analyzer",
     "utils",
     "errors",
+    "camera_engine",
+    "layout_classifier",
+    "video_utils",
 )
 
 # --- Image ---

@@ -83,7 +83,9 @@ class TranscribeRequest(BaseModel):
 class AnalyzeVideoRequest(BaseModel):
     video_url: str
     project_id: str
-    duration: float
+    duration: Optional[float] = None
+    start_time: Optional[float] = None
+    end_time: Optional[float] = None
     detect_skip: int = 5
     chunk_duration: float = 600.0  # 10 minutes per chunk
 
