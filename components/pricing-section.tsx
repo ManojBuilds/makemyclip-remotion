@@ -193,7 +193,7 @@ export function PricingSection({
                 <div className="cursor-pointer flex items-center justify-center gap-2 rounded-full border border-slate-200/80 bg-slate-50 px-5 py-2.5 text-center text-[13px] font-medium text-slate-600 shadow-sm transition-all hover:bg-slate-100 hover:border-slate-300">
                   <Info className="h-4 w-4 text-[#0075de] flex-shrink-0" />
                   <span>
-                    <strong className="text-slate-900 font-semibold">1 credit = 1 minute</strong> of long-form source video. <span className="underline underline-offset-2 decoration-slate-300">Click to learn how credits work.</span>
+                    <strong className="text-slate-900 font-semibold">1 credit = 1 minute</strong> of long-form source video.
                   </span>
                 </div>
               </TooltipTrigger>
@@ -398,9 +398,8 @@ export function PricingSection({
               return (
                 <div
                   key={pack.name}
-                  className={`relative flex items-center justify-between rounded-2xl border p-5 bg-white transition-all ${
-                    pack.bestValue ? "border-[#0075de] shadow-md ring-1 ring-[#0075de]/20" : "border-slate-200 shadow-sm"
-                  }`}
+                  className={`relative flex items-center justify-between rounded-2xl border p-5 bg-white transition-all ${pack.bestValue ? "border-[#0075de] shadow-md ring-1 ring-[#0075de]/20" : "border-slate-200 shadow-sm"
+                    }`}
                 >
                   {pack.bestValue && (
                     <div className="absolute -top-2.5 right-4 flex items-center gap-1 rounded-full bg-[#0075de] px-2.5 py-0.5 text-[10px] font-bold text-white shadow-sm">
@@ -424,11 +423,10 @@ export function PricingSection({
                   <Button
                     size="sm"
                     variant={pack.bestValue ? "default" : "outline"}
-                    className={`rounded-full px-5 font-bold text-xs ${
-                      pack.bestValue
+                    className={`rounded-full px-5 font-bold text-xs ${pack.bestValue
                         ? "bg-[#0075de] hover:bg-[#0060b8] text-white shadow-sm"
                         : "border-slate-300 text-slate-700 hover:bg-slate-50"
-                    }`}
+                      }`}
                     onClick={() => handleSubscribe(pack.id, pack.name)}
                     disabled={!!loading}
                   >

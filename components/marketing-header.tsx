@@ -6,7 +6,7 @@ import { motion, AnimatePresence } from "framer-motion"
 import { Menu, X } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Logo } from "@/components/logo"
-import { useAuth } from "@clerk/nextjs"
+import { useAuth, SignInButton, SignUpButton } from "@clerk/nextjs"
 
 export function MarketingHeader() {
   const [scrolled, setScrolled] = useState(false)
@@ -56,13 +56,18 @@ export function MarketingHeader() {
                 </Button>
               </Link>
             ) : (
-              <>
-                <Link href="/projects">
+              <div className="flex items-center gap-3">
+                <SignInButton mode="modal" forceRedirectUrl="/projects">
+                  <Button variant="ghost" className="text-sm font-medium text-slate-600 hover:text-slate-900">
+                    Log in
+                  </Button>
+                </SignInButton>
+                <SignUpButton mode="modal" forceRedirectUrl="/projects">
                   <Button className="rounded-md border-0 bg-primary px-5 font-semibold text-white shadow-sm hover:bg-primary/95">
                     Get Started
                   </Button>
-                </Link>
-              </>
+                </SignUpButton>
+              </div>
             )}
           </div>
 
@@ -116,19 +121,23 @@ export function MarketingHeader() {
                 </Link>
               ) : (
                 <>
-                  <Link href="/login" onClick={() => setMobileMenuOpen(false)}>
+                  <SignInButton mode="modal" forceRedirectUrl="/projects">
                     <Button
                       variant="outline"
                       className="w-full rounded-md border-slate-200 py-6 text-lg text-slate-700"
+                      onClick={() => setMobileMenuOpen(false)}
                     >
                       Log in
                     </Button>
-                  </Link>
-                  <Link href="/login" onClick={() => setMobileMenuOpen(false)}>
-                    <Button className="w-full rounded-md border-0 bg-primary py-6 text-lg text-white shadow-sm hover:bg-primary/95">
+                  </SignInButton>
+                  <SignUpButton mode="modal" forceRedirectUrl="/projects">
+                    <Button
+                      className="w-full rounded-md border-0 bg-primary py-6 text-lg text-white shadow-sm hover:bg-primary/95"
+                      onClick={() => setMobileMenuOpen(false)}
+                    >
                       Get Started
                     </Button>
-                  </Link>
+                  </SignUpButton>
                 </>
               )}
             </div>
