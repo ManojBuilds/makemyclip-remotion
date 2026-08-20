@@ -266,10 +266,12 @@ class VideoAnalyzer:
                     skip_probe=True,
                 )
             else:
-                # Direct video URL: Download & downscale 360p chunk segment locally to tmpdir via fast FFmpeg HTTP seek
+                # Direct video URL: Download & downscale 360p chunk segment + extract audio
+                # in a single FFmpeg pass (saves one full HTTP seek + decode pass)
                 local_proxy = os.path.join(tmpdir, f"chunk_{chunk_idx}_360p.mp4")
+                chunk_audio = os.path.join(tmpdir, "chunk_audio.aac")
                 logger.info(
-                    "Fetching 360p proxy segment for direct URL (%.1fs - %.1fs)...",
+                    "Fetching 360p proxy + audio for direct URL (%.1fs - %.1fs) in single pass...",
                     start_time,
                     start_time + duration,
                 )
@@ -278,18 +280,20 @@ class VideoAnalyzer:
                     "-ss", str(start_time),
                     "-i", video_url,
                     "-t", str(duration),
-                    "-vf", "scale=-2:360",
+                    "-map", "0:v:0", "-vf", "scale=-2:360",
                     "-c:v", "libx264", "-preset", "ultrafast",
-                    "-c:a", "aac", "-b:a", "128k",
                     local_proxy,
+                    "-map", "0:a:0?",
+                    "-c:a", "aac", "-b:a", "128k",
+                    chunk_audio,
                 ]
                 res = subprocess.run(dl_cmd, capture_output=True, text=True, timeout=300)
                 if res.returncode == 0 and os.path.exists(local_proxy) and os.path.getsize(local_proxy) > 0:
                     v_input = local_proxy
                     segment_offset = start_time
-                    logger.info("✅ Direct URL 360p proxy downloaded to %s", local_proxy)
+                    logger.info("✅ Direct URL 360p proxy + audio downloaded")
                 else:
-                    logger.warning("Direct URL 360p proxy download failed, falling back to streaming direct URL: %s", res.stderr)
+                    logger.warning("Direct URL combined download failed, falling back to streaming: %s", res.stderr)
                     v_input = video_url
                     segment_offset = 0.0
 
@@ -307,27 +311,31 @@ class VideoAnalyzer:
 
             eff_start = start_time - segment_offset
 
-            # Extract chunk audio (place -ss BEFORE -i for fast HTTP seek)
-            chunk_audio = os.path.join(tmpdir, "chunk_audio.aac")
-            ffmpeg_cmd = [
-                "ffmpeg", "-y",
-                "-ss", str(eff_start),
-                "-i", v_input,
-                "-t", str(duration),
-                "-vn", "-c:a", "aac", "-b:a", "192k",
-                chunk_audio,
-            ]
-            res = subprocess.run(ffmpeg_cmd, capture_output=True, text=True, timeout=300)
-            if res.returncode != 0:
-                logger.warning("FFmpeg chunk audio extraction failed (video may be muted). Generating silent dummy audio: %s", res.stderr)
-                silent_cmd = [
+            # Extract chunk audio (unless already extracted in combined download above)
+            if not is_youtube_url(video_url) and os.path.exists(os.path.join(tmpdir, "chunk_audio.aac")) and os.path.getsize(os.path.join(tmpdir, "chunk_audio.aac")) > 0:
+                chunk_audio = os.path.join(tmpdir, "chunk_audio.aac")
+                logger.info("Using audio from combined download pass")
+            else:
+                chunk_audio = os.path.join(tmpdir, "chunk_audio.aac")
+                ffmpeg_cmd = [
                     "ffmpeg", "-y",
-                    "-f", "lavfi", "-i", "anullsrc=r=16000:cl=mono",
+                    "-ss", str(eff_start),
+                    "-i", v_input,
                     "-t", str(duration),
-                    "-c:a", "aac", "-b:a", "128k",
+                    "-vn", "-c:a", "aac", "-b:a", "192k",
                     chunk_audio,
                 ]
-                subprocess.run(silent_cmd, capture_output=True, text=True, timeout=60)
+                res = subprocess.run(ffmpeg_cmd, capture_output=True, text=True, timeout=300)
+                if res.returncode != 0:
+                    logger.warning("FFmpeg chunk audio extraction failed (video may be muted). Generating silent dummy audio: %s", res.stderr)
+                    silent_cmd = [
+                        "ffmpeg", "-y",
+                        "-f", "lavfi", "-i", "anullsrc=r=16000:cl=mono",
+                        "-t", str(duration),
+                        "-c:a", "aac", "-b:a", "128k",
+                        chunk_audio,
+                    ]
+                    subprocess.run(silent_cmd, capture_output=True, text=True, timeout=60)
 
             # Perform face tracking + TalkNet ASD on chunk
             tracks, scores, _, _, _, scene_bounds = reframer.get_tracks_and_scores(
@@ -419,17 +427,45 @@ class VideoAnalyzer:
             # Stitch tracks across chunk boundaries
             global_tracks, global_scores = stitch_chunk_tracks(chunk_results, fps)
 
-            # Extract global scene boundaries and pre-classify layout per scene
+            # Extract global scene boundaries and classify layout per-scene (OpusClip style)
             from layout_classifier import classify_layout
             global_scene_bounds = []
             scene_layouts = []
+
+            # Pre-convert track data to numpy once (avoids N_scenes × N_tracks redundant conversions)
+            _track_frames = [np.array(g_tr["track"]["frame"]) for g_tr in global_tracks]
+            _track_proc_x = [np.array(g_tr["proc_track"]["x"]) for g_tr in global_tracks]
+            _track_proc_y = [np.array(g_tr["proc_track"]["y"]) for g_tr in global_tracks]
+            _track_proc_s = [np.array(g_tr["proc_track"]["s"]) for g_tr in global_tracks]
+            _track_scores = [np.array(g_sc) for g_sc in global_scores]
+
             for c_res in chunk_results:
                 offset_frame = int(c_res["start_time"] * fps)
                 for sf, ef in c_res["scene_bounds"]:
                     global_sf = sf + offset_frame
                     global_ef = ef + offset_frame
                     global_scene_bounds.append((global_sf, global_ef))
-                    scene_layout = classify_layout(global_tracks, global_scores, int(width), int(height))
+
+                    # Filter tracks & scores to only faces present in THIS scene's frame range
+                    scene_tracks = []
+                    scene_scores = []
+                    for frames, px, py, ps, sc in zip(
+                        _track_frames, _track_proc_x, _track_proc_y, _track_proc_s, _track_scores
+                    ):
+                        mask = (frames >= global_sf) & (frames <= global_ef)
+                        if np.any(mask):
+                            scene_tracks.append({
+                                "track": {"frame": frames[mask]},
+                                "proc_track": {
+                                    "x": px[mask],
+                                    "y": py[mask],
+                                    "s": ps[mask],
+                                },
+                            })
+                            scene_scores.append(sc[mask])
+
+                    # OpusClip-style per-scene layout classification
+                    scene_layout = classify_layout(scene_tracks, scene_scores, int(width), int(height))
                     scene_layouts.append({
                         "start_frame": global_sf,
                         "end_frame": global_ef,

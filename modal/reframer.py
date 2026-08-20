@@ -594,38 +594,8 @@ class AIReframe:
             "panic",
             raw_frames_path,
         ]
-        subprocess.run(
-            decode_cmd,
-            check=True,
-            timeout=_FFMPEG_LONG_TIMEOUT_S,
-        )
-        frame_size = pw_scaled * ph_scaled * 3
-        raw_file_size = os.path.getsize(raw_frames_path)
-        total_frames_decoded = raw_file_size // frame_size if frame_size > 0 else 0
-        logger.info(
-            "Decoded %d frames (scaled down to %dx%d) to disk (%.1f MB file, ~200 MB peak RAM)",
-            total_frames_decoded,
-            pw_scaled,
-            ph_scaled,
-            raw_file_size / (1024 * 1024),
-        )
 
-        # Memory-map the raw frames file for zero-copy random access
-        # The OS manages paging — only accessed frames are loaded into RAM
-        if total_frames_decoded > 0:
-            frames_mmap = np.memmap(
-                raw_frames_path,
-                dtype=np.uint8,
-                mode="r",
-                shape=(total_frames_decoded, ph_scaled, pw_scaled, 3),
-            )
-            # Wrap in a lightweight accessor that matches the old list[ndarray] interface
-            frames_mem = frames_mmap
-        else:
-            frames_mem = np.empty((0, ph_scaled, pw_scaled, 3), dtype=np.uint8)
-
-        # Build a 320-wide proxy for scene detection directly from the source video
-        # via ffmpeg (no Python piping needed — saves ~6-10s per cluster)
+        # Build proxy video command for scene detection
         proxy_video = os.path.join(work_dir, "proxy.mp4")
         proxy_cmd = [
             "ffmpeg",
@@ -647,11 +617,8 @@ class AIReframe:
             "-loglevel",
             "panic",
         ]
-        subprocess.run(proxy_cmd, check=True, timeout=120)
 
-        # 2. Extract audio at 16 kHz mono for ASD
-        #    Audio uses a separate input (pre-extracted segment) so it stays
-        #    as its own command.
+        # Build audio extraction command (16 kHz mono WAV for ASD)
         audio_path = os.path.join(pyavi_path, "audio.wav")
         if audio_url:
             audio_cmd = [
@@ -695,16 +662,105 @@ class AIReframe:
                 "-loglevel",
                 "panic",
             ]
-        subprocess.run(
-            audio_cmd,
-            check=True,
-            timeout=_FFMPEG_LONG_TIMEOUT_S,
+
+        # ── OPTIMIZATION: Launch all 3 FFmpeg processes concurrently ──
+        # Frame decode, proxy video, and audio extraction are I/O-bound and
+        # read from independent streams.  Running them in parallel hides the
+        # proxy (~3-6s) and audio (~5-8s) behind the frame decode wall-time.
+        logger.info("Launching 3 FFmpeg processes concurrently (decode + proxy + audio)...")
+        _t0_parallel = time.monotonic()
+        # NOTE: stdout=DEVNULL is safe because all 3 commands write to output
+        # *files* (raw_frames_path, proxy_video, audio_path), not stdout.
+        proc_decode = subprocess.Popen(decode_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        proc_proxy = subprocess.Popen(proxy_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        proc_audio = subprocess.Popen(audio_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+
+        def _kill_all_procs(*procs):
+            """Kill all given Popen processes, ignoring errors."""
+            for p in procs:
+                try:
+                    p.kill()
+                except OSError:
+                    pass
+
+        # Wait for frame decode first (needed for face detection memmap)
+        try:
+            ret_decode = proc_decode.wait(timeout=_FFMPEG_LONG_TIMEOUT_S)
+        except subprocess.TimeoutExpired:
+            _kill_all_procs(proc_decode, proc_proxy, proc_audio)
+            raise
+        if ret_decode != 0:
+            # Kill still-running children before raising
+            _kill_all_procs(proc_proxy, proc_audio)
+            stderr_out = proc_decode.stderr.read().decode(errors="replace") if proc_decode.stderr else ""
+            raise subprocess.CalledProcessError(ret_decode, decode_cmd, stderr=stderr_out)
+
+        frame_size = pw_scaled * ph_scaled * 3
+        raw_file_size = os.path.getsize(raw_frames_path)
+        total_frames_decoded = raw_file_size // frame_size if frame_size > 0 else 0
+        logger.info(
+            "Decoded %d frames (scaled down to %dx%d) to disk (%.1f MB file, ~200 MB peak RAM)",
+            total_frames_decoded,
+            pw_scaled,
+            ph_scaled,
+            raw_file_size / (1024 * 1024),
         )
+
+        # Memory-map the raw frames file for zero-copy random access
+        # The OS manages paging — only accessed frames are loaded into RAM
+        if total_frames_decoded > 0:
+            frames_mmap = np.memmap(
+                raw_frames_path,
+                dtype=np.uint8,
+                mode="r",
+                shape=(total_frames_decoded, ph_scaled, pw_scaled, 3),
+            )
+            frames_mem = frames_mmap
+        else:
+            frames_mem = np.empty((0, ph_scaled, pw_scaled, 3), dtype=np.uint8)
+
+        # Wait for proxy video (needed for scene detection)
+        try:
+            ret_proxy = proc_proxy.wait(timeout=120)
+        except subprocess.TimeoutExpired:
+            _kill_all_procs(proc_proxy, proc_audio)
+            raise
+        if ret_proxy != 0:
+            logger.warning("Proxy video encoding failed (returncode=%d)", ret_proxy)
+
+        # Wait for audio extraction (needed for ASD scoring)
+        try:
+            ret_audio = proc_audio.wait(timeout=_FFMPEG_LONG_TIMEOUT_S)
+        except subprocess.TimeoutExpired:
+            proc_audio.kill()
+            raise
+        if ret_audio != 0:
+            logger.warning("Audio extraction failed (returncode=%d)", ret_audio)
+
+        logger.info(
+            "All 3 FFmpeg processes completed in %.1fs (parallel)",
+            time.monotonic() - _t0_parallel,
+        )
+
         if not os.path.exists(audio_path) or os.path.getsize(audio_path) == 0:
             logger.warning(
                 "Main audio extraction failed or produced empty file: %s",
                 audio_path,
             )
+
+        # Pre-load full audio WAV into memory for in-memory slicing.
+        # This avoids spawning a separate FFmpeg subprocess per face track
+        # in crop_video(), saving ~0.5-1s × N_tracks of subprocess overhead.
+        _full_audio_data = None
+        _full_audio_sr = 16000
+        if os.path.exists(audio_path) and os.path.getsize(audio_path) > 0:
+            try:
+                _full_audio_sr, _full_audio_data = wavfile.read(audio_path)
+            except Exception as e:
+                logger.warning("Could not pre-load audio WAV into memory: %s", e)
+        # Ensure mono — downstream MFCC extraction expects 1D audio
+        if _full_audio_data is not None and _full_audio_data.ndim > 1:
+            _full_audio_data = _full_audio_data[:, 0]
 
         # In letterbox mode we NO LONGER skip face tracking! We use it for intelligent pan-and-scan inside the letterbox card.
 
@@ -749,7 +805,7 @@ class AIReframe:
                     tracks.append({"frame": fi, "bbox": bi})
             return tracks
 
-        def crop_video(track, crop_file, audio_path_local, frames_local, fps_local):
+        def crop_video(track, crop_file, full_audio, full_audio_sr, frames_local, fps_local):
             dets = {
                 "x": signal.medfilt(
                     (track["bbox"][:, 0] + track["bbox"][:, 2]) / 2, 13
@@ -797,35 +853,20 @@ class AIReframe:
 
             vf_arr = np.array(vf)
 
-            # Extract audio slice for TalkNet MFCC
+            # ── OPTIMIZATION: In-memory audio slicing (replaces FFmpeg subprocess) ──
+            # Instead of spawning a separate ffmpeg process per track to extract
+            # an audio slice, we slice the pre-loaded full audio array directly.
+            # This eliminates ~0.5-1s of subprocess overhead per track.
             audS = track["frame"][0] / fps_local
             audE = (track["frame"][-1] + 1) / fps_local
-            subprocess.run(
-                [
-                    "ffmpeg",
-                    "-y",
-                    "-i",
-                    audio_path_local,
-                    "-async",
-                    "1",
-                    "-ac",
-                    "1",
-                    "-vn",
-                    "-acodec",
-                    "pcm_s16le",
-                    "-ar",
-                    "16000",
-                    "-ss",
-                    f"{audS:.3f}",
-                    "-to",
-                    f"{audE:.3f}",
-                    crop_file + ".wav",
-                    "-loglevel",
-                    "panic",
-                ],
-                timeout=_FFMPEG_SHORT_TIMEOUT_S,
-            )
-            return {"track": track, "proc_track": dets, "vf": vf_arr}
+            aud_slice = None
+            if full_audio is not None and len(full_audio) > 0:
+                start_sample = max(0, int(audS * full_audio_sr))
+                end_sample = min(len(full_audio), int(audE * full_audio_sr))
+                if end_sample > start_sample:
+                    aud_slice = full_audio[start_sample:end_sample].copy()
+
+            return {"track": track, "proc_track": dets, "vf": vf_arr, "audio_slice": aud_slice, "audio_sr": full_audio_sr}
 
         # 4. Scene detection on the proxy
         video = open_video(proxy_video)
@@ -965,7 +1006,8 @@ class AIReframe:
             return i, crop_video(
                 t,
                 os.path.join(pycrop_path, "%05d" % i),
-                audio_path,
+                _full_audio_data,
+                _full_audio_sr,
                 frames_mem,
                 fps,
             )
@@ -1005,24 +1047,14 @@ class AIReframe:
             for idx, tr in enumerate(vid_tracks):
                 track_frame_count = len(tr["track"]["frame"])
 
-                wav_file = os.path.join(pycrop_path, "%05d.wav" % idx)
-                if not os.path.exists(wav_file) or os.path.getsize(wav_file) == 0:
+                # ── OPTIMIZATION: Use in-memory audio slice from crop_video ──
+                aud = tr.get("audio_slice")
+                sr = tr.get("audio_sr", 16000)
+                if aud is None or len(aud) == 0:
                     logger.warning(
-                        "Audio file %s missing or empty. Zeroing scores for track %d.",
-                        wav_file,
+                        "Audio slice missing or empty for track %d. Zeroing scores.",
                         idx,
                     )
-                    all_scores.append(np.zeros(track_frame_count))
-                    continue
-
-                sr, aud = wavfile.read(wav_file)
-                # Cleanup temporary audio slice file immediately after reading
-                try:
-                    os.remove(wav_file)
-                except OSError:
-                    pass
-
-                if len(aud) == 0:
                     all_scores.append(np.zeros(track_frame_count))
                     continue
 
