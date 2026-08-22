@@ -73,17 +73,17 @@ This document contains the complete YouTube video script for **Kivio**, includin
 ---
 
 ### **3:00 – Mid-Video Engagement & Pricing Plans**
-- **Visual Cue:** Animated "Like & Subscribe" graphic, then transition to Kivio's Pricing Section showing Free ($0), Creator ($19/mo), and Power ($49/mo).
+- **Visual Cue:** Animated "Like & Subscribe" graphic, then transition to Kivio's Pricing Section showing Free ($0) and Creator ($15/mo).
 - **Voiceover:**
   > "If you're finding this tutorial helpful, please hit that like button and subscribe to the channel! It's completely free and helps support more videos like this. Also, drop a comment below letting me know: what kind of videos are you planning to repurpose into shorts?
   >
   > Now let’s quickly break down Kivio’s pricing options:
   >
-  > The Free Plan is perfect for testing the waters. You can process videos up to 10 minutes long, get 30 processing minutes per month, and test out the AI viral clip detection and auto-captions.
+  > The Free Plan is perfect for testing the waters. You can process source videos up to 30 minutes long, get 46 processing minutes per month, and test out the AI viral clip detection and auto-captions.
   >
-  > The Creator Plan at 19 dollars a month is the sweet spot for regular creators. It unlocks videos up to 1 hour long, gives you 300 processing minutes every month, removes all watermarks, and allows full 1080p HD exports with premium caption templates and permanent video storage.
+  > The Creator Plan at just 15 dollars a month is the sweet spot for active creators and podcasters. It unlocks videos up to 2 hour long, gives you 300 processing minutes every month—which is double what competitors like Opus Clip offer on their starter tier—removes all watermarks, and gives you full 1080p HD exports with permanent video storage.
   >
-  > And the Power Plan at 49 dollars a month is ideal for power creators, agencies, and podcasts. You can upload videos up to 2 hours long, get 600 monthly processing minutes, and enjoy priority rendering queues."
+  > And if you ever need extra minutes without upgrading, you can easily grab on-demand credit packs that never expire."
 
 ---
 
@@ -124,11 +124,11 @@ If you're finding this tutorial helpful, please hit that like button and subscri
 
 Now let’s quickly break down Kivio’s pricing options:
 
-The Free Plan is perfect for testing the waters. You can process videos up to 10 minutes long, get 30 processing minutes per month, and test out the AI viral clip detection and auto-captions.
+The Free Plan is perfect for testing the waters. You can process source videos up to 30 minutes long, get 46 processing minutes per month, and test out the AI viral clip detection and auto-captions.
 
-The Creator Plan at 19 dollars a month is the sweet spot for regular creators. It unlocks videos up to 1 hour long, gives you 300 processing minutes every month, removes all watermarks, and allows full 1080p HD exports with premium caption templates and permanent video storage.
+The Creator Plan at just 15 dollars a month is the sweet spot for active creators and podcasters. It unlocks videos up to 2 hours long, gives you 300 processing minutes every month—which is double what competitors like Opus Clip offer on their starter tier—removes all watermarks, and gives you full 1080p HD exports with permanent video storage.
 
-And the Power Plan at 49 dollars a month is ideal for power creators, agencies, and podcasts. You can upload videos up to 2 hours long, get 600 monthly processing minutes, and enjoy priority rendering queues.
+And if you ever need extra minutes without upgrading, you can easily grab on-demand credit packs that never expire.
 
 And that's a wrap! Kivio genuinely takes the pain out of short-form video creation. Instead of spending hours scrubbing through timelines, cropping speakers, and typing out subtitles frame by frame, you can do it all in just a few clicks.
 
@@ -177,11 +177,11 @@ If you're finding this tutorial helpful, please hit that like button and subscri
 
 Now let’s quickly break down Kivio’s pricing options:
 
-The Free Plan is perfect for testing the waters. You can process videos up to 10 minutes long, get 30 processing minutes per month, and test out the AI viral clip detection and auto-captions.
+The Free Plan is perfect for testing the waters. You can process source videos up to 30 minutes long, get 46 processing minutes per month, and test out the AI viral clip detection and auto-captions.
 
-The Creator Plan at 19 dollars a month is the sweet spot for regular creators. It unlocks videos up to 1 hour long, gives you 300 processing minutes every month, removes all watermarks, and allows full 1080p HD exports with premium caption templates and permanent video storage.
+The Creator Plan at just 15 dollars a month is the sweet spot for active creators and podcasters. It unlocks videos up to 2 hours long, gives you 300 processing minutes every month—which is double what competitors like Opus Clip offer on their starter tier—removes all watermarks, and gives you full 1080p HD exports with permanent video storage.
 
-And the Power Plan at 49 dollars a month is ideal for power creators, agencies, and podcasts. You can upload videos up to 2 hours long, get 600 monthly processing minutes, and enjoy priority rendering queues.
+And if you ever need extra minutes without upgrading, you can easily grab on-demand credit packs that never expire.
 ```
 
 #### `06_outro.txt`
