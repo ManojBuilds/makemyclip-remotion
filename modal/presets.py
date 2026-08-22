@@ -1,6 +1,6 @@
 """Caption preset normalization and per-preset base style configuration.
 
-The system exposes SIX premium presets, each optimized to look and feel like
+The system exposes SEVEN premium presets, each optimized to look and feel like
 a completely different market-leading product:
 
   1. impact  – TikTok / Shorts / Reels. Anton, white text, yellow active word,
@@ -15,6 +15,9 @@ a completely different market-leading product:
                glow that pulses (blur + subtle scale), vibrant outline.
   6. luxury  – Editorial / fashion / quotes. Playfair Display, alabaster cream text,
                metallic gold active word, shimmer & rise tracking expansion.
+  7. badge   – Clean Card / Badge style (Vizard.ai / modern minimalist). Rounded white
+               container box with generous X/Y padding; inactive words dimmed in soft muted gray,
+               active word in bold high-contrast black.
 
 Presets define the *base* visual identity. User-supplied styling fields override 
 these defaults inside ``ass_builder``.
@@ -63,10 +66,22 @@ PRESET_ALIASES: Dict[str, Tuple[str, ...]] = {
         "focus",
         "box-highlight",
         "box-fade",
-        "boxed",
         "pill",
         "keynote",
         "kelly",
+    ),
+    "badge": (
+        "badge",
+        "card",
+        "box",
+        "boxed",
+        "vizard",
+        "pill_box",
+        "minimal_box",
+        "clean_box",
+        "dimmed",
+        "container",
+        "white_box",
     ),
     "neon": (
         "neon",
@@ -147,6 +162,7 @@ class PresetStyle(TypedDict):
     outline: float
     shadow: float
     backcolor: Optional[Tuple[str, int]]
+    borderstyle: Optional[int]
     alignment: int
     marginv: int
     preferred_words: int
@@ -385,6 +401,45 @@ PRESET_STYLES: Dict[str, PresetStyle] = {
             "glow_enabled": False,
             "glow_blur": 0,
             "sentence_entrance": "shimmer_fade",
+        },
+    },
+    # ── 7. Badge (Card / Dimmed) ──────────────────────────────────────────────
+    # Clean Card / Badge style (Vizard.ai / modern minimalist).
+    # Rounded white container box with generous X/Y padding; inactive words dimmed in soft muted gray,
+    # active word in bold high-contrast black.
+    "badge": {
+        "fontname": "SF Pro Display Bold",
+        "fontsize": 68,
+        "bold": True,
+        "uppercase": False,
+        "primary": "#A0A0A5",
+        "highlightcolor": "#0A0A0A",
+        "outlinecolor": "#FFFFFF",
+        "shadowcolor": "#000000",
+        "pillcolor": "#FFFFFF",
+        "ass_primary": hex_to_ass_abgr("#A0A0A5", "00"),
+        "ass_highlight": hex_to_ass_abgr("#0A0A0A", "00"),
+        "ass_outline": hex_to_ass_abgr("#FFFFFF", "00"),
+        "ass_shadow": hex_to_ass_abgr("#000000", "00"),
+        "ass_pill": hex_to_ass_abgr("#FFFFFF", "00"),
+        "outline": 0.0,
+        "shadow": 0.0,
+        "backcolor": None,
+        "borderstyle": 3,
+        "alignment": 2,
+        "marginv": 320,
+        "preferred_words": 3,
+        "max_chars_per_line": 24,
+        "word_highlight_default": True,
+        "animation_metadata": {
+            "animation_type": "badge_dim",
+            "scale_active": 1.00,
+            "pill_enabled": True,
+            "pill_padding": {"x": 32, "y": 18},
+            "pill_blur": 3,
+            "glow_enabled": False,
+            "glow_blur": 0,
+            "sentence_entrance": "fade",
         },
     },
 }

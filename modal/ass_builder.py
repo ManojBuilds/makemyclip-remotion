@@ -35,12 +35,14 @@ SPEAKER_HIGHLIGHT_PALETTES: dict[str, list[str]] = {
     "creator": ["#00F0FF", "#FFE500", "#FF007A", "#A855F7"],
     "cinema": ["#FFB800", "#00F0FF", "#F43F5E", "#38BDF8"],
     "focus": ["#0A0A0A", "#0A0A0A", "#0A0A0A", "#0A0A0A"],
+    "badge": ["#0A0A0A", "#1E3A8A", "#831843", "#064E3B"],
     "neon": ["#FF007A", "#00F0FF", "#FFE500", "#A855F7"],
     "luxury": ["#FFD700", "#00F0FF", "#F43F5E", "#38BDF8"],
 }
 
 SPEAKER_PILL_PALETTES: dict[str, list[str]] = {
     "focus": ["#FFE600", "#00F0FF", "#FF007A", "#34D399"],
+    "badge": ["#FFFFFF", "#F3F4F6", "#EFF6FF", "#FDF2F8"],
 }
 
 # ── Canvas geometry ──────────────────────────────────────────────────────────
@@ -116,11 +118,17 @@ def luxury_animation(fs: int, duration: int = 220) -> str:
     )
 
 
+def badge_animation(fs: int, duration: int = 150) -> str:
+    """Clean badge fade-in."""
+    return rf"\alpha&HFF&\t(0,{duration},\alpha&H00&)"
+
+
 ANIMATION_BUILDERS: dict[str, Callable[..., str]] = {
     "impact": impact_animation,
     "creator": creator_animation,
     "cinema": cinema_animation,
     "focus": focus_animation,
+    "badge": badge_animation,
     "neon": neon_animation,
     "luxury": luxury_animation,
 }
@@ -256,11 +264,21 @@ def luxury_word_effect(ctx: WordCtx) -> str:
     return rf"{{{prefix}}}{ctx.word}{{{suffix}}}"
 
 
+def badge_word_effect(ctx: WordCtx) -> str:
+    """Clean badge active word: high-contrast bold black against dimmed muted gray inactive words."""
+    active = hex_to_ass_color(ctx.highlight_color_hex)
+    normal = hex_to_ass_color(ctx.normal_color_hex)
+    prefix = rf"\c&H{active.b:02X}{active.g:02X}{active.r:02X}&\alpha&H00&"
+    suffix = rf"\c&H{normal.b:02X}{normal.g:02X}{normal.r:02X}&\alpha&H00&"
+    return _wrap(prefix, ctx, suffix)
+
+
 WORD_EFFECTS: dict[str, Callable[[WordCtx], str]] = {
     "impact": impact_word_effect,
     "creator": creator_word_effect,
     "cinema": cinema_word_effect,
     "focus": focus_word_effect,
+    "badge": badge_word_effect,
     "neon": neon_word_effect,
     "luxury": luxury_word_effect,
 }
@@ -369,9 +387,9 @@ def _build_style(base: dict, overrides: dict, template: dict):
     style.bold = bool(base.get("bold", True))
     style.italic = overrides.get("italic") or False
     style.primarycolor = primarycolor
-    style.outlinecolor = outlinecolor
-    style.outline = outline * SCALE_FACTOR
-    style.shadow = shadow * SCALE_FACTOR
+    style.outlinecolor = hex_to_ass_color(base["outlinecolor"]) if base.get("borderstyle") == 3 else outlinecolor
+    style.outline = 0.0 if base.get("borderstyle") == 3 else (outline * SCALE_FACTOR)
+    style.shadow = 0.0 if base.get("borderstyle") == 3 else (shadow * SCALE_FACTOR)
     style.backcolor = backcolor
     style.borderstyle = base.get("borderstyle", 1)
     style.alignment = (
@@ -420,6 +438,10 @@ def build_animation(
         else:
             tags.append(rf"\pos({CX},{y})")
     tags.append(shadow_tag)
+    if preset == "badge":
+        xbord = max(1, int(32 * SCALE_FACTOR))
+        ybord = max(1, int(18 * SCALE_FACTOR))
+        tags.append(rf"\xbord{xbord}\ybord{ybord}\blur1\3c&HFFFFFF&\3a&H00&")
     if animate:
         builder = ANIMATION_BUILDERS.get(preset, ANIMATION_BUILDERS[DEFAULT_PRESET])
         entrance = builder(fs)
@@ -566,12 +588,13 @@ def _emit_events(
         phrase_layout = layouts_in_group[0]
 
     pos_y = overrides["position_y"]
-    if phrase_layout in ("split", "course"):
-        pos_y = 0.50
-    elif phrase_layout == "letterbox":
-        pos_y = 0.66
-    elif phrase_layout in ("reframe", "single"):
-        pos_y = 0.68
+    if pos_y is None:
+        if phrase_layout in ("split", "course"):
+            pos_y = 0.50
+        elif phrase_layout == "letterbox":
+            pos_y = 0.70
+        elif phrase_layout in ("reframe", "single", "auto"):
+            pos_y = 0.71
 
     y = _resolve_y_anchor(preset, pos_y, fs)
 
@@ -655,7 +678,7 @@ def _emit_events(
 
 
 def _select_shadow_tag(preset: str, no_shadow: bool) -> str:
-    if no_shadow:
+    if no_shadow or preset == "badge":
         return _NO_SHADOW_TAG
     if preset == "neon":
         return _NEON_SHADOW_TAG
@@ -676,9 +699,9 @@ def generate_ass(
         if crop_mode in ("split", "course"):
             template["position_y"] = 0.50
         elif crop_mode == "letterbox":
-            template["position_y"] = 0.66
+            template["position_y"] = 0.70
         elif crop_mode in ("reframe", "single", "auto"):
-            template["position_y"] = 0.68
+            template["position_y"] = 0.71
 
     if crop_mode == "letterbox":
         for snake, camel in (

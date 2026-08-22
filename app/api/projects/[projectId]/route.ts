@@ -82,6 +82,7 @@ export async function GET(
           captionVideoUrl: clips.captionVideoUrl,
           thumbnailUrl: clips.thumbnailUrl,
           captionStyle: clips.captionStyle,
+          captions: clips.captions,
         })
         .from(clips)
         .where(eq(clips.projectId, projectId))

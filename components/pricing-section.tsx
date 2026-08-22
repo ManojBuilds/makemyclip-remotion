@@ -147,11 +147,13 @@ export function PricingSection({
   showPacks = true,
   showPlans = true,
   showExplanation = true,
+  showPowerPlan = false,
 }: {
   showFAQ?: boolean
   showPacks?: boolean
   showPlans?: boolean
   showExplanation?: boolean
+  showPowerPlan?: boolean
 }) {
   const [loading, setLoading] = useState<string | null>(null)
 
@@ -209,7 +211,7 @@ export function PricingSection({
 
       {/* Plans */}
       {showPlans && (
-        <div className="relative mb-16 grid w-full grid-cols-1 items-stretch gap-6 md:grid-cols-3 max-w-6xl mx-auto">
+        <div className={`relative mb-16 grid w-full items-stretch gap-6 mx-auto ${showPowerPlan ? "grid-cols-1 md:grid-cols-3 max-w-6xl" : "grid-cols-1 md:grid-cols-2 max-w-4xl"}`}>
           {/* Free Plan */}
           <div className="flex flex-col rounded-3xl border border-slate-200 bg-white p-7 shadow-sm transition-all hover:shadow-md">
             <div className="mb-4">
@@ -228,7 +230,7 @@ export function PricingSection({
             <ul className="mb-8 flex-1 space-y-3 text-sm text-slate-700">
               <li className="flex items-center gap-2.5">
                 {checkIcon}
-                <span>Up to 10 min source videos</span>
+                <span>Up to 30 min source videos</span>
               </li>
               <li className="flex items-center gap-2.5">
                 {checkIcon}
@@ -242,28 +244,36 @@ export function PricingSection({
                 <span className="h-4 w-4 flex-shrink-0 rounded-full border border-slate-300 flex items-center justify-center text-[10px]">&times;</span>
                 <span className="line-through">720p with watermark</span>
               </li>
+              <li className="flex items-center gap-2.5 text-slate-400">
+                <span className="h-4 w-4 flex-shrink-0 rounded-full border border-slate-300 flex items-center justify-center text-[10px]">&times;</span>
+                <span className="line-through">3-day video storage</span>
+              </li>
             </ul>
 
             <Button
               variant="outline"
               className="h-11 w-full rounded-full border-slate-300 font-semibold text-slate-700 hover:bg-slate-50"
+              onClick={() => {
+                window.location.href = "/projects"
+              }}
             >
               Get Started Free
             </Button>
           </div>
 
-          {/* Creator Plan (Popular) */}
+          {/* Creator Plan (Popular Hero Tier) */}
           <div className="relative flex flex-col rounded-3xl border-2 border-[#0075de] bg-white p-7 shadow-lg shadow-[#0075de]/5">
-            <div className="absolute -top-3.5 left-1/2 -translate-x-1/2 rounded-full bg-[#0075de] px-3.5 py-1 text-xs font-semibold text-white shadow-sm">
-              Most Popular
+            <div className="absolute -top-3.5 left-1/2 -translate-x-1/2 rounded-full bg-[#0075de] px-3.5 py-1 text-xs font-semibold text-white shadow-sm flex items-center gap-1.5 whitespace-nowrap">
+              <SparkleStar className="h-3.5 w-3.5 fill-white" />
+              <span>Most Popular • 2x Opus Clip Minutes</span>
             </div>
 
             <div className="mb-4 mt-1">
               <h3 className="text-xl font-bold text-slate-900">Creator</h3>
-              <p className="text-xs text-slate-500 mt-1">For active content creators</p>
+              <p className="text-xs text-slate-500 mt-1">For active creators & podcasters</p>
             </div>
             <div className="mb-6 flex items-baseline gap-1">
-              <span className="text-4xl font-extrabold text-slate-900">$19</span>
+              <span className="text-4xl font-extrabold text-slate-900">{PLAN_LIMITS.creator.price}</span>
               <span className="text-sm font-medium text-slate-500">/month</span>
             </div>
 
@@ -278,19 +288,27 @@ export function PricingSection({
               </li>
               <li className="flex items-center gap-2.5">
                 {checkIcon}
-                <span>No watermark, 1080p export</span>
+                <span className="font-semibold text-slate-900">300 minutes / month (2x Opus Clip Starter)</span>
               </li>
               <li className="flex items-center gap-2.5">
                 {checkIcon}
-                <span>Automatic clipping & vertical reframing</span>
+                <span>No watermark, 1080p Full HD export</span>
               </li>
               <li className="flex items-center gap-2.5">
                 {checkIcon}
-                <span>All caption styles</span>
+                <span>Automatic clipping & AI virality scoring</span>
               </li>
               <li className="flex items-center gap-2.5">
                 {checkIcon}
-                <span>Faster processing</span>
+                <span>All dynamic Remotion caption styles</span>
+              </li>
+              <li className="flex items-center gap-2.5">
+                {checkIcon}
+                <span>Permanent video storage</span>
+              </li>
+              <li className="flex items-center gap-2.5">
+                {checkIcon}
+                <span>Fast rendering queue</span>
               </li>
             </ul>
 
@@ -304,64 +322,70 @@ export function PricingSection({
                   <Loader2 className="h-4 w-4 animate-spin" /> Redirecting...
                 </span>
               ) : (
-                "Start Creator Plan"
+                "Start Creator Plan ($15/mo)"
               )}
             </Button>
           </div>
 
-          {/* Power Plan */}
-          <div className="flex flex-col rounded-3xl border border-slate-200 bg-white p-7 shadow-sm transition-all hover:shadow-md">
-            <div className="mb-4">
-              <h3 className="text-xl font-bold text-slate-900">Power</h3>
-              <p className="text-xs text-slate-500 mt-1">For heavy users & agencies</p>
-            </div>
-            <div className="mb-6 flex items-baseline gap-1">
-              <span className="text-4xl font-extrabold text-slate-900">$49</span>
-              <span className="text-sm font-medium text-slate-500">/month</span>
-            </div>
+          {/* Power Plan (Preserved for future tier expansion) */}
+          {showPowerPlan && (
+            <div className="flex flex-col rounded-3xl border border-slate-200 bg-white p-7 shadow-sm transition-all hover:shadow-md">
+              <div className="mb-4">
+                <h3 className="text-xl font-bold text-slate-900">Power</h3>
+                <p className="text-xs text-slate-500 mt-1">For heavy users & agencies</p>
+              </div>
+              <div className="mb-6 flex items-baseline gap-1">
+                <span className="text-4xl font-extrabold text-slate-900">{PLAN_LIMITS.power.price}</span>
+                <span className="text-sm font-medium text-slate-500">/month</span>
+              </div>
 
-            <div className="mb-6 text-xs font-semibold uppercase tracking-wider text-slate-500">
-              {PLAN_LIMITS.power.monthlyProcessingMinutes} mins video processing / mo
+              <div className="mb-6 text-xs font-semibold uppercase tracking-wider text-slate-500">
+                {PLAN_LIMITS.power.monthlyProcessingMinutes} mins video processing / mo
+              </div>
+
+              <ul className="mb-8 flex-1 space-y-3 text-sm text-slate-700">
+                <li className="flex items-center gap-2.5">
+                  {checkIcon}
+                  <span>Up to 2 hours source videos</span>
+                </li>
+                <li className="flex items-center gap-2.5">
+                  {checkIcon}
+                  <span>600 mins processing / month</span>
+                </li>
+                <li className="flex items-center gap-2.5">
+                  {checkIcon}
+                  <span>No watermark, 1080p HD export</span>
+                </li>
+                <li className="flex items-center gap-2.5">
+                  {checkIcon}
+                  <span>Automatic clipping & vertical reframing</span>
+                </li>
+                <li className="flex items-center gap-2.5">
+                  {checkIcon}
+                  <span>All caption styles</span>
+                </li>
+                <li className="flex items-center gap-2.5">
+                  {checkIcon}
+                  <span>Priority processing</span>
+                </li>
+              </ul>
+
+              <Button
+                variant="outline"
+                className="h-11 w-full rounded-full border-slate-300 font-semibold text-slate-700 hover:bg-slate-50"
+                onClick={() => handleSubscribe(DODO_PRODUCT_POWER, "power")}
+                disabled={loading === "power"}
+              >
+                {loading === "power" ? (
+                  <span className="flex items-center gap-2">
+                    <Loader2 className="h-4 w-4 animate-spin" /> Redirecting...
+                  </span>
+                ) : (
+                  "Start Power Plan"
+                )}
+              </Button>
             </div>
-
-            <ul className="mb-8 flex-1 space-y-3 text-sm text-slate-700">
-              <li className="flex items-center gap-2.5">
-                {checkIcon}
-                <span>Up to 2 hours source videos</span>
-              </li>
-              <li className="flex items-center gap-2.5">
-                {checkIcon}
-                <span>No watermark, 1080p HD export</span>
-              </li>
-              <li className="flex items-center gap-2.5">
-                {checkIcon}
-                <span>Automatic clipping & vertical reframing</span>
-              </li>
-              <li className="flex items-center gap-2.5">
-                {checkIcon}
-                <span>All caption styles</span>
-              </li>
-              <li className="flex items-center gap-2.5">
-                {checkIcon}
-                <span>Priority processing</span>
-              </li>
-            </ul>
-
-            <Button
-              variant="outline"
-              className="h-11 w-full rounded-full border-slate-300 font-semibold text-slate-700 hover:bg-slate-50"
-              onClick={() => handleSubscribe(DODO_PRODUCT_POWER, "power")}
-              disabled={loading === "power"}
-            >
-              {loading === "power" ? (
-                <span className="flex items-center gap-2">
-                  <Loader2 className="h-4 w-4 animate-spin" /> Redirecting...
-                </span>
-              ) : (
-                "Start Power Plan"
-              )}
-            </Button>
-          </div>
+          )}
         </div>
       )}
 
@@ -380,16 +404,16 @@ export function PricingSection({
               {
                 id: DODO_PRODUCT_STARTER,
                 name: "100 Minutes",
-                price: "$5",
-                unitPrice: "$0.05 / min",
+                price: "$6",
+                unitPrice: "$0.06 / min",
                 credits: "100 video processing credits",
               },
               {
                 id: DODO_PRODUCT_GROWTH,
-                name: "500 Minutes",
-                price: "$20",
-                unitPrice: "$0.04 / min",
-                credits: "500 video processing credits",
+                name: "250 Minutes",
+                price: "$12",
+                unitPrice: "$0.048 / min",
+                credits: "250 video processing credits",
                 bestValue: true,
                 discountBadge: "Save 20%",
               },

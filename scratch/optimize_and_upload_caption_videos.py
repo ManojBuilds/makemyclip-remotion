@@ -17,7 +17,9 @@ if os.getenv("R2_BUCKET_NAME"):
 if not os.getenv("R2_ENDPOINT_URL") and os.getenv("R2_ACCOUNT_ID"):
     os.environ["R2_ENDPOINT_URL"] = f"https://{os.getenv('R2_ACCOUNT_ID')}.r2.cloudflarestorage.com"
 
-PRESETS = ["cinema", "creator", "focus", "impact", "neon", "luxury"]
+# Default to CLI arguments if provided, else "badge"
+target = sys.argv[1:] if len(sys.argv) > 1 else ["badge"]
+PRESETS = target
 INPUT_DIR = "modal/test_outputs"
 OUTPUT_DIR = "scratch/optimized_captions"
 
@@ -96,35 +98,45 @@ def main():
             "webp_size_kb": f"{os.path.getsize(opt_webp)/1024:.1f} KB",
         }
         
-    print("\n🎉 ALL ASSETS CONVERTED, OPTIMIZED, AND UPLOADED SUCCESSFULLY!\n")
+    print("\n🎉 CONVERTED, OPTIMIZED, AND UPLOADED SUCCESSFULLY!\n")
     print(json.dumps(results, indent=2))
     
     # Update lib/config.ts
     config_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "lib", "config.ts"))
-    if os.path.exists(config_path):
+    if os.path.exists(config_path) and results:
         print(f"\n📝 Updating {config_path}...")
         with open(config_path, "r", encoding="utf-8") as f:
             content = f.read()
 
-        images_block = "export const PREVIEW_IMAGES: Record<string, string> = {\n" + "\n".join(
-            f'  {preset}: "{data["webp_url"]}",' for preset, data in results.items()
-        ) + "\n}"
-
-        videos_block = "export const PREVIEW_VIDEOS: Record<string, string> = {\n" + "\n".join(
-            f'  {preset}: "{data["mp4_url"]}",' for preset, data in results.items()
-        ) + "\n}"
-
         import re
-        content = re.sub(
-            r"export const PREVIEW_IMAGES: Record<string, string> = \{[^}]*\}",
-            images_block,
-            content,
-        )
-        content = re.sub(
-            r"export const PREVIEW_VIDEOS: Record<string, string> = \{[^}]*\}",
-            videos_block,
-            content,
-        )
+        for preset, data in results.items():
+            # Update or insert in PREVIEW_IMAGES
+            if f"{preset}:" in content:
+                content = re.sub(
+                    rf'({preset}:\s*")[^"]*(")',
+                    rf'\g<1>{data["webp_url"]}\g<2>',
+                    content,
+                )
+            else:
+                content = re.sub(
+                    r'(export const PREVIEW_IMAGES:\s*Record<string,\s*string>\s*=\s*\{)',
+                    rf'\g<1>\n  {preset}: "{data["webp_url"]}",',
+                    content,
+                )
+
+            # Update or insert in PREVIEW_VIDEOS
+            if f"{preset}:" in content:
+                content = re.sub(
+                    rf'({preset}:\s*")[^"]*(")',
+                    rf'\g<1>{data["mp4_url"]}\g<2>',
+                    content,
+                )
+            else:
+                content = re.sub(
+                    r'(export const PREVIEW_VIDEOS:\s*Record<string,\s*string>\s*=\s*\{)',
+                    rf'\g<1>\n  {preset}: "{data["mp4_url"]}",',
+                    content,
+                )
 
         with open(config_path, "w", encoding="utf-8") as f:
             f.write(content)

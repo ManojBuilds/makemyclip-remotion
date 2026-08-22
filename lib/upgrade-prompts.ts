@@ -16,15 +16,15 @@ const powerLimitLabel = PLAN_LIMITS.power.label.replace("/video", "")
 export const UPGRADE_PROMPTS: Record<string, UpgradePrompt> = {
   upload_limit: {
     id: "upload_limit",
-    title: `Process videos up to ${powerLimitLabel}`,
-    description: `Your Free plan supports videos up to ${freeLimitLabel}. Upgrade to Creator or Power to process longer podcasts, interviews, and webinars.`,
-    cta: "Upgrade Now",
+    title: "Process videos up to 1 Hour",
+    description: `Your Free plan supports videos up to ${freeLimitLabel}. Upgrade to Creator to process longer podcasts, interviews, and webinars.`,
+    cta: "Upgrade to Creator",
     targetPlan: "Creator",
     badgeText: "Extended Uploads",
     highlights: [
-      "Process long-form podcasts & interviews",
-      `Up to ${powerLimitLabel} per video upload`,
-      "Unlock 1080p HD exports",
+      "Process long-form podcasts & interviews up to 1 hour",
+      "300 processing minutes every month",
+      "Unlock 1080p Full HD exports without watermark",
     ],
   },
   export_4k: {
@@ -45,14 +45,14 @@ export const UPGRADE_PROMPTS: Record<string, UpgradePrompt> = {
     id: "export_1080p",
     title: "Export in Full HD",
     description:
-      "Upgrade to Creator to remove watermarks and export in beautiful 1080p.",
-    cta: "Upgrade to Creator",
+      "Upgrade to Creator to remove watermarks and export in beautiful 1080p for just $15/mo.",
+    cta: "Upgrade to Creator ($15/mo)",
     targetPlan: "Creator",
     badgeText: "Full HD Quality",
     highlights: [
       "Crisp 1080p resolution for all social channels",
       "Clean export with zero watermark",
-      "High priority background rendering",
+      "300 minutes / month (2x Opus Clip Starter)",
     ],
   },
   caption_styles: {
@@ -64,22 +64,22 @@ export const UPGRADE_PROMPTS: Record<string, UpgradePrompt> = {
     targetPlan: "Creator",
     badgeText: "High-Engagement Styles",
     highlights: [
-      "Access viral styles (Beast, Hormozi, Neon, Opus)",
+      "Access viral styles (Beast, Hormozi, Neon, Karaoke)",
       "Dynamic word highlighting & animated pop-ins",
-      "Custom brand font & color customization",
+      "No watermarks on final exports",
     ],
   },
   processing_limit: {
     id: "processing_limit",
     title: "You've Used All Your AI Minutes",
     description:
-      "Upgrade your plan to process more videos this month without waiting for your quota to reset.",
-    cta: "Upgrade Plan",
+      "Upgrade to Creator to get 300 monthly minutes (2x Opus Clip Starter) and continue creating viral clips.",
+    cta: "Upgrade to Creator ($15/mo)",
     targetPlan: "Creator",
     badgeText: "Monthly AI Quota",
     highlights: [
-      `Up to ${PLAN_LIMITS.power.monthlyProcessingMinutes} AI processing minutes per month`,
-      "Bulk generate clips from multi-hour videos",
+      "300 AI video processing minutes per month",
+      "No watermarks and 1080p Full HD export",
       "Instant top-up credits available anytime",
     ],
   },

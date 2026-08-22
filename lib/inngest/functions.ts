@@ -539,6 +539,7 @@ export const renderClip = inngest.createFunction(
               ? clip.cropMode
               : project.videoFormat || "auto",
           quality: "preview",
+          analysis_url: project.analysisPath || null,
         }
 
         console.log(

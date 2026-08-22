@@ -3,6 +3,7 @@ export type CaptionPreset =
   | "creator"
   | "cinema"
   | "focus"
+  | "badge"
   | "neon"
   | "luxury"
 
@@ -34,6 +35,11 @@ export const CAPTION_TEMPLATES: Record<string, CaptionTemplate> = {
     preset: "focus",
     wordHighlightDefault: true,
   },
+  badge: {
+    name: "Badge",
+    preset: "badge",
+    wordHighlightDefault: true,
+  },
   neon: {
     name: "Neon",
     preset: "neon",
@@ -45,3 +51,4 @@ export const CAPTION_TEMPLATES: Record<string, CaptionTemplate> = {
     wordHighlightDefault: false,
   },
 }
+

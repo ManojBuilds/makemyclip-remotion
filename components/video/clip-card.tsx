@@ -16,6 +16,7 @@ import {
   Smartphone,
   ClosedCaption,
   ChevronDown,
+  Scissors,
 } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { toast } from "sonner"
@@ -577,6 +578,18 @@ function ClipCardBase({
         )}
 
         <div className="mt-auto flex flex-col gap-2 border-t border-slate-100/60 pt-3 sm:flex-row sm:items-center sm:justify-end sm:gap-3 sm:pt-4">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => onEdit(clip)}
+            disabled={isRendering}
+            className="flex h-9 w-full sm:w-auto items-center justify-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3.5 text-xs font-semibold text-slate-700 shadow-sm transition-all duration-300 hover:bg-slate-50 hover:border-slate-300 active:scale-95 sm:h-10"
+            title="Trim unwanted sections from start or end"
+          >
+            <Scissors className="size-3.5 text-slate-500" />
+            <span>Trim Clip</span>
+          </Button>
+
           {isFree ? (
             <>
               <Button

@@ -8,6 +8,7 @@ import { toast } from "sonner"
 
 import { EditableTitle } from "@/components/dashboard/editable-title"
 import { ClipCard } from "@/components/video/clip-card"
+import { TrimDialog } from "@/components/video/trim-dialog"
 import { ProcessingSteps } from "@/components/dashboard/processing-steps"
 import type { Project, Clip } from "@/lib/types"
 import { triggerHDExport } from "@/lib/actions/export"
@@ -416,6 +417,48 @@ export function ProjectDetailClient({
               )
             })}
         </div>
+
+        {/* Trim Dialog Modal */}
+        <TrimDialog
+          clip={activeEditClip}
+          open={Boolean(activeEditClip)}
+          onOpenChange={(openState) => {
+            if (!openState) setActiveEditClip(null)
+          }}
+          onSaveTrim={async (clipId, newStartTime, newEndTime) => {
+            const toastId = toast.loading("Saving trim and re-rendering clip...")
+            try {
+              const res = await fetch(`/api/clips/${clipId}`, {
+                method: "PATCH",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  startTime: newStartTime,
+                  endTime: newEndTime,
+                }),
+              })
+
+              if (!res.ok) {
+                const errData = await res.json().catch(() => ({}))
+                throw new Error(errData.error || "Failed to update clip")
+              }
+
+              const data = await res.json()
+              if (data.clip) {
+                setClips((prev) =>
+                  prev.map((c) => (c.id === clipId ? { ...c, ...data.clip } : c))
+                )
+              }
+              toast.dismiss(toastId)
+              toast.success("Clip trimmed! Re-rendering with new timestamps...")
+              setActiveEditClip(null)
+            } catch (err: any) {
+              toast.dismiss(toastId)
+              console.error("Failed to save trim:", err)
+              toast.error(err?.message || "Failed to trim clip.")
+              throw err
+            }
+          }}
+        />
       </div>
     )
   }

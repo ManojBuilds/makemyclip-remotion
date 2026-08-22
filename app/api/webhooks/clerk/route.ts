@@ -4,6 +4,7 @@ import { WebhookEvent } from "@clerk/nextjs/server"
 import { db } from "@/lib/db"
 import { user } from "@/lib/db/schema"
 import { eq } from "drizzle-orm"
+import { PLAN_LIMITS } from "@/lib/config"
 
 export async function POST(req: Request) {
   const SIGNING_SECRET = process.env.CLERK_WEBHOOK_SECRET
@@ -67,7 +68,7 @@ export async function POST(req: Request) {
         email: email,
         emailVerified: true,
         image: image_url || null,
-        credits: 30, // Default signup credits
+        credits: PLAN_LIMITS.free.monthlyProcessingMinutes, // 45 minutes free quota
         plan: 'free',
         subscriptionStatus: 'inactive',
       })
