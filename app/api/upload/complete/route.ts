@@ -18,6 +18,7 @@ export async function POST(request: Request) {
       videoFormat,
       transcribeLanguage,
       translateLanguage,
+      removeSilence,
     } = await request.json()
 
     if (!key || !title) {
@@ -44,6 +45,7 @@ export async function POST(request: Request) {
         videoFormat: videoFormat || "reframe",
         transcribeLanguage: transcribeLanguage || "auto",
         translateLanguage: translateLanguage || "none",
+        removeSilence: removeSilence !== undefined ? removeSilence : true,
         // Persist caption styling preset name at the project level.
         captionStyle: styling ? (styling.preset || styling.name || "impact") : "impact",
       })

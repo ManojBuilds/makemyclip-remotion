@@ -2367,6 +2367,47 @@ class AIReframe:
             )
             os.replace(synced_output, local_orig)
 
+            # 5b. Silence removal — cut dead-air gaps using word timestamps
+            if req.remove_silence and req.transcript:
+                from silence_remover import (
+                    build_silence_removed_segments,
+                    remove_silence_ffmpeg,
+                    remap_transcript_blocks,
+                )
+
+                # Collect all word timestamps from transcript blocks
+                all_words = []
+                for block in req.transcript:
+                    block_words = block.get("words", [])
+                    all_words.extend(block_words)
+
+                if all_words:
+                    segments = build_silence_removed_segments(
+                        all_words,
+                        total_duration=duration_secs,
+                    )
+                    if segments:
+                        silence_removed_path = local_orig.replace(".mp4", "_nosilence.mp4")
+                        success = remove_silence_ffmpeg(
+                            input_video=local_orig,
+                            output_video=silence_removed_path,
+                            segments=segments,
+                            fps=fps,
+                        )
+                        if success:
+                            os.replace(silence_removed_path, local_orig)
+                            # Remap transcript timestamps to match shortened video
+                            req.transcript = remap_transcript_blocks(
+                                req.transcript, segments
+                            )
+                            logger.info("Silence removal applied successfully.")
+                        else:
+                            logger.warning(
+                                "Silence removal failed — using original video."
+                            )
+                    else:
+                        logger.info("No significant silence gaps detected — skipping removal.")
+
             orig_size = os.path.getsize(local_orig)
             logger.info(
                 "Vertical render done in %.1fs, size=%s bytes",
@@ -2986,6 +3027,38 @@ class AIReframe:
                             use_nvenc=self.use_nvenc,
                         )
                         os.replace(synced, local_orig)
+
+                        # 5b. Silence removal for this clip
+                        if clip_req.remove_silence and clip_req.transcript:
+                            from silence_remover import (
+                                build_silence_removed_segments,
+                                remove_silence_ffmpeg,
+                                remap_transcript_blocks,
+                            )
+
+                            all_words = []
+                            for block in clip_req.transcript:
+                                all_words.extend(block.get("words", []))
+
+                            if all_words:
+                                segments = build_silence_removed_segments(
+                                    all_words,
+                                    total_duration=clip_duration,
+                                )
+                                if segments:
+                                    sr_path = local_orig.replace(".mp4", "_nosilence.mp4")
+                                    sr_ok = remove_silence_ffmpeg(
+                                        input_video=local_orig,
+                                        output_video=sr_path,
+                                        segments=segments,
+                                        fps=fps,
+                                    )
+                                    if sr_ok:
+                                        os.replace(sr_path, local_orig)
+                                        clip_req.transcript = remap_transcript_blocks(
+                                            clip_req.transcript, segments
+                                        )
+                                        logger.info("Clip %s: silence removal applied.", clip_id)
 
                         render_time = time.time() - t1
                         logger.info("Clip %s rendered in %.1fs", clip_id, render_time)

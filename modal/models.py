@@ -41,6 +41,7 @@ class ReframeRequest(BaseModel):
     crop_mode: str = "reframe"
     quality: str = "preview"  # "preview" (fast, 540p, smaller file) or "export" (full 1080p)
     analysis_url: Optional[str] = None
+    remove_silence: bool = False
 
 
 class BurnCaptionsRequest(BaseModel):
@@ -51,6 +52,7 @@ class BurnCaptionsRequest(BaseModel):
     crop_mode: Optional[str] = "reframe"
     quality: str = "export"  # "preview" (fast, 540p) or "export" (full 1080p)
     plan: str = "free"  # "free", "creator", or "power" — controls export resolution
+    remove_silence: bool = False
 
 
 class BatchClipItem(BaseModel):
@@ -62,6 +64,7 @@ class BatchClipItem(BaseModel):
     transcript: Optional[List[dict]] = None
     styling: Optional[CaptionStyle] = None
     show_watermark: bool = False
+    remove_silence: bool = False
 
 
 class BatchReframeRequest(BaseModel):

@@ -32,7 +32,7 @@ export const processVideo = inngest.createFunction(
     )
 
     // Step 1: Update status to processing and fetch user plan
-    const { userPlan, projectStyling, transcribeLanguage, translateLanguage } =
+    const { userPlan, projectStyling, transcribeLanguage, translateLanguage, removeSilence } =
       await step.run("update-status-and-fetch-plan", async () => {
         console.log(
           `[processVideo] Step: update-status-and-fetch-plan for project: ${projectId}`
@@ -63,13 +63,14 @@ export const processVideo = inngest.createFunction(
         }
 
         console.log(
-          `[processVideo] User Plan: ${data.userPlan}, Styling Loaded: ${!!styling}`
+          `[processVideo] User Plan: ${data.userPlan}, Styling Loaded: ${!!styling}, Remove Silence: ${projectData.removeSilence}`
         )
         return {
           userPlan: data.userPlan || "free",
           projectStyling: styling,
           transcribeLanguage: projectData.transcribeLanguage || "auto",
           translateLanguage: projectData.translateLanguage || "none",
+          removeSilence: projectData.removeSilence ?? true,
         }
       })
 
@@ -353,6 +354,7 @@ export const processVideo = inngest.createFunction(
         data: {
           projectId,
           clipIds: aiClips.map((clip) => clip.id),
+          removeSilence,
         },
       })
     }
@@ -540,6 +542,7 @@ export const renderClip = inngest.createFunction(
               : project.videoFormat || "auto",
           quality: "preview",
           analysis_url: project.analysisPath || null,
+          remove_silence: project.removeSilence ?? true,
         }
 
         console.log(
@@ -690,6 +693,7 @@ export const batchReframeProject = inngest.createFunction(
             transcript: clip.captions,
             styling: stylingPayload,
             show_watermark: userPlan === "free",
+            remove_silence: project.removeSilence ?? true,
           }
         })
 
@@ -846,6 +850,7 @@ export const exportClip = inngest.createFunction(
           crop_mode: clip.cropMode || project.videoFormat || "reframe",
           quality: "export",
           plan,
+          remove_silence: project.removeSilence ?? true,
         }
 
         console.log(`[exportClip] Calling Modal burner with quality=export, plan=${plan}`)

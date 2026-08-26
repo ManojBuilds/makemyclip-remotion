@@ -39,7 +39,7 @@ This document contains the complete YouTube video script for **Kivio**, includin
   >
   > Hey everyone, welcome back to the channel. Today, we’re looking at Kivio, an AI-powered video repurposing platform that analyzes your long-form videos, finds the most engaging viral moments, auto-frames speakers with smart face tracking, and adds dynamic, eye-catching animated captions.
   >
-  > In this video, I’ll walk you through the entire workflow: from dropping in a YouTube link or uploading a video, to customizing caption styles, previewing AI virality scores, and exporting ready-to-post 1080p clips. All the links are down in the description below. Let’s jump right in!"
+  > In this video, I’ll walk you through the entire workflow: from dropping in a YouTube link or uploading a video, to choosing caption style presets, previewing AI virality scores, and downloading ready-to-post 1080p clips with or without captions. All the links are down in the description below. Let’s jump right in!"
 
 ---
 
@@ -68,7 +68,7 @@ This document contains the complete YouTube video script for **Kivio**, includin
   >
   > First is Smart AI Reframing. If you have a widescreen 16 by 9 video or a multi-speaker podcast, the AI tracks whoever is talking and keeps them perfectly centered in a vertical 9 by 16 format, with zero manual keyframing required.
   >
-  > Second is the Animated Captions. Captions are crucial for short-form retention, and Kivio generates word-by-word synced animated subtitles with vibrant highlight colors, emojis, and popular creator styles like Hormozi, Devin, and Beast-style presets. You can tweak the text, change fonts, customize colors, or toggle subtitles on and off before rendering."
+  > Second is the Animated Captions. Captions are crucial for short-form retention, and Kivio generates word-by-word synced animated subtitles with vibrant highlight colors, emojis, and popular creator presets like Hormozi, Devin, and Beast styles. You can easily pick your favorite preset style, and choose whether to download your clip with captions or clean without captions."
 
 ---
 
@@ -104,7 +104,7 @@ Creating viral shorts can feel like an endless mountain of work after you've alr
 
 Hey everyone, welcome back to the channel. Today, we’re looking at Kivio, an AI-powered video repurposing platform that analyzes your long-form videos, finds the most engaging viral moments, auto-frames speakers with smart face tracking, and adds dynamic, eye-catching animated captions.
 
-In this video, I’ll walk you through the entire workflow: from dropping in a YouTube link or uploading a video, to customizing caption styles, previewing AI virality scores, and exporting ready-to-post 1080p clips. All the links are down in the description below. Let’s jump right in!
+In this video, I’ll walk you through the entire workflow: from dropping in a YouTube link or uploading a video, to choosing caption style presets, previewing AI virality scores, and downloading ready-to-post 1080p clips with or without captions. All the links are down in the description below. Let’s jump right in!
 
 Getting started with Kivio is super straightforward. You don't need any complex video editing skills. You have two easy options: you can simply paste a link to any public YouTube video, like an interview, tutorial, or webinar, or you can drag and drop your own raw video file directly into the dashboard.
 
@@ -118,7 +118,7 @@ Now let's open the preview player, because this is where Kivio really shines.
 
 First is Smart AI Reframing. If you have a widescreen 16 by 9 video or a multi-speaker podcast, the AI tracks whoever is talking and keeps them perfectly centered in a vertical 9 by 16 format, with zero manual keyframing required.
 
-Second is the Animated Captions. Captions are crucial for short-form retention, and Kivio generates word-by-word synced animated subtitles with vibrant highlight colors, emojis, and popular creator styles like Hormozi, Devin, and Beast-style presets. You can tweak the text, change fonts, customize colors, or toggle subtitles on and off before rendering.
+Second is the Animated Captions. Captions are crucial for short-form retention, and Kivio generates word-by-word synced animated subtitles with vibrant highlight colors, emojis, and popular creator presets like Hormozi, Devin, and Beast styles. You can easily pick your favorite preset style, and choose whether to download your clip with captions or clean without captions.
 
 If you're finding this tutorial helpful, please hit that like button and subscribe to the channel! It's completely free and helps support more videos like this. Also, drop a comment below letting me know: what kind of videos are you planning to repurpose into shorts?
 
@@ -145,7 +145,7 @@ Creating viral shorts can feel like an endless mountain of work after you've alr
 
 Hey everyone, welcome back to the channel. Today, we’re looking at Kivio, an AI-powered video repurposing platform that analyzes your long-form videos, finds the most engaging viral moments, auto-frames speakers with smart face tracking, and adds dynamic, eye-catching animated captions.
 
-In this video, I’ll walk you through the entire workflow: from dropping in a YouTube link or uploading a video, to customizing caption styles, previewing AI virality scores, and exporting ready-to-post 1080p clips. All the links are down in the description below. Let’s jump right in!
+In this video, I’ll walk you through the entire workflow: from dropping in a YouTube link or uploading a video, to choosing caption style presets, previewing AI virality scores, and downloading ready-to-post 1080p clips with or without captions. All the links are down in the description below. Let’s jump right in!
 ```
 
 #### `02_workflow.txt`
@@ -168,7 +168,7 @@ Now let's open the preview player, because this is where Kivio really shines.
 
 First is Smart AI Reframing. If you have a widescreen 16 by 9 video or a multi-speaker podcast, the AI tracks whoever is talking and keeps them perfectly centered in a vertical 9 by 16 format, with zero manual keyframing required.
 
-Second is the Animated Captions. Captions are crucial for short-form retention, and Kivio generates word-by-word synced animated subtitles with vibrant highlight colors, emojis, and popular creator styles like Hormozi, Devin, and Beast-style presets. You can tweak the text, change fonts, customize colors, or toggle subtitles on and off before rendering.
+Second is the Animated Captions. Captions are crucial for short-form retention, and Kivio generates word-by-word synced animated subtitles with vibrant highlight colors, emojis, and popular creator presets like Hormozi, Devin, and Beast styles. You can easily pick your favorite preset style, and choose whether to download your clip with captions or clean without captions.
 ```
 
 #### `05_pricing_and_cta.txt`

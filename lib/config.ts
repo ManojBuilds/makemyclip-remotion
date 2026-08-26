@@ -27,7 +27,7 @@ export const PLAN_LIMITS = {
     label: "2 hours/video",
     popular: true,
     features: [
-      "Upload videos up to 2 hour",
+      "Upload videos up to 2 hours",
       "300 minutes processing / month",
       "No watermark",
       "1080p Full HD exports",

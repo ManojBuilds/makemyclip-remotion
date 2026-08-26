@@ -22,6 +22,7 @@ export async function POST(req: Request) {
       styling,
       transcribeLanguage,
       translateLanguage,
+      removeSilence,
     } = await req.json()
 
     if (!url || typeof url !== "string") {
@@ -106,6 +107,7 @@ export async function POST(req: Request) {
         videoFormat: videoFormat || "reframe",
         transcribeLanguage: transcribeLanguage || "auto",
         translateLanguage: translateLanguage || "none",
+        removeSilence: removeSilence !== undefined ? removeSilence : true,
         ...(styling
           ? {
               captionStyle: styling.preset || styling.name || "impact",

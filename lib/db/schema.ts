@@ -65,6 +65,7 @@ export const projects = pgTable("projects", {
   videoFormat: text("video_format").default("reframe"),
   transcribeLanguage: text("transcribe_language").default("auto"),
   translateLanguage: text("translate_language").default("none"),
+  removeSilence: boolean("remove_silence").notNull().default(true),
   createdAt: timestamp("created_at").notNull().defaultNow(),
   updatedAt: timestamp("updated_at").notNull().defaultNow(),
 })

@@ -38,7 +38,8 @@ export function useUpload() {
       styling?: Record<string, unknown>,
       videoFormat?: string,
       transcribeLanguage?: string,
-      translateLanguage?: string
+      translateLanguage?: string,
+      removeSilence?: boolean
     ) => {
       try {
         setState({
@@ -147,6 +148,7 @@ export function useUpload() {
             videoFormat,
             transcribeLanguage,
             translateLanguage,
+            removeSilence: removeSilence ?? true,
           }),
         })
 

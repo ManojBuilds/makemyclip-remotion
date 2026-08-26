@@ -152,7 +152,8 @@ interface ConfirmDialogProps {
   onConfirm: (
     styling: CaptionTemplate,
     transcribeLang: string,
-    translateLang: string
+    translateLang: string,
+    removeSilence: boolean
   ) => void
   isSubmitting: boolean
   thumbnail?: string | null
@@ -184,6 +185,7 @@ export function ConfirmDialog({
   const [wordHighlight, setWordHighlight] = useState<boolean>(true)
   const [sourceLang, setSourceLang] = useState<string>("auto")
   const [translateLang, setTranslateLang] = useState<string>("none")
+  const [removeSilence, setRemoveSilence] = useState<boolean>(true)
   const [isThumbnailLoading, setIsThumbnailLoading] = useState(true)
   const [showAdvanced, setShowAdvanced] = useState<boolean>(false)
 
@@ -196,6 +198,7 @@ export function ConfirmDialog({
       setSourceLang("auto")
       setTranslateLang("none")
       setIsThumbnailLoading(true)
+      setRemoveSilence(true)
       setShowAdvanced(false)
 
       if (isOverLimit && isFree && !hasDismissedPrompt("upload_limit")) {
@@ -223,7 +226,8 @@ export function ConfirmDialog({
       onConfirm(
         { ...styling, word_highlight: wordHighlight } as any,
         sourceLang,
-        translateLang
+        translateLang,
+        removeSilence
       )
     }
   }
@@ -432,6 +436,23 @@ export function ConfirmDialog({
                       id="word-highlight"
                       checked={wordHighlight}
                       onCheckedChange={setWordHighlight}
+                    />
+                  </div>
+
+                  {/* Remove Silence Toggle Switch */}
+                  <div className="flex items-center justify-between pt-2 border-t border-slate-100">
+                    <div>
+                      <Label htmlFor="remove-silence" className="block text-[11px] font-semibold text-slate-700 cursor-pointer">
+                        Remove Silence
+                      </Label>
+                      <p className="text-[10px] text-slate-400">
+                        Auto-cut dead air and long pauses for tighter clips
+                      </p>
+                    </div>
+                    <Switch
+                      id="remove-silence"
+                      checked={removeSilence}
+                      onCheckedChange={setRemoveSilence}
                     />
                   </div>
                 </div>

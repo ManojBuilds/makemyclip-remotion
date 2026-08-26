@@ -35,13 +35,15 @@ type UnifiedInputProps = {
     transcribeLanguage?: string,
     translateLanguage?: string,
     duration?: number | null,
-    title?: string | null
+    title?: string | null,
+    removeSilence?: boolean
   ) => Promise<boolean> | boolean | void
   onFileSelect?: (
     file: File,
     styling: CaptionTemplate,
     transcribeLanguage?: string,
-    translateLanguage?: string
+    translateLanguage?: string,
+    removeSilence?: boolean
   ) => Promise<void> | void
   isSubmitting?: boolean
   className?: string
@@ -219,7 +221,8 @@ export function UnifiedInput({
   const handleConfirm = async (
     styling: CaptionTemplate,
     transcribeLang: string,
-    translateLang: string
+    translateLang: string,
+    removeSilence: boolean
   ) => {
     requireAuth(async () => {
       if (pendingFile) {
@@ -229,7 +232,8 @@ export function UnifiedInput({
             pendingFile,
             styling,
             transcribeLang,
-            translateLang
+            translateLang,
+            removeSilence
           )
         return
       }
@@ -241,7 +245,8 @@ export function UnifiedInput({
           transcribeLang,
           translateLang,
           videoDuration,
-          videoTitle
+          videoTitle,
+          removeSilence
         )
         if (success) {
           setDialogOpen(false)
@@ -252,6 +257,7 @@ export function UnifiedInput({
           sessionStorage.setItem("pending_youtube_url", normalizeVideoUrl(youtubeUrl))
           sessionStorage.setItem("pending_transcribe_language", transcribeLang)
           sessionStorage.setItem("pending_translate_language", translateLang)
+          sessionStorage.setItem("pending_remove_silence", removeSilence ? "true" : "false")
           router.push("/projects")
           setDialogOpen(false)
         } catch {

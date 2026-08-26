@@ -46,15 +46,22 @@ export function ProjectsClient({
       const pendingTranslate = sessionStorage.getItem(
         "pending_translate_language"
       )
+      const pendingRemoveSilence = sessionStorage.getItem(
+        "pending_remove_silence"
+      )
       if (pending) {
         sessionStorage.removeItem("pending_youtube_url")
         sessionStorage.removeItem("pending_transcribe_language")
         sessionStorage.removeItem("pending_translate_language")
+        sessionStorage.removeItem("pending_remove_silence")
         handleUrlSubmit(
           pending,
           undefined,
           pendingTranscribe || "auto",
-          pendingTranslate || "none"
+          pendingTranslate || "none",
+          undefined,
+          undefined,
+          pendingRemoveSilence !== "false"
         )
       }
     }
@@ -67,7 +74,8 @@ export function ProjectsClient({
     transcribeLanguage?: string,
     translateLanguage?: string,
     duration?: number | null,
-    title?: string | null
+    title?: string | null,
+    removeSilence?: boolean
   ): Promise<boolean> => {
     const normalizedUrl = normalizeVideoUrl(url)
     if (!normalizedUrl) return false
@@ -89,6 +97,7 @@ export function ProjectsClient({
           translateLanguage,
           duration,
           title,
+          removeSilence: removeSilence ?? true,
         }),
       })
       const data = await res.json()
@@ -119,7 +128,8 @@ export function ProjectsClient({
     file: File,
     styling?: CaptionTemplate,
     transcribeLanguage?: string,
-    translateLanguage?: string
+    translateLanguage?: string,
+    removeSilence?: boolean
   ) => {
     // Pre-check credits on the frontend before starting the upload
     try {
@@ -147,7 +157,8 @@ export function ProjectsClient({
         styling as unknown as Record<string, unknown> | undefined,
         undefined,
         transcribeLanguage,
-        translateLanguage
+        translateLanguage,
+        removeSilence ?? true
       )
       if (projectId) router.push(`/projects/${projectId}`)
     } catch (err) {

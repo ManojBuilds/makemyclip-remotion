@@ -284,7 +284,7 @@ export function PricingSection({
             <ul className="mb-8 flex-1 space-y-3 text-sm text-slate-700">
               <li className="flex items-center gap-2.5">
                 {checkIcon}
-                <span>Up to 1 hour source videos</span>
+                <span>Up to {PLAN_LIMITS.creator.maxUploadDurationSeconds / 3600} hour source videos</span>
               </li>
               <li className="flex items-center gap-2.5">
                 {checkIcon}
@@ -448,8 +448,8 @@ export function PricingSection({
                     size="sm"
                     variant={pack.bestValue ? "default" : "outline"}
                     className={`rounded-full px-5 font-bold text-xs ${pack.bestValue
-                        ? "bg-[#0075de] hover:bg-[#0060b8] text-white shadow-sm"
-                        : "border-slate-300 text-slate-700 hover:bg-slate-50"
+                      ? "bg-[#0075de] hover:bg-[#0060b8] text-white shadow-sm"
+                      : "border-slate-300 text-slate-700 hover:bg-slate-50"
                       }`}
                     onClick={() => handleSubscribe(pack.id, pack.name)}
                     disabled={!!loading}
