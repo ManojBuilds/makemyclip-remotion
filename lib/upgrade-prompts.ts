@@ -16,29 +16,29 @@ const powerLimitLabel = PLAN_LIMITS.power.label.replace("/video", "")
 export const UPGRADE_PROMPTS: Record<string, UpgradePrompt> = {
   upload_limit: {
     id: "upload_limit",
-    title: "Process videos up to 1 Hour",
+    title: "Process videos up to 2 Hours",
     description: `Your Free plan supports videos up to ${freeLimitLabel}. Upgrade to Creator to process longer podcasts, interviews, and webinars.`,
-    cta: "Upgrade to Creator",
+    cta: "Upgrade to Creator ($15/mo)",
     targetPlan: "Creator",
     badgeText: "Extended Uploads",
     highlights: [
-      "Process long-form podcasts & interviews up to 1 hour",
-      "300 processing minutes every month",
+      "Process long-form podcasts & interviews up to 2 hours",
+      "300 processing minutes every month (2x Opus Clip Starter)",
       "Unlock 1080p Full HD exports without watermark",
     ],
   },
   export_4k: {
     id: "export_4k",
-    title: "Export in HD",
+    title: "Export in Full HD",
     description:
-      "Unlock crystal-clear 1080p HD exports and premium quality with the Power plan.",
-    cta: "Upgrade to Power",
-    targetPlan: "Power",
-    badgeText: "HD Quality",
+      "Unlock crystal-clear 1080p Full HD exports and no watermark with the Creator plan for just $15/mo.",
+    cta: "Upgrade to Creator ($15/mo)",
+    targetPlan: "Creator",
+    badgeText: "1080p HD Quality",
     highlights: [
-      "Full 1080p HD rendering",
-      "High bitrate for crisp video quality",
-      "No watermarks on final export",
+      "Full 1080p HD rendering without watermark",
+      "Crisp video quality tailored for TikTok, Reels & Shorts",
+      "300 minutes / month included",
     ],
   },
   export_1080p: {
@@ -59,12 +59,12 @@ export const UPGRADE_PROMPTS: Record<string, UpgradePrompt> = {
     id: "caption_styles",
     title: "Unlock Premium Caption Styles",
     description:
-      "Access all modern subtitle presets designed to maximize engagement.",
-    cta: "Upgrade Now",
+      "Access all modern subtitle presets and word-level highlighting designed to maximize engagement.",
+    cta: "Upgrade to Creator ($15/mo)",
     targetPlan: "Creator",
     badgeText: "High-Engagement Styles",
     highlights: [
-      "Access viral styles (Beast, Hormozi, Neon, Karaoke)",
+      "Access viral styles (Beast, Hormozi, Neon, Luxury, Cinema)",
       "Dynamic word highlighting & animated pop-ins",
       "No watermarks on final exports",
     ],
@@ -87,8 +87,8 @@ export const UPGRADE_PROMPTS: Record<string, UpgradePrompt> = {
     id: "faster_queue",
     title: "Need Faster Processing?",
     description:
-      "Creator and Power plans get priority processing, so your clips are ready sooner.",
-    cta: "See Plans",
+      "Creator plan gets fast priority processing, so your clips are ready in seconds.",
+    cta: "Upgrade to Creator ($15/mo)",
     targetPlan: "Creator",
     badgeText: "Priority Speed",
     highlights: [
@@ -102,7 +102,7 @@ export const UPGRADE_PROMPTS: Record<string, UpgradePrompt> = {
     title: "Keep Your Videos Forever",
     description:
       "Free videos are automatically deleted after 3 days. Upgrade to keep your projects permanently.",
-    cta: "Upgrade Now",
+    cta: "Upgrade to Creator ($15/mo)",
     targetPlan: "Creator",
     badgeText: "Permanent Storage",
     highlights: [
@@ -116,13 +116,13 @@ export const UPGRADE_PROMPTS: Record<string, UpgradePrompt> = {
     title: "Advanced AI Reframing",
     description:
       "Automatically track speakers and center key action for perfect 9:16 vertical shorts.",
-    cta: "Upgrade to Power",
-    targetPlan: "Power",
+    cta: "Upgrade to Creator ($15/mo)",
+    targetPlan: "Creator",
     badgeText: "Smart AI Tracking",
     highlights: [
       "Multi-speaker active camera tracking",
       "Auto-cropping tailored for TikTok & Reels",
-      "Custom layout and aspect ratio controls",
+      "1080p Full HD export with zero watermark",
     ],
   },
 }

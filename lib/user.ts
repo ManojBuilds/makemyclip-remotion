@@ -1,6 +1,7 @@
 import { db } from "@/lib/db"
 import { user } from "@/lib/db/schema"
 import { eq } from "drizzle-orm"
+import { PLAN_LIMITS } from "@/lib/config"
 
 export interface ClerkUserSession {
   id: string
@@ -12,7 +13,7 @@ export interface ClerkUserSession {
 /**
  * Retrieves a user from the PostgreSQL database using their Clerk User ID.
  * If the user does not exist in the database, automatically inserts a new record
- * with 30 initial credits and plan set to "free".
+ * with 45 initial credits and plan set to "free".
  */
 export async function getOrCreateUser(clerkUser: ClerkUserSession) {
   if (!clerkUser?.id) {
@@ -36,7 +37,7 @@ export async function getOrCreateUser(clerkUser: ClerkUserSession) {
     email: clerkUser.email,
     emailVerified: true,
     image: clerkUser.image || null,
-    credits: 30, // Default sign up credits
+    credits: PLAN_LIMITS.free.monthlyProcessingMinutes, // 45 initial credits on sign up
     plan: "free",
     subscriptionStatus: "inactive",
     createdAt: new Date(),

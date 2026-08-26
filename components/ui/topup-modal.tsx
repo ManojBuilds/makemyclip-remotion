@@ -1,7 +1,7 @@
 "use client"
 
 import React, { useState } from "react"
-import { Loader2, ShieldCheck } from "lucide-react"
+import { Loader2, ShieldCheck, Sparkles } from "lucide-react"
 import { toast } from "sonner"
 import {
   Dialog,
@@ -128,26 +128,36 @@ export function TopUpModal({ open, onOpenChange }: TopUpModalProps) {
           })}
         </div>
 
-        {/* Upgrade Call to Action if not on Power plan */}
-        {userPlan !== "power" && (
-          <div className="mx-6 mb-4 p-3.5 rounded-2xl border border-border bg-background flex items-center justify-between gap-3 text-left">
-            <div>
-              <h4 className="text-xs font-bold text-foreground">Need recurring monthly minutes?</h4>
-              <p className="text-[11px] text-muted-foreground mt-0.5">
-                Monthly plans offer the lowest rate per minute.
-              </p>
+        {/* Upgrade Call to Action: Strongly encourage Creator plan */}
+        {userPlan !== "creator" && userPlan !== "power" && (
+          <div className="mx-6 mb-4 relative overflow-hidden rounded-2xl border-2 border-primary/30 bg-gradient-to-r from-primary/10 via-primary/5 to-transparent p-4 text-left shadow-sm">
+            <div className="flex items-center justify-between gap-3">
+              <div className="space-y-1">
+                <div className="flex items-center gap-1.5">
+                  <Sparkles className="h-3.5 w-3.5 text-primary fill-primary flex-shrink-0" />
+                  <h4 className="text-xs font-bold text-foreground">
+                    Get 300 Mins on Creator Plan
+                  </h4>
+                  <span className="rounded-full bg-primary/15 px-2 py-0.5 text-[10px] font-extrabold text-primary">
+                    $15/mo • $0.05/min
+                  </span>
+                </div>
+                <p className="text-[11px] text-muted-foreground leading-snug">
+                  Includes <strong>1080p Full HD</strong> exports, zero watermark, all viral caption styles & fast rendering.
+                </p>
+              </div>
+
+              <Button
+                size="sm"
+                className="rounded-full px-4 py-1.5 text-xs font-bold shrink-0 bg-primary text-primary-foreground shadow-sm hover:bg-primary/90 transition-all hover:scale-105"
+                onClick={() => {
+                  onOpenChange(false)
+                  window.location.href = "/pricing?plan=creator"
+                }}
+              >
+                Upgrade
+              </Button>
             </div>
-            <Button
-              size="sm"
-              variant="outline"
-              className="rounded-full px-3.5 py-1 text-[11px] font-bold shrink-0"
-              onClick={() => {
-                onOpenChange(false)
-                window.location.href = "/pricing"
-              }}
-            >
-              See Plans
-            </Button>
           </div>
         )}
 

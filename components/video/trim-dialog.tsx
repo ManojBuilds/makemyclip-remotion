@@ -61,12 +61,10 @@ export function TrimDialog({
   onOpenChange,
   onSaveTrim,
 }: TrimDialogProps) {
-  if (!clip) return null
-
   const videoRef = useRef<HTMLVideoElement>(null)
   const timelineRef = useRef<HTMLDivElement>(null)
 
-  const clipDuration = Math.max(0.1, clip.endTime - clip.startTime)
+  const clipDuration = clip ? Math.max(0.1, clip.endTime - clip.startTime) : 1
 
   // Relative trim states (0 to clipDuration)
   const [trimStartRel, setTrimStartRel] = useState<number>(0)
@@ -97,12 +95,11 @@ export function TrimDialog({
     }
   }, [open, clip])
 
-  const videoUrl = clip.previewVideoUrl || clip.originalVideoUrl || clip.captionVideoUrl
+  const videoUrl = clip ? (clip.previewVideoUrl || clip.originalVideoUrl || clip.captionVideoUrl) : null
 
   // Absolute timestamps
-  const absoluteStartTime = clip.startTime + trimStartRel
-  const absoluteEndTime = clip.startTime + trimEndRel
-  const trimmedDuration = Math.max(0.1, trimEndRel - trimStartRel)
+  const absoluteStartTime = clip ? clip.startTime + trimStartRel : 0
+  const absoluteEndTime = clip ? clip.startTime + trimEndRel : 0
 
   // Sync video playback time
   const handleTimeUpdate = () => {
@@ -126,7 +123,7 @@ export function TrimDialog({
       if (videoRef.current.currentTime < trimStartRel || videoRef.current.currentTime >= trimEndRel) {
         videoRef.current.currentTime = trimStartRel
       }
-      videoRef.current.play().catch(() => {})
+      videoRef.current.play().catch(() => { })
       setIsPlaying(true)
     }
   }
@@ -149,6 +146,7 @@ export function TrimDialog({
 
   // Save handler
   const handleSave = async () => {
+    if (!clip) return
     if (trimEndRel <= trimStartRel + 0.5) {
       toast.error("Clip duration must be at least 0.5 seconds")
       return
@@ -256,7 +254,7 @@ export function TrimDialog({
     if (activeDrag) {
       try {
         e.currentTarget.releasePointerCapture(e.pointerId)
-      } catch {}
+      } catch { }
       setActiveDrag(null)
     }
   }
@@ -276,7 +274,7 @@ export function TrimDialog({
   const playheadPercent = (currentTimeRel / clipDuration) * 100
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog open={open && Boolean(clip)} onOpenChange={onOpenChange}>
       <DialogContent className="flex max-h-[92vh] flex-col gap-0 overflow-hidden rounded-[28px] border border-slate-100 bg-white p-0 text-slate-900 shadow-2xl sm:max-w-[720px]">
         {/* Header */}
         <DialogHeader className="shrink-0 p-6 pb-2 text-left">

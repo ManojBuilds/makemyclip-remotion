@@ -23,7 +23,7 @@ export const user = pgTable("user", {
   dodoCustomerId: text("dodo_customer_id"),
   subscriptionStatus: text("subscription_status").default("inactive"),
   plan: text("plan").default("free"),
-  credits: integer("credits").default(30),
+  credits: integer("credits").default(45),
   createdAt: timestamp("created_at").notNull().defaultNow(),
   updatedAt: timestamp("updated_at").notNull().defaultNow(),
 })
