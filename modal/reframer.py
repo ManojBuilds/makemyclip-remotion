@@ -92,124 +92,8 @@ _FFMPEG_LONG_TIMEOUT_S = 1200
 _FFMPEG_SHORT_TIMEOUT_S = 60
 
 
-# ─────────────────────────────────────────────────────────────────────
-#  CameraProfile: tunable camera behavior presets
-# ─────────────────────────────────────────────────────────────────────
-from dataclasses import dataclass, field
-
-
-@dataclass
-class CameraProfile:
-    """Tunable camera behavior preset.
-
-    Groups all the scattered magic numbers that control pan speed, zoom,
-    dead zones, and framing into a single, swappable object.  Use the
-    ``PROFILES`` dict to select a preset by name (e.g., ``"podcast"``).
-    """
-
-    # --- Framing ---
-    face_crop_ratio: float = 0.106        # Face fills this fraction of 1920px height
-    face_vertical_anchor: float = 0.22    # Face positioned at this % from top
-    split_face_anchor: float = 0.38       # Face at this % from top in split panels
-
-    # --- Pan speed ---
-    pan_alpha_min: float = 0.05           # Minimum pan speed (sigmoid baseline)
-    pan_alpha_max: float = 0.35           # Maximum pan speed at large distances
-    pan_sigmoid_center: float = 150.0     # Distance (px) at sigmoid midpoint
-    pan_sigmoid_steepness: float = 0.025  # Sigmoid steepness factor
-
-    # --- Dead zones ---
-    dead_zone_px: float = 40.0            # Pixel dead zone on X before pan starts
-    dead_zone_y_px: float = 15.0          # Pixel dead zone on Y
-    dead_zone_scale_pct: float = 0.10     # 10% dead zone on scale shifts
-
-    # --- Speaker switching ---
-    speaker_hold_s: float = 1.5           # Seconds to hold speaker after silence
-    min_cut_s: float = 0.8               # Minimum time before speaker switch
-    look_ahead_frames: int = 8            # Interjection filter look-ahead
-
-    # --- Zoom punch ---
-    zoom_punch_magnitude: float = 0.07    # Emphasis zoom intensity
-    zoom_punch_spike_threshold: float = 1.8
-    zoom_punch_cooldown: int = 20
-
-    # --- Smoothing ---
-    vertical_dampen: float = 0.5          # Dampen vertical pan by this factor
-    scale_smooth_alpha: float = 0.15      # EMA alpha for scale changes
-    split_smooth_alpha: float = 0.04      # Split-screen tracking alpha
-    split_dead_zone: float = 25.0         # Split-screen dead zone (px)
-
-    # --- Edge handling ---
-    edge_widen_threshold: float = 0.25    # Distance from edge (fraction) to trigger widening
-    edge_widen_factor: float = 0.88       # Widen crop by this factor near edges
-
-
-# Pre-built profiles for different content types
-CAMERA_PROFILES = {
-    "default": CameraProfile(),
-    "podcast": CameraProfile(
-        pan_alpha_max=0.20,       # Slower pans — podcasters don't move much
-        min_cut_s=1.2,            # Longer hold before switching
-        dead_zone_px=50.0,        # Wider dead zone for stability
-        zoom_punch_magnitude=0.05,  # Subtler emphasis zoom
-    ),
-    "interview": CameraProfile(
-        pan_alpha_max=0.40,       # Faster pans — interviewees face each other
-        face_crop_ratio=0.12,     # Tighter face framing
-        min_cut_s=0.6,            # Quick switches in rapid conversation
-        zoom_punch_magnitude=0.08,
-    ),
-    "presentation": CameraProfile(
-        pan_alpha_max=0.15,       # Slow, deliberate pans
-        dead_zone_px=60.0,        # Very stable
-        face_crop_ratio=0.09,     # Wider shot to capture gestures
-        zoom_punch_spike_threshold=2.0,  # Only on very loud emphasis
-    ),
-}
-
-
-def mux_audio_video(
-    video_path: str,
-    audio_path: str,
-    output_path: str,
-    fps: float,
-    use_nvenc: bool = False,
-) -> None:
-    """Mux video + audio into a final MP4 with sync correction.
-
-    Replaces the 3× copy-pasted FFmpeg mux command that was scattered across
-    reframe(), batch_reframe(), and the batch fallback path.
-    """
-    video_codec = (
-        ["h264_nvenc", "-preset", "p4", "-cq", "22"]
-        if use_nvenc
-        else ["libx264", "-preset", "ultrafast", "-crf", "22"]
-    )
-
-    cmd = [
-        "ffmpeg",
-        "-y",
-        "-i", video_path,
-        "-i", audio_path,
-        "-map", "0:v:0",
-        "-map", "1:a:0",
-        "-r", str(fps),
-        "-c:v", *video_codec,
-        "-pix_fmt", "yuv420p",
-        "-profile:v", "high",
-        "-c:a", "aac",
-        "-b:a", "128k",
-        "-af", "aresample=async=1000:min_hard_comp=0.100000:first_pts=0",
-        "-movflags", "+faststart",
-        output_path,
-        "-loglevel", "panic",
-    ]
-
-    result = subprocess.run(
-        cmd, capture_output=True, text=True, timeout=_FFMPEG_LONG_TIMEOUT_S
-    )
-    if result.returncode != 0:
-        raise RenderError(f"Audio mux failed: {result.stderr[-500:]}")
+from content_classifier import classify_content
+from render_strategies import get_strategy
 
 
 def slice_tracks_and_scores(tracks, scores, sf, ef):
@@ -260,7 +144,7 @@ def annotate_transcript_layout(transcript, frame_layout, crop_mode, fps):
             w_start = w.get("start", 0.0)
             fidx = int(w_start * fps)
             
-            if crop_mode in ("split", "letterbox"):
+            if crop_mode in ("split", "letterbox", "screencast", "presentation", "panel", "gaming", "passthrough"):
                 w["layout"] = crop_mode
             elif crop_mode in ("reframe", "auto"):
                 if frame_layout and 0 <= fidx < len(frame_layout):
@@ -273,60 +157,6 @@ def annotate_transcript_layout(transcript, frame_layout, crop_mode, fps):
     return transcript
 
 
-def compute_audio_rms_energy(audio_path: str, fps: float, total_frames: int) -> list[float]:
-    """Compute per-frame RMS audio energy for zoom punch detection.
-
-    Reads the 16kHz mono WAV that the pipeline already extracts and computes
-    RMS energy in windows aligned to video frames.  Returns a list of length
-    ``total_frames`` with normalized RMS values (0.0–1.0).
-    """
-    import numpy as np
-
-    try:
-        from scipy.io import wavfile
-
-        if not os.path.exists(audio_path) or os.path.getsize(audio_path) == 0:
-            return [0.0] * total_frames
-
-        sr, aud = wavfile.read(audio_path)
-        if len(aud) == 0:
-            return [0.0] * total_frames
-
-        # Convert to float32 normalized
-        if aud.dtype == np.int16:
-            aud = aud.astype(np.float32) / 32768.0
-        elif aud.dtype == np.int32:
-            aud = aud.astype(np.float32) / 2147483648.0
-        else:
-            aud = aud.astype(np.float32)
-
-        # If stereo, take mono average
-        if aud.ndim > 1:
-            aud = aud.mean(axis=1)
-
-        samples_per_frame = int(sr / fps) if fps > 0 else sr // 25
-        rms_per_frame = []
-        for fidx in range(total_frames):
-            start_sample = fidx * samples_per_frame
-            end_sample = start_sample + samples_per_frame
-            if start_sample >= len(aud):
-                rms_per_frame.append(0.0)
-            else:
-                chunk = aud[start_sample:min(end_sample, len(aud))]
-                rms = float(np.sqrt(np.mean(chunk ** 2))) if len(chunk) > 0 else 0.0
-                rms_per_frame.append(rms)
-
-        # Normalize to 0.0–1.0 range
-        max_rms = max(rms_per_frame) if rms_per_frame else 1.0
-        if max_rms > 0:
-            rms_per_frame = [r / max_rms for r in rms_per_frame]
-
-        return rms_per_frame
-    except Exception as e:
-        logger.warning("Failed to compute audio RMS energy: %s", e)
-        return [0.0] * total_frames
-
-
 def get_autocast_context(device_type: str = "cuda", enabled: bool = True):
     """Return modern PyTorch 2.x torch.amp.autocast context with fallback for PyTorch 1.x."""
     import torch
@@ -337,41 +167,6 @@ def get_autocast_context(device_type: str = "cuda", enabled: bool = True):
     else:
         from contextlib import nullcontext
         return nullcontext()
-
-
-def is_valid_face_track(tr, sc, frame_height: float = 2160.0) -> tuple[bool, float, float, float, float]:
-    """Evaluate if a face track is valid/real (not noise, background poster, or fake face).
-
-    Applies the following filters:
-    1. Size Threshold Filter: Ignore faces/photos whose bounding height size is less than 5% of frame height (or mean size < 75px on 4K)
-       to automatically filter out background posters, album art, and desk photographs.
-    2. ASD & Movement Filter: Static background images with low ASD score (< 0.25) and static position (movement < 5.0px) are purged.
-    """
-    import numpy as np
-
-    max_score = float(np.max(sc)) if len(sc) > 0 else 0.0
-    xs = tr["proc_track"]["x"]
-    ys = tr["proc_track"]["y"]
-    movement = float(np.std(xs) + np.std(ys)) if len(xs) > 0 else 0.0
-
-    sizes = tr["proc_track"]["s"]
-    mean_size = float(np.mean(sizes)) if len(sizes) > 0 else 1.0
-    rel_movement = movement / mean_size if mean_size > 0 else 0.0
-
-    # 5% of frame height threshold (e.g. 108px on 4K 2160p, 54px on 1080p)
-    min_size_threshold = max(54.0, frame_height * 0.05)
-
-    is_valid = True
-    if mean_size < min_size_threshold and max_score < 0.35:
-        # Background poster / desk photo on shelf
-        is_valid = False
-    elif max_score < 0.25 and movement < 5.0:
-        # Static background element
-        is_valid = False
-    elif max_score < 0.12 and (movement < 10.0 and rel_movement < 0.08):
-        is_valid = False
-
-    return is_valid, max_score, movement, rel_movement, mean_size
 
 
 @app.cls(
@@ -1307,12 +1102,21 @@ class AIReframe:
         # Rolling median smoothing buffer for raw face coordinates per track (filters S3FD detection noise)
         track_coord_buffers = {tidx_item: deque(maxlen=5) for tidx_item in range(len(tracks))}
 
+        # Determine source video height for normalized filtering
+        src_h = 1080.0
+        if frames_mem is not None and len(frames_mem) > 0:
+            src_h = float(frames_mem[0].shape[0])
+        elif video_path is not None:
+            try:
+                info = self.get_video_info(video_path)
+                src_h = float(info.get("height", 1080) or 1080)
+            except Exception:
+                src_h = 1080.0
+
         for tidx, tr in enumerate(tracks):
             sc = scores[tidx]
 
             # --- FAKE FACE FILTER ---
-            # Source frame height for thresholding
-            src_h = frames_mem[0].shape[0] if (frames_mem is not None and len(frames_mem) > 0) else 2160.0
             is_valid, track_max_score, movement, rel_movement, mean_size = is_valid_face_track(tr, sc, frame_height=src_h)
 
             logger.info(
@@ -1397,7 +1201,6 @@ class AIReframe:
         valid_tracks = []
         for tidx, tr in enumerate(tracks):
             sc = scores[tidx]
-            src_h = frames_mem[0].shape[0] if (frames_mem is not None and len(frames_mem) > 0) else 2160.0
             is_valid, track_max_score, movement, rel_movement, mean_size = is_valid_face_track(tr, sc, frame_height=src_h)
             if is_valid:
                 valid_tracks.append((tidx, tr, track_max_score, len(tr["track"]["frame"])))
@@ -1502,11 +1305,10 @@ class AIReframe:
         # Lower value = slower, smoother pan. Snappy tracking: 0.06
         SMOOTHING_ALPHA = 0.06
 
-        # --- Zoom Punch state (audio-driven emphasis zoom) ---
         audio_rms = None
         if audio_wav_path:
             audio_rms = compute_audio_rms_energy(audio_wav_path, fps, max_frames)
-            if audio_rms and any(r > 0 for r in audio_rms):
+            if audio_rms is not None and len(audio_rms) > 0 and bool(np.any(audio_rms > 0)):
                 logger.info("Zoom punch: loaded %d frames of RMS audio energy", len(audio_rms))
             else:
                 audio_rms = None
@@ -1546,7 +1348,7 @@ class AIReframe:
         # Pre-compute layout per frame based on strict scene boundaries.
         # This completely prevents "random" layout changes mid-scene.
         frame_layout = ["single"] * max_frames
-        if crop_mode in ("split", "letterbox"):
+        if crop_mode in ("split", "letterbox", "screencast", "presentation", "panel", "gaming", "passthrough"):
             mapped = crop_mode
             frame_layout = [mapped] * max_frames
         else:
@@ -1590,14 +1392,23 @@ class AIReframe:
         camera_displacements = []
         prev_cx_metric = None
 
-        def _write_frame(frame_out):
-            vout.write(frame_out)
-
-        # Level 100: Precompute scene cuts to prevent camera sliding across scene transitions
+        # Precompute scene cuts to prevent camera sliding across scene transitions
         scene_starts = set()
         if scene_bounds:
             for sf, ef in scene_bounds:
                 scene_starts.add(sf)
+
+        # Unified persistent state dictionary across all frames for strategies
+        render_state: dict[str, Any] = {
+            "current_cx": None,
+            "current_target_cx": None,
+            "current_cy_reframe": None,
+            "current_target_cy_reframe": None,
+            "prev_target_cx": None,
+            "scene_median_s": scene_median_s,
+            "scene_starts": scene_starts,
+        }
+
         try:
             current_zoom = 1.10
             for fidx in range(max_frames):
@@ -1630,24 +1441,20 @@ class AIReframe:
 
                 # Reset split-screen tracking state on layout transitions to prevent stale camera positions
                 if use_split_screen and fidx > 0 and frame_layout[fidx - 1] != "split":
-                    split_cx_top = None
-                    split_cy_top = None
-                    split_s_top = None
-                    split_target_cx_top = None
-                    split_target_cy_top = None
-                    split_target_s_top = None
-                    split_cx_bottom = None
-                    split_cy_bottom = None
-                    split_s_bottom = None
-                    split_target_cx_bottom = None
-                    split_target_cy_bottom = None
-                    split_target_s_bottom = None
+                    render_state.pop("split_cx_top", None)
+                    render_state.pop("split_cy_top", None)
+                    render_state.pop("split_s_top", None)
+                    render_state.pop("split_target_cx_top", None)
+                    render_state.pop("split_target_cy_top", None)
+                    render_state.pop("split_target_s_top", None)
+                    render_state.pop("split_cx_bottom", None)
+                    render_state.pop("split_cy_bottom", None)
+                    render_state.pop("split_s_bottom", None)
+                    render_state.pop("split_target_cx_bottom", None)
+                    render_state.pop("split_target_cy_bottom", None)
+                    render_state.pop("split_target_s_bottom", None)
 
                 # --- Look-ahead Interjection Filter ---
-                # If the current "best" speaker is different from the last one,
-                # verify they continue speaking for at least 10 frames before switching.
-                # This prevents the camera from bouncing for a "Yeah" or "Right".
-                # Minimum Stability Duration: 8-frame (~300ms) look-ahead window prevents back-and-forth bouncing on brief interjections
                 look_ahead_frames = 8
                 potential_best = None
                 if faces[fidx]:
@@ -1675,20 +1482,17 @@ class AIReframe:
                     if active_count < (look_ahead_frames // 2):
                         is_interjection = True
 
-                # Sticky-speaker selection for multi-speaker overlap arbitration (mic holder & score margin priority):
+                # Sticky-speaker selection for multi-speaker overlap arbitration:
                 if faces[fidx] and not is_interjection:
                     if current_track_id is not None:
                         same_track = [
                             f for f in faces[fidx] if f["tidx"] == current_track_id
                         ]
-                        # Prioritize primary audio source / larger face size (microphone holder) in overlap scenarios
-                        # Require a minimum score margin of 0.15 + face size weighting before switching
                         if potential_best and potential_best["score"] > 0.45:
                             current_score = same_track[0]["score"] if same_track else 0.0
                             current_size = same_track[0]["s"] if same_track else 1.0
                             pot_size = potential_best["s"]
                             
-                            # Size bonus multiplier: larger face (mic holder / closer) gets up to 10% boost
                             size_ratio = pot_size / max(current_size, 1.0)
                             size_bonus = 0.05 if size_ratio > 1.15 else 0.0
                             
@@ -1720,14 +1524,10 @@ class AIReframe:
                     held_speaker_x = best["x"]
                     held_speaker_y = best["y"]
                     held_speaker_s = best["s"]
-
-                    # Constant stable speaker framing scale (eliminates repeated zoom jumps)
                     held_speaker_zoom = 0.106
-
                     frames_since_active = 0
                     target_cx = int(held_speaker_x * scale)
                 elif held_speaker_x is not None:
-                    # Hold the last active speaker indefinitely during pauses.
                     frames_since_active += 1
                     frames_on_current_speaker += 1
                     target_cx = int(held_speaker_x * scale)
@@ -1735,391 +1535,30 @@ class AIReframe:
                     target_cx = int(full_x_solo[fidx] * scale)
                     frames_on_current_speaker += 1
 
-                if use_multi_face_letterbox:
-                    # Use dynamic blurred background for premium letterboxing
-                    bg = _make_blurred_bg(img)
+                # Update per-frame dynamic attributes on the persistent render_state
+                render_state["target_cx"] = target_cx
+                render_state["held_speaker_y"] = held_speaker_y
+                render_state["held_speaker_s"] = held_speaker_s
+                render_state["speaker_switched"] = speaker_switched
+                render_state["scene_median_s"] = scene_median_s
 
-                    CARD_W = 1080  # Full width, no padding
-                    CARD_H = int(
-                        1920 * LETTERBOX_TARGET_HEIGHT_RATIO
-                    )  # Dynamic vertical card height based on target ratio
+                # Resolve strategy for the current frame layout
+                strategy = get_strategy(current_layout)
+                frame_out = strategy.render_frame(
+                    img=img,
+                    fidx=fidx,
+                    faces_fidx=faces[fidx] if fidx < len(faces) else [],
+                    state=render_state,
+                )
 
-                    # If no speaker is actively tracked, hold camera position or use visual saliency for B-roll/slides
-                    if target_cx is None:
-                        if current_cx is not None:
-                            target_cx = current_target_cx
-                        else:
-                            # Saliency / text density fallback: Canny edge centroid on downsampled frame
-                            try:
-                                gray_small = cv2.cvtColor(cv2.resize(img, (320, 180)), cv2.COLOR_BGR2GRAY)
-                                edges = cv2.Canny(gray_small, 50, 150)
-                                col_sum = edges.sum(axis=0)
-                                if col_sum.sum() > 0:
-                                    col_idx = np.arange(320, dtype=np.float32)
-                                    saliency_cx_pct = float((col_idx * col_sum).sum() / col_sum.sum()) / 320.0
-                                    target_cx = int(saliency_cx_pct * img.shape[1] * scale)
-                                else:
-                                    target_cx = int((img.shape[1] / img.shape[0]) * 1920 / 2)
-                            except Exception:
-                                target_cx = int((img.shape[1] / img.shape[0]) * 1920 / 2)
-
-                    if current_cx is None:
-                        current_cx = float(target_cx)
-                        current_target_cx = float(target_cx)
-
-                    # Tighter camera pan for OpusClip feel
-                    LETTERBOX_DEAD_ZONE = 30
-                    PAN_SMOOTHING = 0.08
-                    if target_cx - current_target_cx > LETTERBOX_DEAD_ZONE:
-                        current_target_cx = float(target_cx - LETTERBOX_DEAD_ZONE)
-                    elif current_target_cx - target_cx > LETTERBOX_DEAD_ZONE:
-                        current_target_cx = float(target_cx + LETTERBOX_DEAD_ZONE)
-
-                    current_cx = (
-                        current_cx + (current_target_cx - current_cx) * PAN_SMOOTHING
-                    )
-                    prev_target_cx = float(target_cx)
-
-                    # AI Reaction Zoom
-                    target_zoom = 1.10
-                    if best and best.get("score", 0) > 0.8:
-                        target_zoom = 1.15
-
-                    current_zoom += (target_zoom - current_zoom) * 0.08
-                    zoom = current_zoom
-
-                    scale_card = (CARD_H * zoom) / img.shape[0]
-                    scaled_h = int(CARD_H * zoom)
-                    scaled_w = int(img.shape[1] * scale_card)
-
-                    res_scaled = cv2.resize(
-                        img, (scaled_w, scaled_h), interpolation=cv2.INTER_AREA
-                    )
-
-                    # current_cx was computed in 1920-height scale. Convert it to the new zoomed height scale.
-                    cx_card = current_cx * (scaled_h / 1920.0)
-                    tx = max(min(int(cx_card) - CARD_W // 2, scaled_w - CARD_W), 0)
-
-                    # Crop the TOP portion of the zoomed video, completely removing the bottom 10% (watermark zone)
-                    ty = 0
-                    res = res_scaled[ty : ty + CARD_H, tx : tx + CARD_W]
-
-                    start_x = 0  # Full width, no padding
-
-                    # Shift video down to leave room at the top for the hook text, balanced for the larger height
-                    start_y = 310
-
-                    H, W = res.shape[:2]
-
-                    # Blend directly onto background (no shadow, no rounded corners)
-                    bg[start_y : start_y + H, start_x : start_x + W] = res
-                    _write_frame(bg)
-
-                elif use_split_screen:
-                    # --- Vizard/Opus-style: Dynamic Multi-Speaker ASD Split Layout ---
-                    face_top = None
-                    face_bottom = None
-
-                    if fidx < len(faces) and len(faces[fidx]) > 0:
-                        all_faces = faces[fidx]
-                        if len(all_faces) >= 2:
-                            # Sort left-to-right across the stage: Leftmost face -> Top panel, Rightmost face -> Bottom panel
-                            sorted_lr = sorted(all_faces, key=lambda f: f["x"])
-                            face_top = sorted_lr[0]
-                            face_bottom = sorted_lr[-1]
-                        elif len(all_faces) == 1:
-                            single_face = all_faces[0]
-                            mid_x = (img.shape[1] * scale) / 2.0
-                            if single_face["x"] < mid_x:
-                                face_top = single_face
-                            else:
-                                face_bottom = single_face
-
-                    # Prevent duplicate slot framing: if top and bottom are too close horizontally, offset bottom
-                    if face_top and face_bottom and abs(face_top["x"] - face_bottom["x"]) < 100.0:
-                        face_bottom = None
-
-                    # Smooth tracking — top person (with dead-zones and tripod-like SPLIT_ALPHA = 0.03)
-                    if face_top is not None:
-                        if split_cx_top is None:
-                            split_cx_top = float(face_top["x"])
-                            split_cy_top = float(face_top["y"])
-                            split_s_top = float(face_top["s"])
-                            split_target_cx_top = float(face_top["x"])
-                            split_target_cy_top = float(face_top["y"])
-                            split_target_s_top = float(face_top["s"])
-                        else:
-                            # Level 1000: Stabilized 25px dead zone for tripod-like split screen
-                            SPLIT_DEAD_ZONE = 25.0
-                            if abs(face_top["x"] - split_target_cx_top) > SPLIT_DEAD_ZONE:
-                                split_target_cx_top = float(face_top["x"])
-                            if abs(face_top["y"] - split_target_cy_top) > SPLIT_DEAD_ZONE:
-                                split_target_cy_top = float(face_top["y"])
-                            # 10% dead zone on size
-                            if abs(face_top["s"] - split_target_s_top) > (
-                                split_target_s_top * 0.10
-                            ):
-                                split_target_s_top = float(face_top["s"])
-
-                            # Slower smoothing alpha (0.04) for cinematic stability in split layout
-                            SPLIT_ALPHA = 0.04
-                            split_cx_top += (
-                                split_target_cx_top - split_cx_top
-                            ) * SPLIT_ALPHA
-                            split_cy_top += (
-                                split_target_cy_top - split_cy_top
-                            ) * SPLIT_ALPHA
-                            split_s_top += (split_target_s_top - split_s_top) * SPLIT_ALPHA
-
-                    # Smooth tracking — bottom person (with dead-zones and tripod-like SPLIT_ALPHA = 0.03)
-                    if face_bottom is not None:
-                        if split_cx_bottom is None:
-                            split_cx_bottom = float(face_bottom["x"])
-                            split_cy_bottom = float(face_bottom["y"])
-                            split_s_bottom = float(face_bottom["s"])
-                            split_target_cx_bottom = float(face_bottom["x"])
-                            split_target_cy_bottom = float(face_bottom["y"])
-                            split_target_s_bottom = float(face_bottom["s"])
-                        else:
-                            # Level 1000: Stabilized 25px dead zone for tripod-like split screen
-                            SPLIT_DEAD_ZONE = 25.0
-                            if (
-                                abs(face_bottom["x"] - split_target_cx_bottom)
-                                > SPLIT_DEAD_ZONE
-                            ):
-                                split_target_cx_bottom = float(face_bottom["x"])
-                            if (
-                                abs(face_bottom["y"] - split_target_cy_bottom)
-                                > SPLIT_DEAD_ZONE
-                            ):
-                                split_target_cy_bottom = float(face_bottom["y"])
-                            # 10% dead zone on size
-                            if abs(face_bottom["s"] - split_target_s_bottom) > (
-                                split_target_s_bottom * 0.10
-                            ):
-                                split_target_s_bottom = float(face_bottom["s"])
-
-                            # Slower smoothing alpha (0.04) for cinematic stability in split layout
-                            SPLIT_ALPHA = 0.04
-                            split_cx_bottom += (
-                                split_target_cx_bottom - split_cx_bottom
-                            ) * SPLIT_ALPHA
-                            split_cy_bottom += (
-                                split_target_cy_bottom - split_cy_bottom
-                            ) * SPLIT_ALPHA
-                            split_s_bottom += (
-                                split_target_s_bottom - split_s_bottom
-                            ) * SPLIT_ALPHA
-
-                    final_frame = np.zeros((1920, 1080, 3), dtype=np.uint8)
-                    img_h, img_w = img.shape[:2]
-
-                    # Check scores to highlight active speaker panel vs listener panel
-                    score_top = face_top.get("score", 0.0) if face_top else 0.0
-                    score_bottom = face_bottom.get("score", 0.0) if face_bottom else 0.0
-
-                    # We iterate over top (left speaker) and bottom (right speaker) slots
-                    for is_top, y_start in [(True, 0), (False, 960)]:
-                        sub_img = img  # Crop directly from full source frame to avoid slicing faces in half
-                        if is_top:
-                            cx = split_cx_top
-                            cy = split_cy_top
-                            s = split_s_top
-                            is_active_speaker = (score_top > ACTIVE_SPEAKER_THRESHOLD and score_top >= score_bottom)
-                        else:
-                            cx = split_cx_bottom
-                            cy = split_cy_bottom
-                            s = split_s_bottom
-                            is_active_speaker = (score_bottom > ACTIVE_SPEAKER_THRESHOLD and score_bottom > score_top)
-
-                        sub_h, sub_w = sub_img.shape[:2]
-
-                        # Fallback to Left/Right stage anchors if face tracking is not available
-                        if cx is None:
-                            # Top panel = Left Speaker (~28% x), Bottom panel = Right Speaker (~72% x)
-                            cx_rel = sub_w * 0.28 if is_top else sub_w * 0.72
-                            cy_rel = sub_h * 0.25  # Seated podcast speaker head level (~270px)
-                        else:
-                            cx_rel = float(cx)
-                            cy_rel = float(cy) if cy is not None else sub_h * 0.25
-
-                        # Ensure coordinates are within sub-image boundaries
-                        cx_rel = max(0.0, min(cx_rel, float(sub_w)))
-                        cy_rel = max(0.0, min(cy_rel, float(sub_h)))
-
-                        # ---- OpusClip-quality FIXED crop size ----
-                        # Use 44% of frame width (844px out of 1920) for 1080:960 aspect ratio (750px height).
-                        # This frames head, shoulders, chest, mic & hand gestures cleanly with ZERO head cutoff.
-                        crop_w = float(sub_w) * 0.44
-                        crop_h = crop_w / 1.125  # 1080:960 aspect ratio
-
-                        # Ensure crop doesn't exceed frame bounds
-                        crop_w = min(crop_w, float(sub_w))
-                        crop_h = min(crop_h, float(sub_h))
-
-                        # Position crop: center horizontally on face, face at 22% from top vertically
-                        # 22% ensures at least ~165px of headroom above face center so hair and head are NEVER cut off
-                        x1 = cx_rel - crop_w / 2.0
-                        y1 = cy_rel - crop_h * 0.22
-
-                        # Clamp crop box to stay inside the source frame
-                        x1 = max(0.0, min(x1, sub_w - crop_w))
-                        y1 = max(0.0, min(y1, sub_h - crop_h))
-
-                        x2 = x1 + crop_w
-                        y2 = y1 + crop_h
-
-                        crop = sub_img[int(y1) : int(y2), int(x1) : int(x2)]
-                        if crop.shape[0] > 0 and crop.shape[1] > 0:
-                            resized = cv2.resize(
-                                crop, (1080, 960), interpolation=cv2.INTER_AREA
-                            )
-                            # Dim listener panel slightly to bring visual focus to active speaker
-                            if not is_active_speaker and (score_top > ACTIVE_SPEAKER_THRESHOLD or score_bottom > ACTIVE_SPEAKER_THRESHOLD):
-                                resized = cv2.convertScaleAbs(resized, alpha=SPLIT_LISTENER_DIM, beta=0)
-
-                            final_frame[y_start : y_start + 960, 0:1080] = resized
-
-                    # Draw 4px separator line between top and bottom panels
-                    final_frame[958:962, :] = (40, 40, 40)
-                    _write_frame(final_frame)
-                    prev_target_cx = None
-
-                elif target_cx is not None or current_cx is not None:
-                    # --- Smooth Camera Movement (Single Full-Screen, Reframe) ---
-                    virtual_w = img.shape[1] * scale
-                    virtual_h = img.shape[0] * scale
-
-                    # Fallback to current if target dropped temporarily
-                    if target_cx is None:
-                        target_cx = current_cx
-                        target_cy = (
-                            current_cy_reframe
-                            if current_cy_reframe is not None
-                            else virtual_h / 2.0
-                        )
-                        target_s = scene_median_s if scene_median_s is not None else virtual_w * 0.08
-                    else:
-                        target_cy = (
-                            (held_speaker_y * scale)
-                            if held_speaker_y is not None
-                            else virtual_h / 2.0
-                        )
-                        target_s = scene_median_s if scene_median_s is not None else (held_speaker_s * scale)
-
-                    # Level 100: Scene cut hard reset (snap camera ONLY on actual video scene edit cuts)
-                    is_scene_start = fidx in scene_starts
-
-                    # Initialize on first frame or hard cut ONLY on true scene edits (prevents 1s abrupt flicker on speaker switches)
-                    if current_cx is None or is_scene_start:
-                        current_cx = float(target_cx)
-                        current_target_cx = float(target_cx)
-                        current_cy_reframe = float(target_cy)
-                        current_target_cy_reframe = float(target_cy)
-                    elif speaker_switched:
-                        # Smooth transition interpolation across speaker switches: glide viewport over ~6 frames instead of snapping
-                        current_target_cx = float(target_cx)
-                        current_target_cy_reframe = float(target_cy)
-
-                    # Dead-zone on X
-                    DEAD_ZONE_PX = 15.0
-                    if target_cx - current_target_cx > DEAD_ZONE_PX:
-                        current_target_cx = float(target_cx - DEAD_ZONE_PX)
-                    elif current_target_cx - target_cx > DEAD_ZONE_PX:
-                        current_target_cx = float(target_cx + DEAD_ZONE_PX)
-
-                    # 15px dead-zone on Y-axis
-                    DEAD_ZONE_Y = 15.0
-                    if abs(target_cy - current_target_cy_reframe) > DEAD_ZONE_Y:
-                        current_target_cy_reframe = float(target_cy)
-
-
-                    # Level 1000: Sigmoid Adaptive Easing & Smooth Panning Transition
-                    # Faster panning: increased sigmoid ceiling from 0.25→0.40 with velocity boost
-                    dist_x = abs(current_target_cx - current_cx)
-                    if dist_x < 15.0:
-                        # Stabilization lock: lock camera on stationary speaker
-                        adaptive_alpha = 0.0
-                    else:
-                        # Sigmoid S-curve acceleration/deceleration for fluid studio camera pan
-                        sigmoid_factor = 1.0 / (1.0 + _math.exp(-0.025 * (dist_x - 150.0)))
-                        # Velocity-dependent acceleration: faster when target is moving fast
-                        velocity = abs(current_target_cx - (prev_target_cx or current_target_cx)) if prev_target_cx is not None else 0.0
-                        velocity_boost = min(0.12, velocity / 500.0)
-                        adaptive_alpha = 0.05 + (0.35 + velocity_boost) * sigmoid_factor
-
-                    if adaptive_alpha > 0.0:
-                        current_cx += (current_target_cx - current_cx) * adaptive_alpha
-                        current_cy_reframe += (
-                            current_target_cy_reframe - current_cy_reframe
-                        ) * (
-                            adaptive_alpha * 0.5
-                        )  # Dampen vertical movement by 50% for gimbal-like stability
-
-                    # Fixed stable face framing — use scene-level median face scale (CONSTANT)
-                    face_size_pct = 0.106
-                    locked_s = (scene_median_s * scale) if scene_median_s is not None else max(current_s_reframe or 1.0, 1.0)
-
-                    person_scale = (1920.0 * face_size_pct) / max(locked_s, 1.0)
-                    min_s = max(1080.0 / virtual_w, 1920.0 / virtual_h)
-
-                    person_scale = max(person_scale, min_s)
-                    person_scale = min(person_scale, 4.0)
-
-                    crop_w = 1080.0 / person_scale
-                    crop_h = 1920.0 / person_scale
-
-                    # Clamp crop to virtual bounds
-                    crop_w = min(crop_w, virtual_w)
-                    crop_h = min(crop_h, virtual_h)
-
-                    # Maintain 1080:1920 aspect ratio
-                    if crop_w * 1920.0 > crop_h * 1080.0:
-                        crop_w = crop_h * (1080.0 / 1920.0)
-                    else:
-                        crop_h = crop_w * (1920.0 / 1080.0)
-
-                    # Face positioned at ~22% from top (upper third rule for high engagement vertical video)
-                    x1_virtual = current_cx - crop_w / 2.0
-                    y1_virtual = current_cy_reframe - crop_h * 0.22
-
-                    # Bounds check in virtual space
-                    x1_virtual = max(0.0, min(x1_virtual, virtual_w - crop_w))
-                    y1_virtual = max(0.0, min(y1_virtual, virtual_h - crop_h))
-
-                    # Map back to original image space
-                    x1 = x1_virtual / scale
-                    y1 = y1_virtual / scale
-                    crop_w_orig = crop_w / scale
-                    crop_h_orig = crop_h / scale
-
-                    crop = img[
-                        int(y1) : int(y1 + crop_h_orig), int(x1) : int(x1 + crop_w_orig)
-                    ]
-                    if crop.shape[0] > 0 and crop.shape[1] > 0:
-                        res = cv2.resize(crop, (1080, 1920), interpolation=cv2.INTER_AREA)
-                        _write_frame(res)
-                    else:
-                        # Emergency fallback
-                        res = cv2.resize(img, None, fx=scale, fy=scale)
-                        tx = max(min(res.shape[1] // 2 - 540, res.shape[1] - 1080), 0)
-                        _write_frame(res[0:1920, tx : tx + 1080])
-
-                    prev_target_cx = float(target_cx)
-                else:
-                    prev_target_cx = None
-                    current_cx = None
-                    # Fallback if no target is found but we aren't in split or letterbox
-                    # Just render center of the original video
-                    res = cv2.resize(img, None, fx=scale, fy=scale)
-                    tx = max(min(res.shape[1] // 2 - 540, res.shape[1] - 1080), 0)
-                    _write_frame(res[0:1920, tx : tx + 1080])
+                vout.write(frame_out)
 
                 # Telemetry: record camera displacement
-                if current_cx is not None:
+                curr_cx = render_state.get("current_cx")
+                if curr_cx is not None:
                     if prev_cx_metric is not None:
-                        camera_displacements.append(abs(current_cx - prev_cx_metric))
-                    prev_cx_metric = current_cx
+                        camera_displacements.append(abs(curr_cx - prev_cx_metric))
+                    prev_cx_metric = curr_cx
 
         finally:
             if video_reader is not None:
@@ -2263,27 +1702,59 @@ class AIReframe:
                 timeout=_FFMPEG_LONG_TIMEOUT_S,
             )
 
-            logger.info(
-                "Running tracking/extraction with crop_mode=%s...",
-                req.crop_mode,
-            )
-            try:
-                tracks, scores, audio, pyf, pya, scene_bounds = self.get_tracks_and_scores(
-                    vurl,
-                    effective_start,
-                    duration_secs,
-                    tmpdir,
+            # Normalization / auto-detection of crop_mode
+            requested_crop_mode = req.crop_mode or "auto"
+            if requested_crop_mode == "course":
+                requested_crop_mode = "screencast"
+
+            crop_mode = requested_crop_mode
+            skip_tracking = False
+            if crop_mode == "auto":
+                classification = classify_content(
+                    video_path=vurl,
+                    width=video_info.get("width", 1920) or 1920,
+                    height=video_info.get("height", 1080) or 1080,
                     fps=fps,
-                    audio_url=segment_audio,
+                    duration=duration_secs,
+                    start_time=effective_start,
                 )
                 logger.info(
-                    "Face tracking done in %.1fs, found %d tracks",
-                    time.time() - t0,
-                    len(tracks),
+                    "Content classification: type=%s, confidence=%.2f, recommended_mode=%s",
+                    classification.content_type,
+                    classification.confidence,
+                    classification.recommended_crop_mode,
                 )
+                if classification.recommended_crop_mode != "auto":
+                    crop_mode = classification.recommended_crop_mode
+                skip_tracking = classification.skip_face_tracking
+
+            logger.info(
+                "Running tracking/extraction with crop_mode=%s (skip_tracking=%s)...",
+                crop_mode,
+                skip_tracking,
+            )
+            try:
+                if skip_tracking:
+                    tracks, scores = [], []
+                    audio, pyf, pya = None, None, os.path.join(tmpdir, "pyavi")
+                    os.makedirs(pya, exist_ok=True)
+                    scene_bounds = [(0, max(1, int(round(duration_secs * fps))))]
+                else:
+                    tracks, scores, audio, pyf, pya, scene_bounds = self.get_tracks_and_scores(
+                        vurl,
+                        effective_start,
+                        duration_secs,
+                        tmpdir,
+                        fps=fps,
+                        audio_url=segment_audio,
+                    )
+                    logger.info(
+                        "Face tracking done in %.1fs, found %d tracks",
+                        time.time() - t0,
+                        len(tracks),
+                    )
 
                 # 4. Render vertical
-                crop_mode = req.crop_mode
                 reported_crop_mode = crop_mode
                 if crop_mode == "auto":
                     reported_crop_mode = self.classify_layout(
@@ -2880,7 +2351,11 @@ class AIReframe:
                             clip_tracks.append(new_track)
                             clip_scores.append(new_scores)
 
-                        crop_mode = clip_req.crop_mode
+                        req_crop_mode = clip_req.crop_mode or "auto"
+                        if req_crop_mode == "course":
+                            req_crop_mode = "screencast"
+
+                        crop_mode = req_crop_mode
                         reported_crop_mode = crop_mode
                         if crop_mode == "auto":
                             reported_crop_mode = self.classify_layout(

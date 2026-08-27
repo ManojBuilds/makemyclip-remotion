@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 import os
 import subprocess
+import wave
 import numpy as np
 try:
     import cv2

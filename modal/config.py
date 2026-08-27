@@ -23,8 +23,6 @@ logger = logging.getLogger("makemyclip")
 # --- Modal App ---
 app = modal.App("makemyclip-ai-rendering")
 
-# --- Local Python sources to bundle into the container ---
-# Modal needs to know which sibling modules to ship into the image.
 _LOCAL_SOURCES = (
     "config",
     "models",
@@ -43,6 +41,8 @@ _LOCAL_SOURCES = (
     "camera_engine",
     "layout_classifier",
     "video_utils",
+    "content_classifier",
+    "render_strategies",
 )
 
 # --- Image ---

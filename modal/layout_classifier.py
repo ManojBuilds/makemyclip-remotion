@@ -35,7 +35,7 @@ def is_valid_face_track(tr, sc, frame_height: float = 2160.0) -> tuple[bool, flo
 
     # Face size check: handle both normalized (0.0-1.0) and pixel scale
     s_norm = mean_s / frame_height if mean_s > 1.0 else mean_s
-    if s_norm < 0.010:  # Ignore tiny artifacts <1% of height
+    if s_norm < 0.005:  # Ignore tiny artifacts <0.5% of height
         return False, mean_sc, max_sc, mean_s, float(dur)
 
     # Face variance check: motionless poster check (only reject if variance is essentially 0 AND ASD score is near 0)
@@ -98,43 +98,3 @@ def classify_layout(tracks: list, scores: list, width: int, height: int) -> str:
     # Default for single speaker or non-overlapping speakers: Single vertical reframe
     return "reframe"
 
-    if num_columns == 1:
-        tidx, tr = columns[0]["tracks"][0]
-        avg_face_width_pct = float(np.mean(tr["proc_track"]["s"])) / float(width)
-        if avg_face_width_pct < 0.022:
-            return "letterbox"
-        return "reframe"
-
-    elif num_columns == 2:
-        mu_x1 = columns[0]["mean_x"]
-        mu_x2 = columns[1]["mean_x"]
-
-        if not has_temporal_overlap:
-            return "reframe"
-
-        is_split_candidate = (mu_x1 < 0.48 and mu_x2 > 0.52) or (
-            mu_x2 < 0.48 and mu_x1 > 0.52
-        )
-
-        def has_speaking_track(col):
-            for tidx, tr in col["tracks"]:
-                sc = scores[tidx]
-                if len(sc) > 0 and np.max(sc) >= 0.35:
-                    return True
-            return False
-
-        at_least_one_speaks = has_speaking_track(columns[0]) or has_speaking_track(columns[1])
-
-        if is_split_candidate and at_least_one_speaks:
-            return "split"
-
-        tidx1, tr1 = columns[0]["tracks"][0]
-        tidx2, tr2 = columns[1]["tracks"][0]
-        w1 = float(np.mean(tr1["proc_track"]["s"])) / float(width)
-        w2 = float(np.mean(tr2["proc_track"]["s"])) / float(width)
-        if w1 < 0.022 or w2 < 0.022:
-            return "letterbox"
-
-        return "reframe"
-    else:
-        return "letterbox"

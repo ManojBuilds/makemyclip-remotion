@@ -472,9 +472,27 @@ class VideoAnalyzer:
                         "recommended_layout": scene_layout,
                     })
 
+            # Run global heuristic content classification
+            from content_classifier import classify_content
+            content_classification = classify_content(
+                video_path=vurl,
+                width=int(width),
+                height=int(height),
+                fps=float(fps),
+                duration=float(duration_secs),
+                start_time=float(start_sec),
+                known_face_count=len(global_tracks),
+            )
+            logger.info(
+                "Global content classification: type=%s, confidence=%.2f, recommended_crop_mode=%s",
+                content_classification.content_type,
+                content_classification.confidence,
+                content_classification.recommended_crop_mode,
+            )
+
             # Build comprehensive analysis object
             analysis_data = {
-                "version": "1.0",
+                "version": "1.1",
                 "project_id": req.project_id,
                 "video_info": {
                     "width": width,
@@ -482,6 +500,12 @@ class VideoAnalyzer:
                     "fps": fps,
                     "duration_s": round(duration_secs, 2),
                     "total_frames": int(duration_secs * fps),
+                },
+                "content_classification": {
+                    "content_type": content_classification.content_type,
+                    "confidence": content_classification.confidence,
+                    "recommended_crop_mode": content_classification.recommended_crop_mode,
+                    "skip_face_tracking": content_classification.skip_face_tracking,
                 },
                 "tracking_summary": {
                     "detect_skip": req.detect_skip,
@@ -494,7 +518,6 @@ class VideoAnalyzer:
                 "scene_layouts": scene_layouts,
                 "tracks": serialize_tracks_and_scores(global_tracks, global_scores, fps),
             }
-
             # Save and upload analysis.json to R2
             local_analysis_file = os.path.join(tmpdir, f"analysis_{req.project_id}.json")
             with open(local_analysis_file, "w") as f:
