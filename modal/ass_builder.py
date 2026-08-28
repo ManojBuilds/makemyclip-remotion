@@ -555,6 +555,40 @@ def _chunk_into_phrases(
     return groups
 
 
+# ── Dynamic Layout Caption Positioning Map ────────────────────────────────────
+# Standardizes graceful subtitle vertical anchors across all video layout formats:
+# - split / panel: Centered on the horizontal divider band (y = 0.50)
+# - screencast / presentation: Below the code editor / slide deck (y = 0.84)
+# - gaming: Below central gameplay card, avoiding crosshairs & streamer PiP (y = 0.84)
+# - letterbox: Clean lower blurred region (y = 0.72)
+# - reframe / single / passthrough: Standard lower-third safe zone (y = 0.72)
+LAYOUT_DEFAULT_POS_Y: dict[str, float] = {
+    "split": 0.50,
+    "panel": 0.50,
+    "screencast": 0.84,
+    "presentation": 0.84,
+    "course": 0.84,
+    "tutorial": 0.84,
+    "gaming": 0.84,
+    "game": 0.84,
+    "action": 0.84,
+    "letterbox": 0.72,
+    "reframe": 0.72,
+    "single": 0.72,
+    "auto": 0.72,
+    "passthrough": 0.72,
+    "vertical_native": 0.72,
+}
+
+
+def resolve_layout_pos_y(layout_mode: str | None, user_override: float | None = None) -> float:
+    """Resolve graceful caption Y-anchor position (0.0 - 1.0) based on layout type."""
+    if user_override is not None:
+        return max(0.10, min(float(user_override), 0.92))
+    mode = (layout_mode or "reframe").lower().strip()
+    return LAYOUT_DEFAULT_POS_Y.get(mode, 0.72)
+
+
 def _emit_events(
     subs,
     preset: str,
@@ -587,15 +621,7 @@ def _emit_events(
     if layouts_in_group:
         phrase_layout = layouts_in_group[0]
 
-    pos_y = overrides["position_y"]
-    if pos_y is None:
-        if phrase_layout in ("split", "course"):
-            pos_y = 0.50
-        elif phrase_layout == "letterbox":
-            pos_y = 0.70
-        elif phrase_layout in ("reframe", "single", "auto"):
-            pos_y = 0.71
-
+    pos_y = resolve_layout_pos_y(phrase_layout, overrides.get("position_y"))
     y = _resolve_y_anchor(preset, pos_y, fs)
 
     wh_val = template.get("word_highlight")
@@ -695,13 +721,7 @@ def generate_ass(
 
     template = _styling_to_dict(styling)
     user_pos_y = _tpl(template, "position_y", "positionY")
-    if user_pos_y is None:
-        if crop_mode in ("split", "course"):
-            template["position_y"] = 0.50
-        elif crop_mode == "letterbox":
-            template["position_y"] = 0.70
-        elif crop_mode in ("reframe", "single", "auto"):
-            template["position_y"] = 0.71
+    template["position_y"] = resolve_layout_pos_y(crop_mode, user_pos_y)
 
     if crop_mode == "letterbox":
         for snake, camel in (
