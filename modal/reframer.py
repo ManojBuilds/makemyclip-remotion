@@ -1345,38 +1345,40 @@ class AIReframe:
         # Define scene boundaries or fall back to single scene
         sb = scene_bounds or [(0, max_frames)]
 
-        # Pre-compute layout per frame based on strict scene boundaries.
-        # This completely prevents "random" layout changes mid-scene.
+        # Pre-compute layout per frame based on OpusClip global layout consistency.
+        # This completely prevents "random" letterbox / layout whiplash mid-clip.
         frame_layout = ["single"] * max_frames
         if crop_mode in ("split", "letterbox", "screencast", "presentation", "panel", "gaming", "passthrough"):
             mapped = crop_mode
             frame_layout = [mapped] * max_frames
-        else:
-            # crop_mode is either "auto" or "reframe"
+        elif crop_mode == "auto":
+            # Per-scene intelligent layout adaptation (OpusClip style):
+            # Each genuine scene cut is evaluated individually. If a scene has 2 distinct simultaneous speakers,
+            # it uses split-screen; if solo/performer, it uses single vertical reframe.
+            # Never defaults to letterbox for human talking scenes.
             for sf, ef in sb:
                 if sf >= max_frames:
                     continue
                 ef = min(ef, max_frames)
-                scene_len = ef - sf
-                if scene_len <= 0:
+                if ef <= sf:
                     continue
 
-                if crop_mode == "auto":
-                    scene_tr, scene_sc = slice_tracks_and_scores(tracks, scores, sf, ef)
-                    scene_crop = classify_layout(scene_tr, scene_sc, source_w, source_h)
-                    
-                    if scene_crop == "reframe":
-                        mapped = "single"
-                    elif scene_crop in ("split", "letterbox"):
-                        mapped = scene_crop
-                    else:
-                        mapped = "single"
-                else:
-                    # crop_mode is "reframe" - strictly single vertical panning layout
+                scene_tr, scene_sc = slice_tracks_and_scores(tracks, scores, sf, ef)
+                scene_layout = classify_layout(scene_tr, scene_sc, source_w, source_h)
+
+                # Map layout: "reframe" -> "single", "split" -> "split", "gaming" -> "gaming", "screencast" -> "screencast"
+                if scene_layout == "reframe":
                     mapped = "single"
-                
+                elif scene_layout in ("split", "gaming", "screencast", "presentation", "panel"):
+                    mapped = scene_layout
+                else:
+                    mapped = "single"
                 for f in range(sf, ef):
                     frame_layout[f] = mapped
+            logger.info("OpusClip Multi-Scene Engine: Evaluated %d scene cuts across clip", len(sb))
+        else:
+            # crop_mode is "reframe" - strictly single vertical panning layout
+            frame_layout = ["single"] * max_frames
 
         _letterbox_shadow = None
         _letterbox_mask = None

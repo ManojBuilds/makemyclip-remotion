@@ -119,33 +119,28 @@ class ReframeStrategy(RenderStrategy):
             current_cx += (current_target_cx - current_cx) * adaptive_alpha
             current_cy += (current_target_cy - current_cy) * (adaptive_alpha * 0.5)
 
-        # Framing calculations
-        face_size_pct = 0.106
-        locked_s = (scene_median_s * scale) if scene_median_s is not None else max(target_s or 1.0, 1.0)
-        person_scale = (self.target_h * face_size_pct) / max(locked_s, 1.0)
-        min_s = max(self.target_w / virtual_w, self.target_h / virtual_h)
-        person_scale = max(min_s, min(person_scale, 4.0))
+        # Framing calculations: Keep the full vertical shot with head and body intact
+        # Standard 16:9 to 9:16 reframe uses full vertical height (1.0x to 1.12x subtle framing)
+        zoom = 1.05
+        img_h, img_w = img.shape[:2]
+        crop_h = float(img_h) / zoom
+        crop_w = crop_h * (float(self.target_w) / float(self.target_h))
 
-        crop_w = self.target_w / person_scale
-        crop_h = self.target_h / person_scale
-        crop_w = min(crop_w, virtual_w)
-        crop_h = min(crop_h, virtual_h)
+        # Ensure crop fits within source image
+        crop_h = min(crop_h, float(img_h))
+        crop_w = min(crop_w, float(img_w))
 
-        if crop_w * self.target_h > crop_h * self.target_w:
-            crop_w = crop_h * (self.target_w / self.target_h)
-        else:
-            crop_h = crop_w * (self.target_h / self.target_w)
+        # Convert virtual center X back to source pixel coordinates
+        src_cx = current_cx / scale
+        src_cy = current_cy / scale if current_cy is not None else img_h * 0.35
 
-        # Headroom anchor (22% from top)
-        x1_virtual = max(0.0, min(current_cx - crop_w / 2.0, virtual_w - crop_w))
-        y1_virtual = max(0.0, min(current_cy - crop_h * 0.22, virtual_h - crop_h))
+        # Center horizontally on active speaker with bounds clamping
+        x1 = max(0.0, min(src_cx - crop_w / 2.0, float(img_w) - crop_w))
 
-        x1 = x1_virtual / scale
-        y1 = y1_virtual / scale
-        crop_w_orig = crop_w / scale
-        crop_h_orig = crop_h / scale
+        # Vertically align: anchor with 15% headroom above face center, clamp to [0, img_h - crop_h]
+        y1 = max(0.0, min(src_cy - crop_h * 0.28, float(img_h) - crop_h))
 
-        crop = img[int(y1) : int(y1 + crop_h_orig), int(x1) : int(x1 + crop_w_orig)]
+        crop = img[int(y1) : int(y1 + crop_h), int(x1) : int(x1 + crop_w)]
         if crop.shape[0] > 0 and crop.shape[1] > 0:
             res = cv2.resize(crop, (self.target_w, self.target_h), interpolation=cv2.INTER_AREA)
         else:
@@ -192,6 +187,11 @@ class SplitStrategy(RenderStrategy):
 
         if face_top and face_bottom and abs(face_top.get("x", 0) - face_bottom.get("x", 0)) < 100.0:
             face_bottom = None
+
+        # Safety Fallback: If only 1 person exists and no 2nd person track has ever been established
+        if (face_top is None or face_bottom is None) and (state.get("split_cx_top") is None or state.get("split_cx_bottom") is None):
+            reframe_strat = ReframeStrategy(self.target_w, self.target_h)
+            return reframe_strat.render_frame(img, fidx, faces_fidx, state)
 
         # Tracking state
         SPLIT_DEAD_ZONE = 25.0
@@ -393,24 +393,90 @@ class ScreencastStrategy(RenderStrategy):
         start_y = max(0, (self.target_h - card_content.shape[0]) // 2)
         bg[start_y : start_y + card_content.shape[0], 0 : card_content.shape[1]] = card_content
 
-        # 5. Instructor Webcam Face Picture-in-Picture (PiP)
+        # 5. Instructor / Gamer Facecam Picture-in-Picture (PiP)
+        # Use state memory so PiP stays persistent and smooth even if face detection drops momentarily
         if faces_fidx:
             best_face = max(faces_fidx, key=lambda f: f.get("s", 0))
             fx, fy, fs = float(best_face.get("x", 0)), float(best_face.get("y", 0)), float(best_face.get("s", 0))
-            if fs > 5:  # Valid face
-                fw = min(int(fs * 2.6), img_w)
-                fh = min(int(fs * 2.6), img_h)
-                x1 = max(0, min(int(fx - fw // 2), max(0, img_w - fw)))
-                y1 = max(0, min(int(fy - fh // 2), max(0, img_h - fh)))
-                face_crop = img[y1 : min(y1 + fh, img_h), x1 : min(x1 + fw, img_w)]
-                if face_crop.shape[0] > 10 and face_crop.shape[1] > 10:
-                    pip_size = 230
-                    pip_resized = cv2.resize(face_crop, (pip_size, pip_size), interpolation=cv2.INTER_AREA)
-                    cv2.rectangle(pip_resized, (0, 0), (pip_size - 1, pip_size - 1), (240, 240, 240), 3)
-                    pip_y = min(start_y + card_content.shape[0] - pip_size - 20, self.target_h - pip_size)
-                    pip_x = min(self.target_w - pip_size - 20, self.target_w - pip_size)
-                    if pip_y >= 0 and pip_x >= 0:
-                        bg[pip_y : pip_y + pip_size, pip_x : pip_x + pip_size] = pip_resized
+            if fs > 5:
+                state["pip_last_fx"] = fx
+                state["pip_last_fy"] = fy
+                state["pip_last_fs"] = fs
+
+        last_fx = state.get("pip_last_fx")
+        last_fy = state.get("pip_last_fy")
+        last_fs = state.get("pip_last_fs")
+
+        if last_fs is not None and last_fs > 5:
+            fw = min(int(last_fs * 3.0), img_w)
+            fh = min(int(last_fs * 3.0), img_h)
+            x1 = max(0, min(int(last_fx - fw // 2), max(0, img_w - fw)))
+            y1 = max(0, min(int(last_fy - fh // 2), max(0, img_h - fh)))
+            face_crop = img[y1 : min(y1 + fh, img_h), x1 : min(x1 + fw, img_w)]
+            if face_crop.shape[0] > 10 and face_crop.shape[1] > 10:
+                pip_size = 260
+                pip_resized = cv2.resize(face_crop, (pip_size, pip_size), interpolation=cv2.INTER_AREA)
+                # Premium rounded border / clean edge
+                cv2.rectangle(pip_resized, (0, 0), (pip_size - 1, pip_size - 1), (255, 255, 255), 4)
+                pip_y = min(start_y + card_content.shape[0] - pip_size - 30, self.target_h - pip_size - 30)
+                pip_x = min(self.target_w - pip_size - 30, self.target_w - pip_size - 30)
+                if pip_y >= 0 and pip_x >= 0:
+                    bg[pip_y : pip_y + pip_size, pip_x : pip_x + pip_size] = pip_resized
+
+        return bg
+
+
+class GamingStrategy(RenderStrategy):
+    """Pro Gaming Layout (Focused Gameplay + Corner Streamer Facecam).
+
+    1. Renders 16:9 gameplay in a centered 1080x1200 card with ambient blurred background.
+    2. Overlays the gamer's corner webcam box as a crisp, dedicated Picture-in-Picture (PiP).
+    """
+
+    def render_frame(
+        self,
+        img: np.ndarray,
+        fidx: int,
+        faces_fidx: List[Dict[str, Any]],
+        state: Dict[str, Any],
+    ) -> np.ndarray:
+        img_h, img_w = img.shape[:2]
+        bg = make_blurred_bg(img)
+
+        # 1. Main Centered Gameplay Card (1080x1200)
+        CARD_H = 1200
+        CARD_W = 1080
+        scale = CARD_H / float(max(img_h, 1))
+        scaled_w = int(img_w * scale)
+        res_scaled = cv2.resize(img, (max(scaled_w, 1), CARD_H), interpolation=cv2.INTER_AREA)
+
+        # Center horizontally on gameplay crosshair/action
+        tx = max(0, min(int((scaled_w - CARD_W) // 2), max(0, scaled_w - CARD_W)))
+        card_content = res_scaled[0 : CARD_H, tx : min(tx + CARD_W, scaled_w)]
+
+        start_y = (self.target_h - CARD_H) // 2
+        bg[start_y : start_y + CARD_H, 0 : card_content.shape[1]] = card_content
+
+        # 2. Corner Streamer Facecam Box Anchor
+        # Extract the streamer's camera window from the bottom-right quadrant
+        cam_w = int(img_w * 0.28)
+        cam_h = int(img_h * 0.35)
+        cx1 = max(0, img_w - cam_w)
+        cy1 = max(0, img_h - cam_h)
+        streamer_crop = img[cy1 : min(cy1 + cam_h, img_h), cx1 : min(cx1 + cam_w, img_w)]
+
+        if streamer_crop.shape[0] > 10 and streamer_crop.shape[1] > 10:
+            pip_w = 340
+            pip_h = 240
+            pip_resized = cv2.resize(streamer_crop, (pip_w, pip_h), interpolation=cv2.INTER_AREA)
+            # Clean white broadcast border
+            cv2.rectangle(pip_resized, (0, 0), (pip_w - 1, pip_h - 1), (255, 255, 255), 3)
+
+            # Place PiP in the lower right of the vertical frame (above bottom padding)
+            pip_y = min(start_y + CARD_H - pip_h - 20, self.target_h - pip_h - 20)
+            pip_x = min(self.target_w - pip_w - 20, self.target_w - pip_w - 20)
+            if pip_y >= 0 and pip_x >= 0:
+                bg[pip_y : pip_y + pip_h, pip_x : pip_x + pip_w] = pip_resized
 
         return bg
 
@@ -609,7 +675,7 @@ def get_strategy(crop_mode: str, target_w: int = 1080, target_h: int = 1920) -> 
         "split": SplitStrategy,
         "letterbox": LetterboxStrategy,
         "screencast": ScreencastStrategy,
-        "gaming": ScreencastStrategy,
+        "gaming": GamingStrategy,
         "presentation": PresentationStrategy,
         "panel": PanelStrategy,
         "passthrough": PassthroughStrategy,

@@ -53,48 +53,84 @@ def classify_layout(tracks: list, scores: list, width: int, height: int) -> str:
         return "letterbox"
 
     valid_tracks = []
+    total_max_frame = 0
     for tidx, tr in enumerate(tracks):
         sc = scores[tidx] if tidx < len(scores) else []
-        is_valid, _, _, _, _ = is_valid_face_track(tr, sc, frame_height=float(height))
+        is_valid, _, _, mean_s, dur = is_valid_face_track(tr, sc, frame_height=float(height))
         if is_valid:
             valid_tracks.append((tidx, tr))
+            frames = tr.get("track", {}).get("frame", []) if isinstance(tr.get("track"), dict) else tr.get("proc_track", {}).get("frame", [])
+            if len(frames) > 0:
+                total_max_frame = max(total_max_frame, int(np.max(frames)))
 
     if not valid_tracks:
         return "letterbox"
 
-    # Cluster tracks horizontally into columns (speakers)
-    columns = []
+    # Check for Corner Facecam (Gaming / Screencast with streamer overlay)
+    # A corner facecam is a small face (<= 25% frame height) located near the corners (x < 30% or x > 70%, and y < 35% or y > 65%)
     for tidx, tr in valid_tracks:
-        x_arr = np.array(tr["proc_track"]["x"], dtype=float)
-        mu_x = float(np.mean(x_arr))
-        if mu_x > 1.0:
-            mu_x /= float(width)
-        placed = False
-        for col in columns:
-            if abs(col["mean_x"] - mu_x) < 0.15:
-                col["tracks"].append((tidx, tr))
-                placed = True
-                break
-        if not placed:
-            columns.append({"mean_x": mu_x, "tracks": [(tidx, tr)]})
+        mean_x = float(np.mean(tr["proc_track"]["x"]))
+        mean_y = float(np.mean(tr["proc_track"]["y"]))
+        mean_s = float(np.mean(tr["proc_track"]["s"]))
+        norm_x = mean_x / float(width) if mean_x > 1.0 else mean_x
+        norm_y = mean_y / float(height) if mean_y > 1.0 else mean_y
+        norm_s = mean_s / float(height) if mean_s > 1.0 else mean_s
 
-    # If 2 or more distinct columns exist with temporal overlap, use split screen
-    if len(columns) >= 2:
-        overlap_threshold = 15
-        for i in range(len(columns)):
-            for j in range(i + 1, len(columns)):
-                f1 = set()
-                for _, tr in columns[i]["tracks"]:
-                    frames = tr["track"]["frame"] if isinstance(tr["track"], dict) and "frame" in tr["track"] else tr.get("proc_track", {}).get("frame", [])
-                    f1.update(frames.tolist() if hasattr(frames, "tolist") else frames)
-                f2 = set()
-                for _, tr in columns[j]["tracks"]:
-                    frames = tr["track"]["frame"] if isinstance(tr["track"], dict) and "frame" in tr["track"] else tr.get("proc_track", {}).get("frame", [])
-                    f2.update(frames.tolist() if hasattr(frames, "tolist") else frames)
+        if norm_s <= 0.25 and (norm_x < 0.30 or norm_x > 0.70) and (norm_y < 0.35 or norm_y > 0.65):
+            logger.info("Classified layout as GAMING (detected corner facecam streamer overlay at x=%.2f, y=%.2f, s=%.2f)", norm_x, norm_y, norm_s)
+            return "gaming"
 
-                if len(f1.intersection(f2)) >= overlap_threshold:
-                    return "split"
+    # Build a per-frame mapping of simultaneous face X positions
+    frame_faces: dict[int, list[float]] = {}
+    for tidx, tr in valid_tracks:
+        frames = tr.get("track", {}).get("frame", []) if isinstance(tr.get("track"), dict) else tr.get("proc_track", {}).get("frame", [])
+        xs = tr.get("proc_track", {}).get("x", [])
+        f_list = frames.tolist() if hasattr(frames, "tolist") else list(frames)
+        x_list = xs.tolist() if hasattr(xs, "tolist") else list(xs)
+        for f_val, x_val in zip(f_list, x_list):
+            f_int = int(f_val)
+            norm_x = float(x_val) / float(width) if float(x_val) > 1.0 else float(x_val)
+            frame_faces.setdefault(f_int, []).append(norm_x)
 
-    # Default for single speaker or non-overlapping speakers: Single vertical reframe
+    # For a genuine 2-speaker split screen (e.g. podcast / interview):
+    # 1. We must have >= 2 distinct simultaneous face tracks separated by >= 25% screen width.
+    # 2. Both tracks must have valid human face motion and size.
+    # 3. There must be active speech/dialogue across the tracks (not just background audience or lighting glare).
+    simultaneous_distant_frames = 0
+    for f_int, x_coords in frame_faces.items():
+        if len(x_coords) >= 2:
+            # Check if any pair is separated by at least 25% of the screen width
+            has_distant_pair = False
+            for i in range(len(x_coords)):
+                for j in range(i + 1, len(x_coords)):
+                    if abs(x_coords[i] - x_coords[j]) >= 0.25:
+                        has_distant_pair = True
+                        break
+                if has_distant_pair:
+                    break
+            if has_distant_pair:
+                simultaneous_distant_frames += 1
+
+    # Check if there are at least two distinct tracks with speaking/active scores
+    active_tracks_count = 0
+    for tidx, tr in valid_tracks:
+        sc = scores[tidx] if tidx < len(scores) else []
+        if len(sc) > 0 and float(np.max(sc)) > 0.15:
+            active_tracks_count += 1
+
+    min_required_split_frames = max(45, int(total_max_frame * 0.40)) if total_max_frame > 0 else 45
+    logger.info(
+        "Layout evaluation: %d frames with >=2 distant simultaneous faces (required=%d, active_speaking_tracks=%d)",
+        simultaneous_distant_frames,
+        min_required_split_frames,
+        active_tracks_count,
+    )
+
+    # Only choose SPLIT if we have >= 2 active speaking people who co-occur across the screen
+    if simultaneous_distant_frames >= min_required_split_frames and active_tracks_count >= 2:
+        logger.info("Classified layout as SPLIT (two simultaneous active speakers)")
+        return "split"
+
+    logger.info("Classified layout as REFRAME (single solo speaker / stage performer)")
     return "reframe"
 
