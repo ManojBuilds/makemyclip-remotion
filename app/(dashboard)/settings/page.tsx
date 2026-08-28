@@ -10,6 +10,7 @@ import {
   CardTitle,
 } from "@/components/ui/card"
 import { useDashboardUser } from "@/components/dashboard-context"
+import { WatermarkSettings } from "@/components/brand/watermark-settings"
 
 export default function SettingsPage() {
   const { user, status } = useDashboardUser()
@@ -32,25 +33,6 @@ export default function SettingsPage() {
       </div>
 
       <div className="grid gap-6">
-        <Card>
-          <CardHeader>
-            <CardTitle>Profile</CardTitle>
-            <CardDescription>Your personal information.</CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <div className="grid gap-1">
-              <span className="text-sm font-medium">Name</span>
-              <span className="text-sm text-muted-foreground">{user.name}</span>
-            </div>
-            <div className="grid gap-1">
-              <span className="text-sm font-medium">Email</span>
-              <span className="text-sm text-muted-foreground">
-                {user.email}
-              </span>
-            </div>
-          </CardContent>
-        </Card>
-
         <Card id="billing">
           <CardHeader>
             <CardTitle>Subscription & Billing</CardTitle>
@@ -85,6 +67,8 @@ export default function SettingsPage() {
             )}
           </CardContent>
         </Card>
+
+        <WatermarkSettings initialConfig={(user as any).watermarkConfig || null} userPlan={user.plan || "free"} />
       </div>
     </div>
   )

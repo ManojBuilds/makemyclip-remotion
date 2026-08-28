@@ -30,6 +30,14 @@ class CaptionStyle(BaseModel):
     future_dim: Optional[bool] = None
 
 
+class WatermarkSpec(BaseModel):
+    enabled: bool = True
+    image_url: Optional[str] = None
+    position: str = "top-left"  # "top-left", "top-right"
+    opacity: float = 0.7       # 0.1 to 1.0
+    scale: float = 0.15         # 0.05 to 0.30 (fraction of video width)
+
+
 class ReframeRequest(BaseModel):
     video_url: str
     start_time: float
@@ -38,6 +46,7 @@ class ReframeRequest(BaseModel):
     styling: Optional[CaptionStyle] = None
     transcript: Optional[List[dict]] = None
     show_watermark: bool = False
+    watermark: Optional[WatermarkSpec] = None
     crop_mode: str = "reframe"
     quality: str = "preview"  # "preview" (fast, 540p, smaller file) or "export" (full 1080p)
     analysis_url: Optional[str] = None
@@ -49,6 +58,7 @@ class BurnCaptionsRequest(BaseModel):
     transcript: List[dict]
     styling: CaptionStyle
     show_watermark: bool = False
+    watermark: Optional[WatermarkSpec] = None
     crop_mode: Optional[str] = "reframe"
     quality: str = "export"  # "preview" (fast, 540p) or "export" (full 1080p)
     plan: str = "free"  # "free", "creator", or "power" — controls export resolution
@@ -64,7 +74,9 @@ class BatchClipItem(BaseModel):
     transcript: Optional[List[dict]] = None
     styling: Optional[CaptionStyle] = None
     show_watermark: bool = False
+    watermark: Optional[WatermarkSpec] = None
     remove_silence: bool = False
+
 
 
 class BatchReframeRequest(BaseModel):

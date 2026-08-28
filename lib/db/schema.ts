@@ -24,6 +24,7 @@ export const user = pgTable("user", {
   subscriptionStatus: text("subscription_status").default("inactive"),
   plan: text("plan").default("free"),
   credits: integer("credits").default(45),
+  watermarkConfig: jsonb("watermark_config").$type<WatermarkConfig>(),
   createdAt: timestamp("created_at").notNull().defaultNow(),
   updatedAt: timestamp("updated_at").notNull().defaultNow(),
 })
@@ -128,6 +129,7 @@ export const clips = pgTable("clips", {
   renderedUrl: text("rendered_url"),
   renderProgress: real("render_progress"),
   renderStatus: text("render_status"),
+  watermarkConfig: jsonb("watermark_config").$type<WatermarkConfig>(),
   lastRenderedAt: timestamp("last_rendered_at"),
   createdAt: timestamp("created_at").notNull().defaultNow(),
   updatedAt: timestamp("updated_at").notNull().defaultNow(),
@@ -197,3 +199,13 @@ export type ClipCaption = {
     confidence: number
   }[]
 }
+
+export type WatermarkConfig = {
+  enabled: boolean
+  imageUrl?: string
+  position?: "top-left" | "top-right"
+  opacity?: number // 0.1 to 1.0 (default 0.7)
+  scale?: number   // 0.05 to 0.30 fraction of video width (default 0.15)
+}
+
+

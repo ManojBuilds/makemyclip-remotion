@@ -108,3 +108,27 @@ export function getPublicUrl(key: string) {
   }
   return `${publicUrl}/${key}`
 }
+
+/**
+ * Upload a Buffer directly to R2 and return public URL.
+ */
+export async function uploadFileToR2(
+  key: string,
+  buffer: Buffer,
+  contentType: string
+) {
+  const command = new PutObjectCommand({
+    Bucket: R2_BUCKET_NAME,
+    Key: key,
+    Body: buffer,
+    ContentType: contentType,
+  })
+
+  await r2Client.send(command)
+  try {
+    return getPublicUrl(key)
+  } catch {
+    return getDownloadPresignedUrl(key, 86400 * 365) // 1 year fallback URL
+  }
+}
+

@@ -272,11 +272,13 @@ export function DashboardHeader() {
                   </DropdownMenuItem>
                   <DropdownMenuSeparator />
 
-                  {me?.dodoCustomerId && (
-                    <DropdownMenuItem asChild>
-                      <Link href="/settings">Billing</Link>
-                    </DropdownMenuItem>
-                  )}
+                  <DropdownMenuItem asChild>
+                    <Link href="/projects" className="cursor-pointer">Projects</Link>
+                  </DropdownMenuItem>
+                  <DropdownMenuItem asChild>
+                    <Link href="/settings" className="cursor-pointer">Settings & Brand Kit</Link>
+                  </DropdownMenuItem>
+
                   <DropdownMenuSeparator />
                   <DropdownMenuItem
                     onClick={async () => {

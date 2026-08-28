@@ -21,7 +21,7 @@ import modal
 from ass_builder import generate_ass
 from config import ai_secret, app, image
 from errors import DownloadError, InvalidInputError, RenderError
-from models import BurnCaptionsRequest, CaptionStyle
+from models import BurnCaptionsRequest, CaptionStyle, WatermarkSpec
 from r2_storage import upload_to_r2
 from utils import StageTimer, validate_url
 
@@ -47,6 +47,32 @@ def get_watermark_path() -> str:
     return _WATERMARK_PATH
 
 
+def download_watermark_image(url: str, tmpdir: str) -> str | None:
+    """Download custom watermark image to local temp directory."""
+    if not url or not tmpdir:
+        return None
+    try:
+        import urllib.request
+        url_lower = url.lower()
+        if ".svg" in url_lower:
+            ext = ".svg"
+        elif ".png" in url_lower:
+            ext = ".png"
+        elif ".webp" in url_lower:
+            ext = ".webp"
+        else:
+            ext = ".jpg"
+        dest_path = os.path.join(tmpdir, f"custom_wm_{uuid.uuid4()}{ext}")
+        req = urllib.request.Request(url, headers={"User-Agent": "MakeMyClip/1.0"})
+        with urllib.request.urlopen(req, timeout=10) as response, open(dest_path, "wb") as out_file:
+            out_file.write(response.read())
+        if os.path.exists(dest_path) and os.path.getsize(dest_path) > 0:
+            return dest_path
+    except Exception as e:
+        logger.warning("Failed to download custom watermark image from %s: %s", url, e)
+    return None
+
+
 def probe_video_dimensions(video_path: str) -> tuple[int, int]:
     """Probe input video (width, height). Returns (1080, 1920) default on error."""
     try:
@@ -65,16 +91,29 @@ def probe_video_dimensions(video_path: str) -> tuple[int, int]:
         return 1080, 1920
 
 
-def get_watermark_config(video_width: int, video_height: int) -> tuple[int, int, int]:
-    """Calculates watermark sizing and positioning margins proportional to video width.
-    - Sizing: 45% of video width (~162px on 360p, ~486px on 1080p, ~864px on 4K)
-    - Position: Top-left corner (unobstructed by TikTok/Reels UI) with safe margins
+def get_watermark_config(
+    video_width: int,
+    video_height: int,
+    position: str = "top-left",
+    scale_pct: float = 0.15,
+) -> tuple[int, str]:
+    """Calculates watermark sizing and FFmpeg overlay expression for safe top corner position and scale.
+    - Sizing: scale_pct of video width (default 15%)
+    - Position: top-left or top-right (unobstructed by captions and bottom UI)
     """
-    wm_width = max(145, int(video_width * 0.45))
-    margin_left = max(16, int(video_width * 0.04))
-    margin_top = max(24, int(video_height * 0.04))
+    scale_pct = max(0.05, min(0.30, float(scale_pct)))
+    wm_width = max(60, int(video_width * scale_pct))
+    margin_x = max(16, int(video_width * 0.04))
+    margin_y = max(24, int(video_height * 0.04))
 
-    return wm_width, margin_left, margin_top
+    pos = (position or "top-left").lower()
+    if pos == "top-right":
+        overlay_expr = f"main_w-overlay_w-{margin_x}:{margin_y}"
+    else:  # top-left default
+        overlay_expr = f"{margin_x}:{margin_y}"
+
+    return wm_width, overlay_expr
+
 
 
 # Quality presets
@@ -126,13 +165,13 @@ def burn_captions_local(
     transcript: list[dict],
     styling: CaptionStyle | dict,
     show_watermark: bool = False,
+    watermark: WatermarkSpec | dict | None = None,
     crop_mode: str = "reframe",
     quality: str = "export",
     plan: str = "free",
     tmpdir: str = None,
 ) -> tuple[str, str | None]:
     """Burns captions locally onto an existing video file, uploads to R2,
-
     and generates a thumbnail if quality is "preview".
     """
     if isinstance(styling, dict):
@@ -152,13 +191,29 @@ def burn_captions_local(
     with StageTimer("ffmpeg_burn"):
         logger.info("Burning captions [%s] with FFmpeg...", quality)
 
-        watermark_path = get_watermark_path()
-        watermark_exists = os.path.exists(watermark_path)
+        platform_wm_path = get_watermark_path()
         has_subs = bool(
             os.path.exists(local_ass) and os.path.getsize(local_ass) > 0
         )
 
-        if show_watermark and watermark_exists:
+        wm_path = None
+        wm_position = "top-left"
+        wm_opacity = 0.7
+        wm_scale = 0.45 if plan == "free" else 0.15
+
+        wm_spec = watermark if isinstance(watermark, dict) else (watermark.model_dump() if hasattr(watermark, "model_dump") and watermark else None)
+
+        if plan == "free" and show_watermark and os.path.exists(platform_wm_path):
+            wm_path = platform_wm_path
+        elif wm_spec and wm_spec.get("enabled") and wm_spec.get("image_url"):
+            custom_wm_file = download_watermark_image(wm_spec["image_url"], tmpdir)
+            if custom_wm_file and os.path.exists(custom_wm_file):
+                wm_path = custom_wm_file
+                wm_position = wm_spec.get("position", "top-left")
+                wm_opacity = float(wm_spec.get("opacity", 0.7))
+                wm_scale = float(wm_spec.get("scale", 0.15))
+
+        if wm_path and os.path.exists(wm_path):
             w, h = probe_video_dimensions(local_video)
             if qp["scale"]:
                 scale_factor = 1.0
@@ -179,18 +234,17 @@ def burn_captions_local(
             else:
                 effective_w, effective_h = w, h
 
-            wm_width, margin_left, margin_top = get_watermark_config(
-                effective_w, effective_h
+            wm_width, overlay_expr = get_watermark_config(
+                effective_w, effective_h, position=wm_position, scale_pct=wm_scale
             )
 
-            # High quality alpha compositing (70% opacity, anti-aliased bicubic scaling)
-            # Watermark is rendered in TOP-LEFT corner (safe from Reels/TikTok UI), BELOW subtitles/captions layer
-            wm_filter = f"[1:v]scale={wm_width}:-1:flags=bicubic,format=rgba,colorchannelmixer=aa=0.7[wm]"
+            # High quality alpha compositing with opacity & anti-aliased bicubic scaling
+            wm_filter = f"[1:v]scale={wm_width}:-1:flags=bicubic,format=rgba,colorchannelmixer=aa={wm_opacity}[wm]"
 
             if qp["scale"]:
-                v_prep = f"[0:v]{qp['scale']}[v_base];[v_base][wm]overlay={margin_left}:{margin_top}[v_wm]"
+                v_prep = f"[0:v]{qp['scale']}[v_base];[v_base][wm]overlay={overlay_expr}[v_wm]"
             else:
-                v_prep = f"[0:v][wm]overlay={margin_left}:{margin_top}[v_wm]"
+                v_prep = f"[0:v][wm]overlay={overlay_expr}[v_wm]"
 
             if has_subs:
                 fc = f"{wm_filter};{v_prep};[v_wm]ass='{local_ass}'[out]"
@@ -201,7 +255,7 @@ def burn_captions_local(
                 "ffmpeg",
                 "-y",
                 "-i", local_video,
-                "-i", watermark_path,
+                "-i", wm_path,
                 "-filter_complex", fc,
                 "-map", "[out]",
                 "-map", "0:a?",
@@ -328,6 +382,7 @@ class CaptionBurner:
         transcript: list[dict],
         styling: CaptionStyle | dict,
         show_watermark: bool = False,
+        watermark: WatermarkSpec | dict | None = None,
         crop_mode: str = "reframe",
         quality: str = "export",
         plan: str = "free",
@@ -378,6 +433,7 @@ class CaptionBurner:
                 transcript=transcript,
                 styling=styling,
                 show_watermark=show_watermark,
+                watermark=watermark,
                 crop_mode=crop_mode,
                 quality=quality,
                 plan=plan,
@@ -404,6 +460,7 @@ class CaptionBurner:
             req.transcript,
             req.styling,
             show_watermark=req.show_watermark,
+            watermark=req.watermark,
             crop_mode=req.crop_mode,
             quality=req.quality,
             plan=req.plan,

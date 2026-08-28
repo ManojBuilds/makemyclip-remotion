@@ -59,7 +59,7 @@ export async function getOrCreateUser(clerkUser: ClerkUserSession) {
       .select()
       .from(user)
       .where(eq(user.id, clerkUser.id))
-    
+
     if (retryUser) {
       return retryUser
     }
