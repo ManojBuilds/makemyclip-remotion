@@ -91,6 +91,19 @@ export async function POST(req: Request) {
     }
 
     const appUrl = process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3000"
+    const hasDodoKey = !!process.env.DODO_PAYMENTS_API_KEY
+    const dodoEnv =
+      process.env.DODO_PAYMENTS_ENVIRONMENT ||
+      (process.env.NODE_ENV === "production" ? "live_mode" : "test_mode")
+
+    console.log("[CHECKOUT_DEBUG] Dodo Client Configuration:", {
+      hasDodoKey,
+      dodoKeyPrefix: process.env.DODO_PAYMENTS_API_KEY
+        ? `${process.env.DODO_PAYMENTS_API_KEY.slice(0, 7)}...`
+        : "MISSING",
+      dodoEnv,
+      nodeEnv: process.env.NODE_ENV,
+    })
 
     console.log("[CHECKOUT_DEBUG] Creating Dodo checkout session with:", {
       productId,
@@ -123,8 +136,14 @@ export async function POST(req: Request) {
     return NextResponse.json({ url: checkoutSession.checkout_url })
   } catch (err: unknown) {
     console.error("========== [CHECKOUT API DEBUG] ERROR ==========")
-    console.error("Checkout error:", err)
+    console.error("Dodo Payments / Checkout error:", err)
     const message = err instanceof Error ? err.message : "Internal server error"
-    return NextResponse.json({ error: message }, { status: 500 })
+    return NextResponse.json(
+      {
+        error: `Checkout failed: ${message}`,
+        details: err instanceof Error ? err.stack : undefined,
+      },
+      { status: 500 }
+    )
   }
 }
