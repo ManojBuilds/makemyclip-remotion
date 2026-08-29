@@ -174,7 +174,7 @@ export function WatermarkSettings({
                 <div className="text-xs leading-normal">
                   <p className="font-semibold text-amber-900">Custom Watermarks Locked</p>
                   <p className="mt-0.5 text-amber-700">
-                    Free plan clips include MakeMyClip branding. Upgrade to Creator or Pro to use custom logos.
+                    Free plan clips include Kivio branding. Upgrade to Creator or Pro to use custom logos.
                   </p>
                 </div>
               </div>

@@ -330,7 +330,7 @@ export function PricingSection({
               </li>
               <li className="flex items-center gap-2.5">
                 {checkIcon}
-                <span>All dynamic Remotion caption styles</span>
+                <span>All dynamic caption styles</span>
               </li>
               <li className="flex items-center gap-2.5">
                 {checkIcon}
