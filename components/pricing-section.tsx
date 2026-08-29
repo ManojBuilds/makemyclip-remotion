@@ -3,6 +3,7 @@
 import { useState } from "react"
 import { Check, Info, Loader2, ChevronDown } from "lucide-react"
 import { toast } from "sonner"
+import { useAuth, useClerk } from "@clerk/nextjs"
 import { Button } from "@/components/ui/button"
 import {
   Tooltip,
@@ -156,8 +157,18 @@ export function PricingSection({
   showPowerPlan?: boolean
 }) {
   const [loading, setLoading] = useState<string | null>(null)
+  const { isSignedIn } = useAuth()
+  const clerk = useClerk()
 
   const handleSubscribe = async (productId: string, key?: string) => {
+    if (!isSignedIn) {
+      toast.info("Please sign in or create an account to continue.")
+      clerk.openSignIn({
+        fallbackRedirectUrl: window.location.href,
+      })
+      return
+    }
+
     const loadingKey = key || productId
     setLoading(loadingKey)
     try {
@@ -167,14 +178,23 @@ export function PricingSection({
         body: JSON.stringify({ productId }),
       })
       const data = await res.json()
-      if (data.url) {
+
+      if (res.status === 401) {
+        toast.error("Please sign in to complete your checkout.")
+        clerk.openSignIn({
+          fallbackRedirectUrl: window.location.href,
+        })
+        return
+      }
+
+      if (res.ok && data.url) {
         window.location.href = data.url
       } else {
-        toast.error("Error creating checkout session")
+        toast.error(data.error || "Error creating checkout session")
       }
     } catch (err: unknown) {
       console.error(err)
-      toast.error("Something went wrong")
+      toast.error("Something went wrong. Please try again.")
     } finally {
       setLoading(null)
     }
@@ -254,7 +274,13 @@ export function PricingSection({
               variant="outline"
               className="h-11 w-full rounded-full border-slate-300 font-semibold text-slate-700 hover:bg-slate-50"
               onClick={() => {
-                window.location.href = "/projects"
+                if (isSignedIn) {
+                  window.location.href = "/projects"
+                } else {
+                  clerk.openSignUp({
+                    fallbackRedirectUrl: "/projects",
+                  })
+                }
               }}
             >
               Get Started Free

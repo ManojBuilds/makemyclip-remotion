@@ -9,12 +9,6 @@ export default function PricingPage() {
   return (
     <>
       <div className="relative min-h-screen overflow-hidden bg-white pb-24 text-foreground selection:bg-[#0075de]/20">
-        {/* Subtle Background Gradients */}
-        <div className="pointer-events-none fixed inset-0 flex justify-between">
-          <div className="h-[800px] w-[800px] -translate-x-[20%] -translate-y-[40%] rounded-full bg-[#e8f4fd]/60 blur-[130px]" />
-          <div className="h-[800px] w-[800px] translate-x-[30%] translate-y-[20%] rounded-full bg-[#e8f4fd]/50 blur-[130px]" />
-        </div>
-
         <div className="relative z-10 mx-auto flex max-w-[1080px] flex-col items-center px-6 pt-24 pb-16">
           {/* Header Section */}
           <div className="relative mb-12 flex max-w-3xl flex-col items-center text-center">

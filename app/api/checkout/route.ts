@@ -6,7 +6,10 @@ export async function POST(req: Request) {
   try {
     const session = await getServerSession()
     if (!session || !session.user) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+      return NextResponse.json(
+        { error: "Please sign in to complete your purchase." },
+        { status: 401 }
+      )
     }
 
     const { productId } = await req.json()
@@ -18,6 +21,8 @@ export async function POST(req: Request) {
       )
     }
 
+    const appUrl = process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3000"
+
     // Create a checkout session
     const checkoutSession = await dodo.checkoutSessions.create({
       product_cart: [
@@ -28,9 +33,9 @@ export async function POST(req: Request) {
       ],
       customer: {
         email: session.user.email,
-        name: session.user.name || "",
+        name: session.user.name || "User",
       },
-      return_url: `${process.env.NEXT_PUBLIC_APP_URL}/projects`,
+      return_url: `${appUrl}/projects`,
       // You can also add metadata here
     })
 
