@@ -292,7 +292,11 @@ export function PricingSection({
               </li>
               <li className="flex items-center gap-2.5">
                 {checkIcon}
-                <span>No watermark, 1080p Full HD export</span>
+                <span>No platform watermark, 1080p Full HD export</span>
+              </li>
+              <li className="flex items-center gap-2.5">
+                {checkIcon}
+                <span className="font-semibold text-slate-900">Custom Brand Watermark (PNG/SVG logo upload, opacity & size controls)</span>
               </li>
               <li className="flex items-center gap-2.5">
                 {checkIcon}
@@ -491,6 +495,10 @@ export function PricingSection({
             <FAQItem
               question="What video formats and platforms are supported?"
               answer="You can upload MP4, MOV, or WebM files, or paste a YouTube link. The exported clips are optimized for TikTok, Reels, and Shorts."
+            />
+            <FAQItem
+              question="Can I add my own custom brand logo / watermark to clips?"
+              answer="Yes! Paid plans (Creator & Power) allow you to upload your custom PNG or SVG brand logo, choose its corner position, and adjust transparency and scale. Free plan clips include standard platform branding."
             />
             <FAQItem
               question="Can I cancel my subscription?"
