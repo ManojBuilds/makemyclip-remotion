@@ -47,7 +47,7 @@ export function WatermarkReelPreview({
           >
             {/* eslint-disable-next-html-element-suppression */}
             <img
-              src="https://res.cloudinary.com/dc6yzmwrq/image/upload/v1788055153/kivio_watermark_glass_tpypfp.png"
+              src="https://res.cloudinary.com/dc6yzmwrq/image/upload/v1788098019/kivio_watermark_poppins_wrdlh1.svg"
               alt="Default Platform Watermark"
               className="h-auto w-full object-contain filter drop-shadow-md"
             />

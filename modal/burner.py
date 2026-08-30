@@ -33,18 +33,28 @@ logger = logging.getLogger("makemyclip.burner")
 # container timeout.
 _FFMPEG_BURN_TIMEOUT_S = 480  # 8 minutes
 
-# Path to the watermark PNG baked into the Modal container image.
-_WATERMARK_PATH = "/root/watermark.png"
+# Paths to watermark assets baked into the Modal container image.
+_WATERMARK_SVG_PATH = "/root/watermark.svg"
+_WATERMARK_PNG_PATH = "/root/watermark.png"
 
 
 def get_watermark_path() -> str:
-    """Return absolute path to watermark PNG image (Modal environment or local workspace)."""
-    if os.path.exists(_WATERMARK_PATH):
-        return _WATERMARK_PATH
-    local_wm = os.path.abspath(os.path.join(os.path.dirname(__file__), "watermark.png"))
-    if os.path.exists(local_wm):
-        return local_wm
-    return _WATERMARK_PATH
+    """Return absolute path to watermark SVG or PNG asset (Modal environment or local workspace)."""
+    # 1. Check baked container SVG / PNG
+    if os.path.exists(_WATERMARK_SVG_PATH):
+        return _WATERMARK_SVG_PATH
+    if os.path.exists(_WATERMARK_PNG_PATH):
+        return _WATERMARK_PNG_PATH
+
+    # 2. Check local workspace SVG / PNG
+    local_svg = os.path.abspath(os.path.join(os.path.dirname(__file__), "watermark.svg"))
+    if os.path.exists(local_svg):
+        return local_svg
+    local_png = os.path.abspath(os.path.join(os.path.dirname(__file__), "watermark.png"))
+    if os.path.exists(local_png):
+        return local_png
+
+    return _WATERMARK_SVG_PATH
 
 
 def download_watermark_image(url: str, tmpdir: str) -> str | None:
@@ -94,23 +104,23 @@ def probe_video_dimensions(video_path: str) -> tuple[int, int]:
 def get_watermark_config(
     video_width: int,
     video_height: int,
-    position: str = "top-left",
-    scale_pct: float = 0.15,
+    position: str = "top-right",
+    scale_pct: float = 0.28,
 ) -> tuple[int, str]:
     """Calculates watermark sizing and FFmpeg overlay expression for safe top corner position and scale.
-    - Sizing: scale_pct of video width (default 15%)
-    - Position: top-left or top-right (unobstructed by captions and bottom UI)
+    - Sizing: scale_pct of video width (default 28% for instant 1-second readability)
+    - Position: top-right with comfortable margin, positioned ~24% from the top
     """
-    scale_pct = max(0.05, min(0.30, float(scale_pct)))
+    scale_pct = max(0.05, min(0.35, float(scale_pct)))
     wm_width = max(60, int(video_width * scale_pct))
-    margin_x = max(16, int(video_width * 0.04))
-    margin_y = max(24, int(video_height * 0.04))
+    margin_x = max(24, int(video_width * 0.065))
+    margin_y = max(32, int(video_height * 0.24))
 
-    pos = (position or "top-left").lower()
-    if pos == "top-right":
-        overlay_expr = f"main_w-overlay_w-{margin_x}:{margin_y}"
-    else:  # top-left default
+    pos = (position or "top-right").lower()
+    if pos == "top-left":
         overlay_expr = f"{margin_x}:{margin_y}"
+    else:  # top-right default
+        overlay_expr = f"main_w-overlay_w-{margin_x}:{margin_y}"
 
     return wm_width, overlay_expr
 
@@ -197,9 +207,9 @@ def burn_captions_local(
         )
 
         wm_path = None
-        wm_position = "top-left"
-        wm_opacity = 0.7
-        wm_scale = 0.45 if plan == "free" else 0.15
+        wm_position = "top-right"
+        wm_opacity = 1.0
+        wm_scale = 0.28 if plan == "free" else 0.20
 
         wm_spec = watermark if isinstance(watermark, dict) else (watermark.model_dump() if hasattr(watermark, "model_dump") and watermark else None)
 
@@ -209,9 +219,9 @@ def burn_captions_local(
             custom_wm_file = download_watermark_image(wm_spec["image_url"], tmpdir)
             if custom_wm_file and os.path.exists(custom_wm_file):
                 wm_path = custom_wm_file
-                wm_position = wm_spec.get("position", "top-left")
-                wm_opacity = float(wm_spec.get("opacity", 0.7))
-                wm_scale = float(wm_spec.get("scale", 0.15))
+                wm_position = wm_spec.get("position", "top-right")
+                wm_opacity = float(wm_spec.get("opacity", 1.0))
+                wm_scale = float(wm_spec.get("scale", 0.28))
 
         if wm_path and os.path.exists(wm_path):
             w, h = probe_video_dimensions(local_video)

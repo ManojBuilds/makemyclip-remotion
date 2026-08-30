@@ -1,0 +1,49 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 130 64" width="520" height="256" fill="none">
+  <defs>
+    <!-- Legibility shadow for "made with" -->
+    <filter id="topShadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="1" stdDeviation="1.2" flood-color="#000000" flood-opacity="0.65"/>
+    </filter>
+
+    <!-- Transparent Knockout Mask -->
+    <mask id="cutoutMask">
+      <rect width="100%" height="100%" fill="#FFFFFF" />
+      <text 
+        x="65" 
+        y="47" 
+        text-anchor="middle" 
+        fill="#000000" 
+        font-family="'TikTok Sans', 'Google Sans', 'Inter', -apple-system, sans-serif" 
+        font-size="22" 
+        font-weight="800" 
+        letter-spacing="-0.4px"
+      >kivio.pro</text>
+    </mask>
+  </defs>
+
+  <!-- Top "made with" text (right-aligned) -->
+  <text 
+    x="122" 
+    y="15" 
+    text-anchor="end" 
+    fill="#FFFFFF" 
+    font-family="'TikTok Sans', 'Google Sans', 'Inter', -apple-system, sans-serif" 
+    font-size="14" 
+    font-weight="700" 
+    letter-spacing="-0.2px"
+    filter="url(#topShadow)"
+  >made with</text>
+
+  <!-- Slightly translucent white rectangle with transparent text cutout -->
+  <rect 
+    x="8" 
+    y="20" 
+    width="114" 
+    height="40" 
+    rx="7" 
+    ry="7" 
+    fill="#FFFFFF" 
+    fill-opacity="0.88" 
+    mask="url(#cutoutMask)"
+  />
+</svg>

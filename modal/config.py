@@ -85,6 +85,7 @@ image = (
     .run_commands("mkdir -p /usr/share/fonts/truetype/custom")
     .add_local_dir("../fonts", "/usr/share/fonts/truetype/custom", copy=True)
     .run_commands("fc-cache -f -v")
+    .add_local_file("watermark.svg", "/root/watermark.svg", copy=True)
     .add_local_file("watermark.png", "/root/watermark.png", copy=True)
     .add_local_python_source(*_LOCAL_SOURCES)
 )
