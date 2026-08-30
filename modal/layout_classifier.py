@@ -66,19 +66,46 @@ def classify_layout(tracks: list, scores: list, width: int, height: int) -> str:
     if not valid_tracks:
         return "letterbox"
 
-    # Check for Corner Facecam (Gaming / Screencast with streamer overlay)
-    # A corner facecam is a small face (<= 25% frame height) located near the corners (x < 30% or x > 70%, and y < 35% or y > 65%)
+    # Check for dominant primary speaker first (e.g. standard talking head, podcast host, presentation)
+    has_dominant_speaker = False
     for tidx, tr in valid_tracks:
+        sc = scores[tidx] if tidx < len(scores) else []
+        _, mean_sc, max_sc, mean_s, dur = is_valid_face_track(tr, sc, frame_height=float(height))
         mean_x = float(np.mean(tr["proc_track"]["x"]))
-        mean_y = float(np.mean(tr["proc_track"]["y"]))
-        mean_s = float(np.mean(tr["proc_track"]["s"]))
         norm_x = mean_x / float(width) if mean_x > 1.0 else mean_x
-        norm_y = mean_y / float(height) if mean_y > 1.0 else mean_y
         norm_s = mean_s / float(height) if mean_s > 1.0 else mean_s
+        
+        # A dominant center speaker has a decent face size (>18% height) or sits in the middle 60% of the screen
+        if (norm_s >= 0.18 or (0.20 <= norm_x <= 0.80 and norm_s >= 0.12)) and (max_sc > 0.10 or dur > 30):
+            has_dominant_speaker = True
+            break
 
-        if norm_s <= 0.25 and (norm_x < 0.30 or norm_x > 0.70) and (norm_y < 0.35 or norm_y > 0.65):
-            logger.info("Classified layout as GAMING (detected corner facecam streamer overlay at x=%.2f, y=%.2f, s=%.2f)", norm_x, norm_y, norm_s)
-            return "gaming"
+    # Check for Corner Facecam (Gaming / Screencast with streamer overlay)
+    # Only classify as GAMING if:
+    # 1. No dominant center speaker is present.
+    # 2. The corner track is actually an active speaker (max_sc > 0.20 and persistent duration).
+    if not has_dominant_speaker:
+        for tidx, tr in valid_tracks:
+            sc = scores[tidx] if tidx < len(scores) else []
+            _, mean_sc, max_sc, mean_s, dur = is_valid_face_track(tr, sc, frame_height=float(height))
+            mean_x = float(np.mean(tr["proc_track"]["x"]))
+            mean_y = float(np.mean(tr["proc_track"]["y"]))
+            norm_x = mean_x / float(width) if mean_x > 1.0 else mean_x
+            norm_y = mean_y / float(height) if mean_y > 1.0 else mean_y
+            norm_s = mean_s / float(height) if mean_s > 1.0 else mean_s
+
+            if (
+                norm_s <= 0.25
+                and (norm_x < 0.30 or norm_x > 0.70)
+                and (norm_y < 0.35 or norm_y > 0.65)
+                and max_sc >= 0.20
+                and dur >= max(20, int(total_max_frame * 0.25))
+            ):
+                logger.info(
+                    "Classified layout as GAMING (detected active corner facecam overlay at x=%.2f, y=%.2f, s=%.2f, max_sc=%.2f)",
+                    norm_x, norm_y, norm_s, max_sc,
+                )
+                return "gaming"
 
     # Build a per-frame mapping of simultaneous face X positions
     frame_faces: dict[int, list[float]] = {}

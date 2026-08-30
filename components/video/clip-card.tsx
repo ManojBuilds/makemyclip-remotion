@@ -198,35 +198,40 @@ export function NativeVideoPreview({
    Viral score ring component matching Vizard.ai
    ───────────────────────────────────────────── */
 const VIRAL_SCORE_TIERS: Record<string, { range: string; desc: string; dot: string }> = {
-  "Very High": { range: "8.5–10", desc: "Ready to post — strong hook & high resonance.", dot: "bg-emerald-500" },
-  High: { range: "7.0–8.4", desc: "Likely to perform well on social platforms.", dot: "bg-amber-500" },
-  Medium: { range: "5.0–6.9", desc: "May need a tighter hook or edit to take off.", dot: "bg-indigo-500" },
-  Low: { range: "0–4.9", desc: "Consider reworking the angle or using as B-roll.", dot: "bg-rose-500" },
+  "Very High": { range: "85–100", desc: "Ready to post — strong hook & high resonance.", dot: "bg-emerald-500" },
+  High: { range: "70–84", desc: "Likely to perform well on social platforms.", dot: "bg-amber-500" },
+  Medium: { range: "50–69", desc: "May need a tighter hook or edit to take off.", dot: "bg-indigo-500" },
+  Low: { range: "0–49", desc: "Consider reworking the angle or using as B-roll.", dot: "bg-rose-500" },
 }
 
-export function ViralScoreRing({ score }: { score: number }) {
+export function ViralScoreRing({ score, reason }: { score: number; reason?: string }) {
+  const normalizedScore = Math.min(
+    100,
+    Math.max(0, score > 10 ? Math.round(score) : Math.round(score * 10))
+  )
+
   const radius = 30
   const stroke = 5
   const normalizedRadius = radius - stroke * 2
   const circumference = normalizedRadius * 2 * Math.PI
-  const strokeDashoffset = circumference - (score / 10) * circumference
+  const strokeDashoffset = circumference - (normalizedScore / 100) * circumference
 
   let strokeColor = "stroke-slate-250"
   let textColor = "text-slate-700"
   let bgColor = "bg-slate-50"
   let labelText = "Low"
 
-  if (score >= 8.5) {
+  if (normalizedScore >= 85) {
     strokeColor = "stroke-emerald-500"
     textColor = "text-emerald-700"
     bgColor = "bg-emerald-50/50"
     labelText = "Very High"
-  } else if (score >= 7.0) {
+  } else if (normalizedScore >= 70) {
     strokeColor = "stroke-amber-500"
     textColor = "text-amber-700"
     bgColor = "bg-amber-50/50"
     labelText = "High"
-  } else if (score >= 5.0) {
+  } else if (normalizedScore >= 50) {
     strokeColor = "stroke-indigo-500"
     textColor = "text-indigo-700"
     bgColor = "bg-indigo-50/50"
@@ -279,11 +284,11 @@ export function ViralScoreRing({ score }: { score: number }) {
               </svg>
               <span
                 className={cn(
-                  "absolute text-sm sm:text-lg font-black tabular-nums",
+                  "absolute text-xs sm:text-base font-black tabular-nums tracking-tight",
                   textColor
                 )}
               >
-                {score}
+                {normalizedScore}
               </span>
             </div>
             <span
@@ -296,12 +301,12 @@ export function ViralScoreRing({ score }: { score: number }) {
             </span>
           </div>
         </TooltipTrigger>
-        <TooltipContent side="top" sideOffset={6} className="max-w-[280px] px-3.5 py-2.5">
+        <TooltipContent side="top" sideOffset={6} className="max-w-[300px] px-3.5 py-2.5">
           <div className="flex items-start gap-2">
             <span className={cn("mt-1 h-2 w-2 shrink-0 rounded-full", VIRAL_SCORE_TIERS[labelText].dot)} />
             <div>
-              <p className="text-xs font-bold leading-tight">{labelText} <span className="font-normal opacity-60">({VIRAL_SCORE_TIERS[labelText].range})</span></p>
-              <p className="mt-0.5 text-[11px] leading-snug opacity-75">{VIRAL_SCORE_TIERS[labelText].desc}</p>
+              <p className="text-xs font-bold leading-tight">{labelText} <span className="font-normal opacity-60">({VIRAL_SCORE_TIERS[labelText].range}/100)</span></p>
+              <p className="mt-0.5 text-[11px] leading-snug opacity-75">{reason || VIRAL_SCORE_TIERS[labelText].desc}</p>
             </div>
           </div>
         </TooltipContent>
@@ -433,7 +438,7 @@ type ClipCardProps = {
   isCaptioned: boolean
   onToggleCaptions: (clipId: string) => void
   onEdit: (clip: Clip) => void
-  onDownload: (clip: Clip, options?: { withoutCaptions?: boolean }) => void
+  onDownload: (clip: Clip, options?: { withoutCaptions?: boolean; hdExport?: boolean }) => void
   isPlaying: boolean
   onPlay: () => void
   isDownloading?: boolean
@@ -529,13 +534,13 @@ function ClipCardBase({
             </div>
 
             <div className="hidden shrink-0 sm:block">
-              <ViralScoreRing score={clip.viralScore} />
+              <ViralScoreRing score={clip.viralScore} reason={clip.viralReason} />
             </div>
           </div>
 
           {/* Mobile-only: Viral score shown inline below title */}
           <div className="mt-2.5 flex sm:hidden">
-            <ViralScoreRing score={clip.viralScore} />
+            <ViralScoreRing score={clip.viralScore} reason={clip.viralReason} />
           </div>
         </div>
 
@@ -590,118 +595,81 @@ function ClipCardBase({
             <span>Trim Clip</span>
           </Button>
 
-          {isFree ? (
-            <>
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
               <Button
-                variant="outline"
                 size="sm"
-                className="flex h-9 w-full items-center justify-center gap-2 rounded-xl border border-slate-200 bg-white px-4 text-xs font-bold text-slate-700 shadow-sm transition-all duration-300 hover:bg-slate-50 active:scale-95 sm:h-10 sm:w-auto sm:px-5"
-                onClick={async () => {
-                  if (!clip.previewVideoUrl) {
-                    toast.error("Preview video is not ready yet.")
-                    return
-                  }
-                  setIsDownloadingPreview(true)
-                  const toastId = toast.loading("Downloading preview video...")
-                  try {
-                    const response = await fetch(clip.previewVideoUrl)
-                    if (!response.ok) throw new Error("Fetch failed")
-                    const blob = await response.blob()
-                    const blobUrl = window.URL.createObjectURL(blob)
-                    const link = document.createElement("a")
-                    link.href = blobUrl
-
-                    const safeTitle = (clip.title || "clip").replace(/[^a-z0-9]/gi, "_").toLowerCase()
-                    link.download = `${safeTitle}_preview.mp4`
-
-                    document.body.appendChild(link)
-                    link.click()
-                    document.body.removeChild(link)
-                    window.URL.revokeObjectURL(blobUrl)
-                    trackClipDownloaded({ clipId: clip.id })
-                    toast.dismiss(toastId)
-                    toast.success("Download started!")
-                  } catch (err) {
-                    console.error("Direct download failed, using fallback:", err)
-                    window.open(clip.previewVideoUrl, "_blank", "noopener,noreferrer")
-                    trackClipDownloaded({ clipId: clip.id })
-                    toast.dismiss(toastId)
-                    toast.success("Opening preview video in new tab.")
-                  } finally {
-                    setIsDownloadingPreview(false)
-                  }
-                }}
-                disabled={!clip.previewVideoUrl || isDownloadingPreview}
+                className="flex h-9 w-full sm:w-auto items-center justify-center gap-2 rounded-xl border-0 bg-slate-950 px-4 text-xs font-bold text-white shadow-sm transition-all duration-300 hover:bg-slate-800 active:scale-95 sm:h-10 sm:px-5"
+                disabled={isRendering || isExporting || isDownloading || (!clip.previewVideoUrl && !clip.originalVideoUrl && !clip.captionVideoUrl)}
               >
-                {isDownloadingPreview ? (
-                  <Loader2 className="size-3.5 animate-spin" />
+                {isRendering || isExporting ? (
+                  <>
+                    <Loader2 className="size-3.5 animate-spin" />
+                    <span>Exporting HD…</span>
+                  </>
+                ) : isDownloading ? (
+                  <>
+                    <Loader2 className="size-3.5 animate-spin" />
+                    <span>Downloading…</span>
+                  </>
                 ) : (
-                  <Download className="size-3.5 text-slate-500" />
+                  <>
+                    <Download className="size-3.5" />
+                    <span>Download</span>
+                    <ChevronDown className="size-4 ml-1 opacity-70" />
+                  </>
                 )}
-                {isDownloadingPreview ? "Downloading..." : "Download Preview (SD)"}
               </Button>
-              <Button
-                variant="default"
-                size="sm"
-                onClick={() => {
-                  trackCheckoutInitiated({ planId: "pro_upgrade" })
-                  setShowUpgradeModal(true)
-                }}
-                className="flex h-9 w-full items-center justify-center gap-2 rounded-xl px-4 text-xs font-bold shadow-sm transition-all duration-300 active:scale-95 sm:h-10 sm:w-auto sm:px-5"
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="w-56 p-1.5 shadow-xl">
+              <DropdownMenuItem
+                className="flex items-center justify-between gap-3 px-3 py-2.5 text-xs font-semibold cursor-pointer rounded-lg hover:bg-slate-50 focus:bg-slate-50"
+                onClick={() => onDownload(clip, { withoutCaptions: false })}
               >
-                <Sparkles className="size-3.5 text-primary-foreground" />
-                Upgrade to Export HD
-              </Button>
-            </>
-          ) : (
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <Button
-                  size="sm"
-                  className="flex h-9 w-full sm:w-auto items-center justify-center gap-2 rounded-xl border-0 bg-slate-950 px-4 text-xs font-bold text-white shadow-sm transition-all duration-300 hover:bg-slate-800 active:scale-95 sm:h-10 sm:px-5"
-                  disabled={isRendering || isExporting || isDownloading || !clip.originalVideoUrl}
-                >
-                  {isRendering || isExporting ? (
-                    <>
-                      <Loader2 className="size-3.5 animate-spin" />
-                      Exporting HD…
-                    </>
-                  ) : isDownloading ? (
-                    <>
-                      <Loader2 className="size-3.5 animate-spin" />
-                      Downloading…
-                    </>
-                  ) : (
-                    <>
-                      <Download className="size-3.5" />
-                      <span>Download</span>
-                      <ChevronDown className="size-4 ml-1 opacity-70" />
-                    </>
-                  )}
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end" className="w-fit">
-                <DropdownMenuItem
-                  className="justify-between gap-8 px-4 text-[11px] whitespace-nowrap"
-                  onClick={() => onDownload(clip)}
-                >
-                  {clip.captionVideoUrl ? (
-                    <span>Download with Captions</span>
-                  ) : (
-                    <span>Export HD with Captions</span>
-                  )}
-                  <ClosedCaption className="size-3.5 opacity-80" />
-                </DropdownMenuItem>
-                <DropdownMenuItem
-                  className="justify-between gap-8 px-4 text-[11px] whitespace-nowrap"
-                  onClick={() => onDownload(clip, { withoutCaptions: true })}
-                >
-                  <span>Download without Captions</span>
-                  <ClosedCaption className="size-3.5 opacity-40" />
-                </DropdownMenuItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
-          )}
+                <div className="flex items-center gap-2">
+                  <ClosedCaption className="size-4 text-slate-700" />
+                  <span>With Captions</span>
+                </div>
+                <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">
+                  {isFree ? "SD" : clip.captionVideoUrl ? "1080p" : "HD"}
+                </span>
+              </DropdownMenuItem>
+
+              <DropdownMenuItem
+                className="flex items-center justify-between gap-3 px-3 py-2.5 text-xs font-semibold cursor-pointer rounded-lg hover:bg-slate-50 focus:bg-slate-50"
+                onClick={() => onDownload(clip, { withoutCaptions: true })}
+              >
+                <div className="flex items-center gap-2">
+                  <Video className="size-4 text-slate-700" />
+                  <span>Without Captions</span>
+                </div>
+                <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">
+                  Clean
+                </span>
+              </DropdownMenuItem>
+
+              {isFree && (
+                <>
+                  <div className="my-1 h-px bg-slate-100" />
+                  <DropdownMenuItem
+                    className="flex items-center justify-between gap-3 px-3 py-2.5 text-xs font-semibold cursor-pointer rounded-lg hover:bg-slate-50 focus:bg-slate-50 text-slate-900"
+                    onClick={() => {
+                      trackCheckoutInitiated({ planId: "pro_upgrade" })
+                      setShowUpgradeModal(true)
+                    }}
+                  >
+                    <div className="flex items-center gap-2">
+                      <Sparkles className="size-4 text-slate-500" />
+                      <span>Export in 1080p HD</span>
+                    </div>
+                    <span className="rounded bg-slate-900 px-1.5 py-0.5 text-[10px] font-bold text-white uppercase tracking-wider">
+                      PRO
+                    </span>
+                  </DropdownMenuItem>
+                </>
+              )}
+            </DropdownMenuContent>
+          </DropdownMenu>
         </div>
       </div>
 

@@ -95,23 +95,20 @@ export function ProjectDetailClient({
 
   // const handleDownloadZip = async () => {};
 
-  const triggerDirectDownload = async (url: string, clipTitle?: string) => {
+  const triggerDirectDownload = (url: string, clipTitle?: string) => {
     try {
-      const response = await fetch(url)
-      if (!response.ok) throw new Error("Fetch failed")
-      const blob = await response.blob()
-      const blobUrl = window.URL.createObjectURL(blob)
-      const link = document.createElement("a")
-      link.href = blobUrl
-
       const safeTitle = (project.title || "video").replace(/[^a-z0-9]/gi, "_").toLowerCase()
       const safeClipTitle = (clipTitle || "clip").replace(/[^a-z0-9]/gi, "_").toLowerCase()
-      link.download = `${safeTitle}_${safeClipTitle}.mp4`
+      const filename = `${safeTitle}_${safeClipTitle}.mp4`
+      const downloadUrl = `/api/download?url=${encodeURIComponent(url)}&filename=${encodeURIComponent(filename)}`
 
+      const link = document.createElement("a")
+      link.href = downloadUrl
+      link.setAttribute("download", filename)
+      link.style.display = "none"
       document.body.appendChild(link)
       link.click()
       document.body.removeChild(link)
-      window.URL.revokeObjectURL(blobUrl)
       return true
     } catch (err) {
       console.error("Direct download failed, using fallback:", err)
@@ -120,68 +117,71 @@ export function ProjectDetailClient({
     }
   }
 
-  const handleDownloadClick = async (clip: Clip, options?: { withoutCaptions?: boolean }) => {
-    // If download without captions is requested
-    if (options?.withoutCaptions && clip.originalVideoUrl) {
-      setDownloadingClipId(clip.id)
-      const toastId = toast.loading("Downloading video...")
-      const success = await triggerDirectDownload(clip.originalVideoUrl, `${clip.title}_original`)
-      toast.dismiss(toastId)
-      if (success) {
-        toast.success("Download started.")
-      } else {
-        toast.success("Opening video in new tab.")
-      }
-      setDownloadingClipId(null)
-      return
-    }
-
-    // If HD export already exists, download directly
-    if (clip.captionVideoUrl) {
-      setDownloadingClipId(clip.id)
-      const toastId = toast.loading("Downloading video directly...")
-      const success = await triggerDirectDownload(clip.captionVideoUrl, clip.title)
-      toast.dismiss(toastId)
-      if (success) {
-        toast.success("Download started!")
-      } else {
-        toast.success("Opening clip in new tab (fallback)!")
-      }
-      setDownloadingClipId(null)
-      return
-    }
-
-    // Otherwise trigger HD export
-    const loadingToastId = toast.loading("Queuing HD export...")
-    try {
-      const data = await triggerHDExport(clip.id)
-
-      // If the export was already done, download directly
-      if (data.alreadyExported && data.url) {
-        toast.dismiss(loadingToastId)
-        setDownloadingClipId(clip.id)
-        const toastId = toast.loading("Downloading video directly...")
-        const success = await triggerDirectDownload(data.url, clip.title)
-        toast.dismiss(toastId)
-        if (success) {
-          toast.success("Download started!")
-        } else {
-          toast.success("Opening clip in new tab (fallback)!")
-        }
-        setDownloadingClipId(null)
+  const handleDownloadClick = async (
+    clip: Clip,
+    options?: { withoutCaptions?: boolean; hdExport?: boolean }
+  ) => {
+    // 1. Download without captions (Instant for all plans)
+    if (options?.withoutCaptions) {
+      const targetUrl = clip.originalVideoUrl || clip.previewVideoUrl || clip.captionVideoUrl
+      if (!targetUrl) {
+        toast.error("Video is not ready for download yet.")
         return
       }
-
-      toast.dismiss(loadingToastId)
-      toast.success("HD export queued! Will auto-download when ready.")
-
-      setExportingClipIds((prev) => ({ ...prev, [clip.id]: true }))
-      setAutoDownloadClipIds((prev) => ({ ...prev, [clip.id]: true }))
-    } catch (err) {
-      toast.dismiss(loadingToastId)
-      console.error("Export trigger error:", err)
-      toast.error("Failed to trigger HD export.")
+      const success = triggerDirectDownload(targetUrl, `${clip.title}_clean`)
+      if (success) {
+        toast.success("Download started!")
+      }
+      return
     }
+
+    // 2. Download with Captions
+    // If HD captioned video already exists, download it immediately
+    if (clip.captionVideoUrl) {
+      triggerDirectDownload(clip.captionVideoUrl, clip.title)
+      toast.success("1080p HD download started!")
+      return
+    }
+
+    // For paid users: auto-trigger 1080p HD export if not yet generated
+    if (_userData.plan !== "free") {
+      const loadingToastId = toast.loading("Queuing 1080p HD export...")
+      try {
+        const data = await triggerHDExport(clip.id)
+        if (data.alreadyExported && data.url) {
+          toast.dismiss(loadingToastId)
+          triggerDirectDownload(data.url, clip.title)
+          toast.success("1080p HD download started!")
+          return
+        }
+
+        toast.dismiss(loadingToastId)
+        toast.success("1080p HD export queued! Will auto-download when ready.")
+        setExportingClipIds((prev) => ({ ...prev, [clip.id]: true }))
+        setAutoDownloadClipIds((prev) => ({ ...prev, [clip.id]: true }))
+      } catch (err) {
+        toast.dismiss(loadingToastId)
+        console.error("Export trigger error:", err)
+        toast.error("Failed to trigger HD export.")
+      }
+      return
+    }
+
+    // For free users: download the preview captioned video immediately
+    if (clip.previewVideoUrl) {
+      triggerDirectDownload(clip.previewVideoUrl, `${clip.title}_captioned`)
+      toast.success("Download started!")
+      return
+    }
+
+    // Fallback if only original video is ready
+    if (clip.originalVideoUrl) {
+      triggerDirectDownload(clip.originalVideoUrl, clip.title)
+      toast.success("Download started!")
+      return
+    }
+
+    toast.error("Clip is still rendering. Please wait a moment.")
   }
 
   useEffect(() => {

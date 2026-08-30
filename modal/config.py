@@ -43,6 +43,7 @@ _LOCAL_SOURCES = (
     "video_utils",
     "content_classifier",
     "render_strategies",
+    "silence_remover",
 )
 
 # --- Image ---
