@@ -119,6 +119,7 @@ class AudioTranscriber:
                     "auto_highlights": True,
                     "sentiment_analysis": True,
                     "filter_profanity": True,
+                    "auto_chapters": True,
                 }
                 
                 if req.transcribe_language and req.transcribe_language != "auto":
@@ -126,22 +127,16 @@ class AudioTranscriber:
                 else:
                     config_kwargs["language_detection"] = True
                     
-                # Setup Speech Understanding features (Summarization for chapters & optional Translation)
-                su_request = {
-                    "summarization": {
-                        "summary_type": "paragraph",
-                        "effort": "low",
-                    }
-                }
+                # Setup Speech Understanding features (optional Translation)
                 if req.translate_language and req.translate_language != "none":
-                    su_request["translation"] = {
-                        "target_languages": [req.translate_language],
-                        "match_original_utterance": True,
+                    config_kwargs["speech_understanding"] = {
+                        "request": {
+                            "translation": {
+                                "target_languages": [req.translate_language],
+                                "match_original_utterance": True,
+                            }
+                        }
                     }
-
-                config_kwargs["speech_understanding"] = {
-                    "request": su_request
-                }
 
                 default_prompt = (
                     "Video or podcast recording with spoken dialogue, key topics, and discussions."
@@ -277,11 +272,12 @@ class AudioTranscriber:
                     })
 
             chapters_out = []
-            # 1. Check new Speech Understanding summarization response
+            # 1. Check Speech Understanding summarization response
             su_json = getattr(transcript, "json_response", {}) or {}
-            su_response = su_json.get("speech_understanding", {}).get("response", {})
-            summarization_data = su_response.get("summarization", {})
-            su_summaries = summarization_data.get("summary", [])
+            su_obj = su_json.get("speech_understanding") or {}
+            su_response = su_obj.get("response") or {}
+            summarization_data = su_response.get("summarization") or {}
+            su_summaries = summarization_data.get("summary") or []
 
             if su_summaries:
                 for c in su_summaries:
@@ -289,18 +285,18 @@ class AudioTranscriber:
                         "headline": c.get("headline", ""),
                         "summary": c.get("text", "") or c.get("summary", ""),
                         "gist": c.get("headline", "") or c.get("gist", ""),
-                        "start": c.get("start", 0) / 1000.0,
-                        "end": c.get("end", 0) / 1000.0,
+                        "start": (c.get("start") or 0) / 1000.0,
+                        "end": (c.get("end") or 0) / 1000.0,
                     })
-            # 2. Fallback to legacy transcript.chapters if present
+            # 2. Check transcript.chapters (from auto_chapters)
             elif getattr(transcript, "chapters", None):
                 for c in transcript.chapters:
                     chapters_out.append({
                         "headline": getattr(c, "headline", "") or "",
                         "summary": getattr(c, "summary", "") or "",
                         "gist": getattr(c, "gist", "") or "",
-                        "start": getattr(c, "start", 0) / 1000.0,
-                        "end": getattr(c, "end", 0) / 1000.0,
+                        "start": (getattr(c, "start", 0) or 0) / 1000.0,
+                        "end": (getattr(c, "end", 0) or 0) / 1000.0,
                     })
 
             highlights_out = []
