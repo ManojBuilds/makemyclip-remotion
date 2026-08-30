@@ -15,15 +15,17 @@ export function WatermarkReelPreview({
 }: WatermarkReelPreviewProps) {
   const enabled = config?.enabled ?? true
   const imageUrl = config?.imageUrl
-  const position = config?.position || "top-left"
+  const position = config?.position || "top-right"
   const opacity = config?.opacity ?? 0.7
-  const scale = config?.scale ?? 0.15
+  const scale = config?.scale ?? 0.20
 
-  const getPositionStyle = () => {
-    if (position === "top-right") {
-      return { top: "1.25rem", right: "1rem" }
+  // Position aligned with modal/burner.py get_watermark_config():
+  // margin_x = 6.5% of video width, margin_y = 24% of video height (safe top zone)
+  const getPositionStyle = (pos: string = position) => {
+    if (pos === "top-left") {
+      return { top: "24%", left: "6.5%" }
     }
-    return { top: "1.25rem", left: "1rem" }
+    return { top: "24%", right: "6.5%" }
   }
 
   return (
@@ -42,7 +44,11 @@ export function WatermarkReelPreview({
         {/* Watermark Overlay (Free Plan vs Custom Logo) */}
         {isFreePlan ? (
           <div
-            style={{ top: "1.25rem", left: "1rem", width: "45%", opacity: 0.7 }}
+            style={{
+              ...getPositionStyle("top-right"),
+              width: "28%",
+              opacity: 1.0,
+            }}
             className="absolute z-20 pointer-events-none drop-shadow-md"
           >
             {/* eslint-disable-next-html-element-suppression */}
@@ -55,7 +61,7 @@ export function WatermarkReelPreview({
         ) : enabled && imageUrl ? (
           <div
             style={{
-              ...getPositionStyle(),
+              ...getPositionStyle(position),
               width: `${Math.round(scale * 100)}%`,
               opacity: opacity,
             }}
@@ -71,7 +77,7 @@ export function WatermarkReelPreview({
         ) : enabled ? (
           <div
             style={{
-              ...getPositionStyle(),
+              ...getPositionStyle(position),
               opacity: 0.85,
             }}
             className="absolute z-20 rounded bg-slate-900/90 px-2 py-1 text-[10px] font-semibold text-white border border-slate-700 shadow-md backdrop-blur-sm"
