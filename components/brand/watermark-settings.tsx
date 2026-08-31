@@ -253,7 +253,7 @@ export function WatermarkSettings({
 
             {/* Position Picker */}
             <div className="space-y-2">
-              <Label className="text-xs font-semibold text-slate-800">Watermark Position (Safe Top Zone)</Label>
+              <Label className="text-xs font-semibold text-slate-800">Watermark Position</Label>
               <div className="grid grid-cols-2 gap-2">
                 {[
                   { id: "top-left", label: "Top-Left" },

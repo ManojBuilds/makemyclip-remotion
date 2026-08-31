@@ -105,16 +105,22 @@ def get_watermark_config(
     video_width: int,
     video_height: int,
     position: str = "top-right",
-    scale_pct: float = 0.28,
+    scale_pct: float = 0.20,
+    is_free_plan: bool = False,
 ) -> tuple[int, str]:
-    """Calculates watermark sizing and FFmpeg overlay expression for safe top corner position and scale.
-    - Sizing: scale_pct of video width (default 28% for instant 1-second readability)
-    - Position: top-right with comfortable margin, positioned ~24% from the top
+    """Calculates watermark sizing and FFmpeg overlay expression for corner position and scale.
+    - Free plan (default platform watermark): positioned ~24% from top (margin_y = 24%)
+    - Paid plan (custom brand watermark): positioned top corner with clean breathing room (margin_y = 5%, margin_x = 5%)
     """
     scale_pct = max(0.05, min(0.35, float(scale_pct)))
     wm_width = max(60, int(video_width * scale_pct))
-    margin_x = max(24, int(video_width * 0.065))
-    margin_y = max(32, int(video_height * 0.24))
+
+    if is_free_plan:
+        margin_x = max(24, int(video_width * 0.065))
+        margin_y = max(32, int(video_height * 0.24))
+    else:
+        margin_x = max(20, int(video_width * 0.05))
+        margin_y = max(20, int(video_height * 0.05))
 
     pos = (position or "top-right").lower()
     if pos == "top-left":
@@ -129,17 +135,17 @@ def get_watermark_config(
 # Quality presets
 _QUALITY_PRESETS = {
     "preview": {
-        "scale": "scale=360:-2",
-        "preset": "superfast",
-        "crf": "32",
+        "scale": "scale=720:-2",
+        "preset": "fast",
+        "crf": "23",
         "r2_prefix": "previews",
         "file_prefix": "prev",
-        "audio": ["-c:a", "copy"],
+        "audio": ["-c:a", "aac", "-b:a", "128k"],
     },
     "export_free": {
-        "scale": "scale=-2:720",
+        "scale": "scale=720:-2",
         "preset": "fast",
-        "crf": "28",
+        "crf": "23",
         "r2_prefix": "renders",
         "file_prefix": "cap",
         "audio": ["-c:a", "aac", "-b:a", "128k"],
@@ -212,16 +218,18 @@ def burn_captions_local(
         wm_scale = 0.28 if plan == "free" else 0.20
 
         wm_spec = watermark if isinstance(watermark, dict) else (watermark.model_dump() if hasattr(watermark, "model_dump") and watermark else None)
+        is_free_wm = False
 
         if plan == "free" and show_watermark and os.path.exists(platform_wm_path):
             wm_path = platform_wm_path
+            is_free_wm = True
         elif wm_spec and wm_spec.get("enabled") and wm_spec.get("image_url"):
             custom_wm_file = download_watermark_image(wm_spec["image_url"], tmpdir)
             if custom_wm_file and os.path.exists(custom_wm_file):
                 wm_path = custom_wm_file
                 wm_position = wm_spec.get("position", "top-right")
                 wm_opacity = float(wm_spec.get("opacity", 1.0))
-                wm_scale = float(wm_spec.get("scale", 0.28))
+                wm_scale = float(wm_spec.get("scale", 0.20))
 
         if wm_path and os.path.exists(wm_path):
             w, h = probe_video_dimensions(local_video)
@@ -245,7 +253,11 @@ def burn_captions_local(
                 effective_w, effective_h = w, h
 
             wm_width, overlay_expr = get_watermark_config(
-                effective_w, effective_h, position=wm_position, scale_pct=wm_scale
+                effective_w,
+                effective_h,
+                position=wm_position,
+                scale_pct=wm_scale,
+                is_free_plan=is_free_wm,
             )
 
             # High quality alpha compositing with opacity & anti-aliased bicubic scaling

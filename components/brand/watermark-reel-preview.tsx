@@ -19,13 +19,21 @@ export function WatermarkReelPreview({
   const opacity = config?.opacity ?? 0.7
   const scale = config?.scale ?? 0.20
 
-  // Position aligned with modal/burner.py get_watermark_config():
-  // margin_x = 6.5% of video width, margin_y = 24% of video height (safe top zone)
-  const getPositionStyle = (pos: string = position) => {
-    if (pos === "top-left") {
-      return { top: "24%", left: "6.5%" }
+  // Position logic:
+  // - Free Plan: Platform watermark at 24% from top, 6.5% from side
+  // - Paid Plan: Custom brand logo at top-left or top-right with comfortable margin (5% from top, 5% from sides)
+  const getPositionStyle = (pos: string = position, isFree: boolean = isFreePlan) => {
+    if (isFree) {
+      if (pos === "top-left") {
+        return { top: "24%", left: "6.5%" }
+      }
+      return { top: "24%", right: "6.5%" }
     }
-    return { top: "24%", right: "6.5%" }
+
+    if (pos === "top-left") {
+      return { top: "5%", left: "5%" }
+    }
+    return { top: "5%", right: "5%" }
   }
 
   return (
@@ -45,7 +53,7 @@ export function WatermarkReelPreview({
         {isFreePlan ? (
           <div
             style={{
-              ...getPositionStyle("top-right"),
+              ...getPositionStyle("top-right", true),
               width: "28%",
               opacity: 1.0,
             }}

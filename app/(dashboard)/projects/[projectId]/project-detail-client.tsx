@@ -170,7 +170,7 @@ export function ProjectDetailClient({
     // For free users: download the preview captioned video immediately
     if (clip.previewVideoUrl) {
       triggerDirectDownload(clip.previewVideoUrl, `${clip.title}_captioned`)
-      toast.success("Download started!")
+      toast.success("Download started (720p HD with Watermark)!")
       return
     }
 
