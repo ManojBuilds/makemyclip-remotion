@@ -72,18 +72,19 @@ def classify_layout(tracks: list, scores: list, width: int, height: int) -> str:
         sc = scores[tidx] if tidx < len(scores) else []
         _, mean_sc, max_sc, mean_s, dur = is_valid_face_track(tr, sc, frame_height=float(height))
         mean_x = float(np.mean(tr["proc_track"]["x"]))
+        mean_y = float(np.mean(tr["proc_track"]["y"]))
         norm_x = mean_x / float(width) if mean_x > 1.0 else mean_x
+        norm_y = mean_y / float(height) if mean_y > 1.0 else mean_y
         norm_s = mean_s / float(height) if mean_s > 1.0 else mean_s
         
-        # A dominant center speaker has a decent face size (>18% height) or sits in the middle 60% of the screen
-        if (norm_s >= 0.18 or (0.20 <= norm_x <= 0.80 and norm_s >= 0.12)) and (max_sc > 0.10 or dur > 30):
+        # A dominant center speaker is positioned towards the center region (not tucked into an outer corner)
+        is_corner = (norm_x < 0.25 or norm_x > 0.75) and (norm_y < 0.30 or norm_y > 0.70) and norm_s <= 0.28
+        if not is_corner and (norm_s >= 0.18 or (0.22 <= norm_x <= 0.78 and norm_s >= 0.12)) and (max_sc > 0.10 or dur > 30):
             has_dominant_speaker = True
             break
 
-    # Check for Corner Facecam (Gaming / Screencast with streamer overlay)
-    # Only classify as GAMING if:
-    # 1. No dominant center speaker is present.
-    # 2. The corner track is actually an active speaker (max_sc > 0.20 and persistent duration).
+    # Check for Corner Facecam (Screencast / Gaming with streamer/presenter overlay)
+    # If no dominant center speaker is present, check if the face is in a corner
     if not has_dominant_speaker:
         for tidx, tr in valid_tracks:
             sc = scores[tidx] if tidx < len(scores) else []
@@ -95,17 +96,16 @@ def classify_layout(tracks: list, scores: list, width: int, height: int) -> str:
             norm_s = mean_s / float(height) if mean_s > 1.0 else mean_s
 
             if (
-                norm_s <= 0.25
+                norm_s <= 0.28
                 and (norm_x < 0.30 or norm_x > 0.70)
                 and (norm_y < 0.35 or norm_y > 0.65)
-                and max_sc >= 0.20
-                and dur >= max(20, int(total_max_frame * 0.25))
+                and dur >= max(15, int(total_max_frame * 0.15))
             ):
                 logger.info(
-                    "Classified layout as GAMING (detected active corner facecam overlay at x=%.2f, y=%.2f, s=%.2f, max_sc=%.2f)",
+                    "Classified layout as SCREENCAST (detected active corner facecam overlay at x=%.2f, y=%.2f, s=%.2f, max_sc=%.2f)",
                     norm_x, norm_y, norm_s, max_sc,
                 )
-                return "gaming"
+                return "screencast"
 
     # Build a per-frame mapping of simultaneous face X positions
     frame_faces: dict[int, list[float]] = {}

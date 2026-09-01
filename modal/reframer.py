@@ -1348,9 +1348,30 @@ class AIReframe:
         # Pre-compute layout per frame based on OpusClip global layout consistency.
         # This completely prevents "random" letterbox / layout whiplash mid-clip.
         frame_layout = ["single"] * max_frames
-        if crop_mode in ("split", "letterbox", "screencast", "presentation", "panel", "gaming", "passthrough"):
+        if crop_mode in ("split", "letterbox", "panel", "gaming", "passthrough"):
             mapped = crop_mode
             frame_layout = [mapped] * max_frames
+        elif crop_mode in ("screencast", "presentation"):
+            # Adaptive Screencast Engine: Evaluate each scene cut individually.
+            # If a scene is a dominant solo talking head (e.g. host intro full-screen), use "single" (reframe).
+            # If a scene is screencast / corner webcam / slides, use "screencast".
+            for sf, ef in sb:
+                if sf >= max_frames:
+                    continue
+                ef = min(ef, max_frames)
+                if ef <= sf:
+                    continue
+                scene_tr, scene_sc = slice_tracks_and_scores(tracks, scores, sf, ef)
+                scene_layout = classify_layout(scene_tr, scene_sc, source_w, source_h)
+                if scene_layout == "reframe":
+                    mapped = "single"
+                elif scene_layout == "split":
+                    mapped = "split"
+                else:
+                    mapped = "screencast"
+                for f in range(sf, ef):
+                    frame_layout[f] = mapped
+            logger.info("Adaptive Screencast Engine: Evaluated %d scene cuts across clip", len(sb))
         elif crop_mode == "auto":
             # Per-scene intelligent layout adaptation (OpusClip style):
             # Each genuine scene cut is evaluated individually. If a scene has 2 distinct simultaneous speakers,
@@ -2361,12 +2382,19 @@ class AIReframe:
                         crop_mode = req_crop_mode
                         reported_crop_mode = crop_mode
                         if crop_mode == "auto":
-                            reported_crop_mode = self.classify_layout(
-                                clip_tracks,
-                                clip_scores,
-                                actual_w,
-                                actual_h,
+                            global_recommended_mode = (
+                                precomputed_analysis.get("content_classification", {}).get("recommended_crop_mode")
+                                if precomputed_analysis else None
                             )
+                            if global_recommended_mode and global_recommended_mode not in ("auto", "reframe"):
+                                reported_crop_mode = global_recommended_mode
+                            else:
+                                reported_crop_mode = self.classify_layout(
+                                    clip_tracks,
+                                    clip_scores,
+                                    actual_w,
+                                    actual_h,
+                                )
                         logger.info("Clip %s layout (reported): %s", clip_id, reported_crop_mode)
 
                         # Slice scene bounds for this clip

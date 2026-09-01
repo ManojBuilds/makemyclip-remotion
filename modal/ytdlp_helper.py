@@ -249,32 +249,13 @@ def download_youtube_video(
             "No COOKIES_TXT env var found — YouTube may throttle or block the download"
         )
 
-    # If a segment is requested, check the video duration first.
-    # If the video is under 3 hours (<= 10800s), it is MUCH faster to download the full video natively
-    # using parallel HTTP streams than to download a segment using yt-dlp's ffmpeg-range-downloader
-    # (which gets heavily throttled by YouTube to ~120KB/s).
-    if start_time is not None and end_time is not None:
-        try:
-            probe_opts = {
-                "cookiefile": cookies_path,
-                "quiet": True,
-                "no_warnings": True,
-                "js_runtimes": {"deno": {"path": "/usr/local/bin/deno"}},
-            }
-            with yt_dlp.YoutubeDL(probe_opts) as ydl_probe:
-                probe_info = ydl_probe.extract_info(vurl, download=False)
-                vid_duration = probe_info.get("duration")
-                if vid_duration and vid_duration <= 10800:
-                    logger.info(
-                        "Video duration is under 3 hours (%.1fs <= 10800s) — downloading FULL video natively to bypass YouTube speed throttles...",
-                        vid_duration,
-                    )
-                    start_time = None
-                    end_time = None
-        except Exception as e:
-            logger.warning("Could not probe video duration: %s", e)
+    # For high quality (720p/1080p), always download the full video natively using fast parallel DASH streams
+    # (Modal has multi-gigabit bandwidth so downloading the 1080p stream takes ~3s and avoids YouTube 360p range downgrade).
+    if max_height >= 720:
+        start_time = None
+        end_time = None
 
-    # mweb (mobile web) client provides HD formats without requiring PO Tokens.
+    # mweb / android client provides HD formats without requiring PO Tokens.
     ydl_opts = {
         "outtmpl": f"{tmpdir}/%(title)s.%(ext)s",
         "cookiefile": cookies_path,
@@ -287,20 +268,14 @@ def download_youtube_video(
         "concurrent_fragment_downloads": 8,
         "js_runtimes": {"deno": {"path": "/usr/local/bin/deno"}},
         "remote_components": ["ejs:github"],
-        "format": f"bestvideo[height<={max_height}]+bestaudio/best[height<={max_height}]/best",
+        "format": "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=1080]+bestaudio/bestvideo+bestaudio/best[height<=1080]/best",
         "merge_output_format": "mp4",
-        "format_sort": ["res", "vcodec:h264", "ext:mp4:m4a", "acodec:aac"],
+        "format_sort": ["res:1080", "res:720", "vcodec:h264", "ext:mp4:m4a"],
         "postprocessors": [{"key": "FFmpegVideoRemuxer", "preferedformat": "mp4"}],
     }
 
     actual_segment_offset = 0.0
 
-    # Segment download: fetch only the needed portion instead of the full video.
-    # 10s padding on each side ensures the segment extends past the nearest
-    # keyframes.  We intentionally do NOT set force_keyframes_at_cuts because
-    # that triggers a full libx264 re-encode of the segment (43s+ observed in
-    # production).  Stream-copy is near-instant; downstream ffmpeg -ss handles
-    # precise seeking within the padded segment.
     if start_time is not None and end_time is not None:
         seg_start = max(0.0, start_time - SEGMENT_DOWNLOAD_PAD_S)
         seg_end = end_time + SEGMENT_DOWNLOAD_PAD_S

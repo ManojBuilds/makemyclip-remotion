@@ -472,6 +472,18 @@ class VideoAnalyzer:
                         "recommended_layout": scene_layout,
                     })
 
+            # Extract track positions for spatial layout detection
+            face_positions = []
+            for px, py, ps in zip(_track_proc_x, _track_proc_y, _track_proc_s):
+                if len(px) > 0:
+                    mean_x = float(np.mean(px))
+                    mean_y = float(np.mean(py))
+                    mean_s = float(np.mean(ps))
+                    norm_x = mean_x / float(width) if mean_x > 1.0 else mean_x
+                    norm_y = mean_y / float(height) if mean_y > 1.0 else mean_y
+                    norm_s = mean_s / float(height) if mean_s > 1.0 else mean_s
+                    face_positions.append({"x": norm_x, "y": norm_y, "s": norm_s})
+
             # Run global heuristic content classification
             from content_classifier import classify_content
             content_classification = classify_content(
@@ -482,6 +494,7 @@ class VideoAnalyzer:
                 duration=float(duration_secs),
                 start_time=float(start_sec),
                 known_face_count=len(global_tracks),
+                face_positions=face_positions,
             )
             logger.info(
                 "Global content classification: type=%s, confidence=%.2f, recommended_crop_mode=%s",
@@ -489,6 +502,13 @@ class VideoAnalyzer:
                 content_classification.confidence,
                 content_classification.recommended_crop_mode,
             )
+
+            # If global classification definitively found a specialized layout (e.g. screencast / gaming),
+            # harmonize scene layouts that fell back to generic reframe/letterbox
+            if content_classification.recommended_crop_mode in ("screencast", "presentation", "gaming", "panel"):
+                for sl in scene_layouts:
+                    if sl["recommended_layout"] in ("reframe", "letterbox"):
+                        sl["recommended_layout"] = content_classification.recommended_crop_mode
 
             # Build comprehensive analysis object
             analysis_data = {

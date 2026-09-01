@@ -123,7 +123,17 @@ def run_all_tests():
     out = strategy.render_frame(frame, 0, faces, {})
     assert out.shape == (1920, 1080, 3), f"Invalid shape {out.shape}"
     cv2.imwrite("test_outputs/3_screencast.jpg", out)
-    print("  ✅ ScreencastStrategy rendered 1080x1920 smart-zoomed card + PiP -> test_outputs/3_screencast.jpg")
+    print("  ✅ ScreencastStrategy rendered 1080x1920 3-panel layout -> test_outputs/3_screencast.jpg")
+
+    # Adaptive Test: When video cuts to full-screen solo presenter in screencast mode
+    print("▶ Testing 3b. Screencast Adaptive Solo Cut (crop_mode='screencast' with full-screen presenter)...")
+    frame_solo = create_test_frame(1920, 1080, "normal")
+    cv2.circle(frame_solo, (960, 400), 80, (200, 180, 160), -1)
+    faces_solo = [{"x": 960, "y": 400, "s": 180, "score": 0.95}]
+    out_solo = strategy.render_frame(frame_solo, 0, faces_solo, {"target_cx": 960, "current_cx": 960})
+    assert out_solo.shape == (1920, 1080, 3), f"Invalid shape {out_solo.shape}"
+    cv2.imwrite("test_outputs/3b_screencast_adaptive_solo.jpg", out_solo)
+    print("  ✅ ScreencastStrategy adaptively rendered full 9:16 talking head -> test_outputs/3b_screencast_adaptive_solo.jpg")
 
     # -------------------------------------------------------------
     # 4. Slide Presentation (Presentation)

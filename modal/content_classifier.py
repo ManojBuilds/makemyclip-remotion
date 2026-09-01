@@ -172,35 +172,26 @@ def classify_content(
         )
 
     # 3. Screencast / Presentation checks
-    # Real screencasts/code editors have dense sharp horizontal text/UI lines (>0.35)
-    if edge_score > 0.35:
-        # Check if there is a tiny corner face (Presentation / Screencast with webcam)
-        has_corner_face = False
-        if face_positions:
-            for f in face_positions:
-                fx = f.get("x", 0.5)
-                fy = f.get("y", 0.5)
-                fs = f.get("s", 0.1)
-                # If face is small (<15% of frame) and located in outer quadrant
-                if fs < 0.15 and (fx < 0.25 or fx > 0.75) and (fy < 0.25 or fy > 0.75):
-                    has_corner_face = True
-                    break
+    # Screen recordings (browser, code editors, slides, spreadsheets, app UIs)
+    # have sharp UI/text edge density (typically 0.18 - 0.40) or a corner facecam overlay.
+    has_corner_face = False
+    if face_positions:
+        for f in face_positions:
+            fx = f.get("x", 0.5)
+            fy = f.get("y", 0.5)
+            fs = f.get("s", 0.1)
+            # If face is small (<=28% of frame) and located in a corner quadrant
+            if fs <= 0.28 and (fx < 0.30 or fx > 0.70) and (fy < 0.35 or fy > 0.65):
+                has_corner_face = True
+                break
 
-        if has_corner_face:
-            return ContentClassification(
-                content_type=ContentType.PRESENTATION,
-                confidence=0.85,
-                recommended_crop_mode="presentation",
-                skip_face_tracking=False,
-                metadata={"edge_score": edge_score, "has_corner_face": True},
-            )
-
+    if edge_score > 0.18 or (has_corner_face and edge_score > 0.10):
         return ContentClassification(
             content_type=ContentType.SCREENCAST,
-            confidence=0.82,
+            confidence=0.92,
             recommended_crop_mode="screencast",
-            skip_face_tracking=(known_face_count == 0),
-            metadata={"edge_score": edge_score},
+            skip_face_tracking=False,
+            metadata={"edge_score": edge_score, "has_corner_face": has_corner_face},
         )
 
     # 4. Gaming check (high continuous motion + high contrast colors)

@@ -403,7 +403,7 @@ For each candidate clip, generate:
 - viralReason: 1 sentence explaining why this clip will go viral
 - description: Engaging social media post description
 - hashtags: Top 5 space-separated hashtags (e.g. #shorts #viral)
-- cropType: Suggested video layout for this clip: one of ["auto", "reframe", "split", "screencast", "presentation", "panel", "gaming", "letterbox"]
+- clipType: one of ["hot_take", "funny_exchange", "quotable", "debate", "aha_moment"]
 
 Candidates:
 {"\n\n".join(candidate_summaries)}"""
@@ -422,7 +422,6 @@ Candidates:
                             "description": {"type": "STRING"},
                             "hashtags": {"type": "STRING"},
                             "clipType": {"type": "STRING"},
-                            "cropMode": {"type": "STRING"},
                         },
                     },
                 }
@@ -475,8 +474,6 @@ Candidates:
                         c["hashtags"] = gem["hashtags"]
                     if gem.get("clipType"):
                         c["clipType"] = gem["clipType"]
-                    if gem.get("cropMode"):
-                        c["cropMode"] = gem["cropMode"]
                 logger.info("Successfully enriched %d clips with Gemini metadata directly in Modal transcriber.", len(viral_clips))
     except Exception as err:
         logger.warning("Gemini enrichment in Modal transcriber failed, proceeding with AssemblyAI defaults: %s", err)

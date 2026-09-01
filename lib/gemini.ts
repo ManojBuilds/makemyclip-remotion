@@ -39,7 +39,6 @@ export type AIClipSuggestion = {
   hashtags: string
   clipType: LongFormClipType
   speakerDynamic: string
-  cropMode?: "reframe" | "letterbox" | "split" | "course" | "auto"
 }
 
 export interface VisualAudioMetrics {

@@ -295,7 +295,353 @@ class LetterboxStrategy(RenderStrategy):
 
 
 class ScreencastStrategy(RenderStrategy):
-    """Smart Zoom Letterbox with Active Mouse Cursor & Saliency Tracking."""
+    """Premium 3-Panel Screencast Layout.
+
+    ┌──────────────────────┐  y=0
+    │   (margin 40px)      │
+    ├──────────────────────┤  y=40
+    │                      │
+    │   Screen Recording   │  Rounded-corner card with saliency zoom
+    │   (fit-to-width)     │  Height ≈ 700px
+    │                      │
+    ├──────────────────────┤  y≈740
+    │   (caption zone)     │  ~200px gap for ASS subtitles
+    ├──────────────────────┤  y≈940
+    │                      │
+    │   Speaker Webcam     │  Face-tracked, zoomed-to-fill
+    │   (corner cam crop)  │  Height ≈ 980px
+    │                      │
+    └──────────────────────┘  y=1920
+
+    When no face is detected, falls back to a full-height centered letterbox card.
+    """
+
+    # Layout geometry constants (1080×1920)
+    MARGIN_TOP = 40
+    SCREEN_CARD_TOP = 40
+    SCREEN_CARD_H = 740
+    SCREEN_CARD_W = 1000  # slightly inset from 1080 for breathing room
+    CORNER_RADIUS = 20
+    CAPTION_GAP = 90   # compact caption zone between screen and speaker
+    SPEAKER_TOP = 870  # SCREEN_CARD_TOP + SCREEN_CARD_H + CAPTION_GAP
+    SPEAKER_H = 920    # Leaves generous ~130px margin at bottom for social UI
+    BG_COLOR = (10, 10, 10)  # #0a0a0a in BGR
+
+    def _make_rounded_mask(self, w: int, h: int, radius: int) -> np.ndarray:
+        """Create a rounded rectangle alpha mask (0-255)."""
+        mask = np.zeros((h, w), dtype=np.uint8)
+        r = min(radius, w // 2, h // 2)
+        cv2.rectangle(mask, (0, r), (w, h - r), 255, -1)
+        cv2.rectangle(mask, (r, 0), (w - r, h), 255, -1)
+        cv2.circle(mask, (r, r), r, 255, -1)
+        cv2.circle(mask, (w - r, r), r, 255, -1)
+        cv2.circle(mask, (r, h - r), r, 255, -1)
+        cv2.circle(mask, (w - r, h - r), r, 255, -1)
+        return mask
+
+    def _render_screen_card(
+        self,
+        img: np.ndarray,
+        bg: np.ndarray,
+        state: dict,
+    ) -> None:
+        """Render the screen recording as a rounded-corner card with Vizard-grade rock-solid tracking."""
+        img_h, img_w = img.shape[:2]
+        card_w = self.SCREEN_CARD_W
+        card_h = self.SCREEN_CARD_H
+
+        # --- High-Stability Temporal Motion Heatmap ---
+        small_w, small_h = 320, 180
+        gray_small = cv2.cvtColor(cv2.resize(img, (small_w, small_h)), cv2.COLOR_BGR2GRAY)
+
+        prev_gray = state.get("screencast_prev_gray")
+        accum_motion = state.get("screencast_accum_motion")
+        if accum_motion is None or accum_motion.shape != (small_h, small_w):
+            accum_motion = np.zeros((small_h, small_w), dtype=np.float32)
+
+        has_highlight_action = False
+        action_x_pct = 0.5
+        action_y_pct = 0.5
+
+        if prev_gray is not None and prev_gray.shape == gray_small.shape:
+            try:
+                frame_diff = cv2.absdiff(gray_small, prev_gray)
+                _, thresh = cv2.threshold(frame_diff, 30, 255, cv2.THRESH_BINARY)
+                # Exponential decay accumulation for temporal stability (0.85 past + 0.15 new)
+                accum_motion = accum_motion * 0.85 + thresh.astype(np.float32) * 0.15
+                motion_pixels = cv2.countNonZero(thresh)
+
+                # Ignore whole-frame flicker / scene transitions (>3000px) and micro-noise (<30px)
+                if 30 < motion_pixels < 2500:
+                    accum_thresh = np.where(accum_motion > 35, 255, 0).astype(np.uint8)
+                    moments = cv2.moments(accum_thresh)
+                    if moments["m00"] > 0:
+                        raw_x = float(moments["m10"] / moments["m00"]) / float(small_w)
+                        raw_y = float(moments["m01"] / moments["m00"]) / float(small_h)
+                        # Clamp to safety margins so we don't pin to extreme borders
+                        action_x_pct = max(0.20, min(0.80, raw_x))
+                        action_y_pct = max(0.20, min(0.80, raw_y))
+                        has_highlight_action = True
+            except Exception:
+                has_highlight_action = False
+
+        state["screencast_prev_gray"] = gray_small
+        state["screencast_accum_motion"] = accum_motion
+
+        # --- Dead-Zone & Hysteresis Zoom Controller ---
+        # Current and target tracking state
+        held_target_x = state.get("screencast_zoom_target_x", 0.5)
+        held_target_y = state.get("screencast_zoom_target_y", 0.5)
+        zoom_hold_timer = state.get("screencast_zoom_timer", 0)
+
+        # 18% dead-zone: only update target focal point if motion is far from current focal point
+        DEAD_ZONE = 0.18
+        if has_highlight_action:
+            dist = math.hypot(action_x_pct - held_target_x, action_y_pct - held_target_y)
+            if dist > DEAD_ZONE:
+                held_target_x = action_x_pct
+                held_target_y = action_y_pct
+                state["screencast_zoom_target_x"] = held_target_x
+                state["screencast_zoom_target_y"] = held_target_y
+
+            # Reset hold timer (90 frames ≈ 3 seconds of stability)
+            state["screencast_zoom_timer"] = 90
+            target_zoom = 1.18  # subtle, professional crop (not aggressive 1.35x)
+            target_cx_pct = held_target_x
+            target_cy_pct = held_target_y
+        elif zoom_hold_timer > 0:
+            state["screencast_zoom_timer"] = zoom_hold_timer - 1
+            target_zoom = 1.18
+            target_cx_pct = held_target_x
+            target_cy_pct = held_target_y
+        else:
+            # Settle back smoothly to full overview
+            target_zoom = 1.0
+            target_cx_pct = 0.5
+            target_cy_pct = 0.5
+
+        # --- Cinematic Ultra-Smooth Easing (Gentle Damping) ---
+        curr_zoom = state.get("screencast_curr_zoom", 1.0)
+        curr_cx_pct = state.get("screencast_curr_cx", 0.5)
+        curr_cy_pct = state.get("screencast_curr_cy", 0.5)
+
+        ZOOM_ALPHA = 0.035
+        PAN_ALPHA = 0.025
+
+        curr_zoom += (target_zoom - curr_zoom) * ZOOM_ALPHA
+        curr_cx_pct += (target_cx_pct - curr_cx_pct) * PAN_ALPHA
+        curr_cy_pct += (target_cy_pct - curr_cy_pct) * PAN_ALPHA
+
+        # Lock when settled within 0.5% to prevent micro-jitter
+        if abs(curr_cx_pct - target_cx_pct) < 0.005:
+            curr_cx_pct = target_cx_pct
+        if abs(curr_cy_pct - target_cy_pct) < 0.005:
+            curr_cy_pct = target_cy_pct
+        if abs(curr_zoom - target_zoom) < 0.005:
+            curr_zoom = target_zoom
+
+        state["screencast_curr_zoom"] = curr_zoom
+        state["screencast_curr_cx"] = curr_cx_pct
+        state["screencast_curr_cy"] = curr_cy_pct
+
+        # Scale source to fill the card area
+        scale = (card_h * curr_zoom) / float(max(img_h, 1))
+        scaled_h = int(card_h * curr_zoom)
+        scaled_w = int(img_w * scale)
+        res_scaled = cv2.resize(img, (max(scaled_w, 1), max(scaled_h, 1)), interpolation=cv2.INTER_AREA)
+
+        # Crop to card dimensions centered on smoothed focal point
+        cx_px = curr_cx_pct * scaled_w
+        cy_px = curr_cy_pct * scaled_h
+        tx = max(0, min(int(cx_px - card_w // 2), max(0, scaled_w - card_w)))
+        ty = max(0, min(int(cy_px - card_h // 2), max(0, scaled_h - card_h)))
+        card_content = res_scaled[ty: min(ty + card_h, res_scaled.shape[0]),
+                                  tx: min(tx + card_w, res_scaled.shape[1])]
+
+        # Pad to exact card dimensions if necessary
+        if card_content.shape[0] < card_h or card_content.shape[1] < card_w:
+            padded = np.full((card_h, card_w, 3), self.BG_COLOR, dtype=np.uint8)
+            ph, pw = card_content.shape[:2]
+            padded[:ph, :pw] = card_content
+            card_content = padded
+
+        # Apply rounded corners via alpha mask
+        mask = state.get("_screencast_card_mask")
+        if mask is None or mask.shape[:2] != (card_h, card_w):
+            mask = self._make_rounded_mask(card_w, card_h, self.CORNER_RADIUS)
+            state["_screencast_card_mask"] = mask
+
+        # Composite card onto bg
+        card_x = (self.target_w - card_w) // 2
+        card_y = self.SCREEN_CARD_TOP
+        roi = bg[card_y: card_y + card_h, card_x: card_x + card_w]
+        mask_3ch = mask[:, :, np.newaxis].astype(np.float32) / 255.0
+        blended = (card_content.astype(np.float32) * mask_3ch +
+                   roi.astype(np.float32) * (1.0 - mask_3ch))
+        bg[card_y: card_y + card_h, card_x: card_x + card_w] = blended.astype(np.uint8)
+
+        # Subtle drop shadow beneath the card
+        shadow_y = card_y + card_h
+        if shadow_y + 3 < self.target_h:
+            shadow_strip = bg[shadow_y: shadow_y + 3, card_x: card_x + card_w]
+            bg[shadow_y: shadow_y + 3, card_x: card_x + card_w] = (
+                shadow_strip.astype(np.float32) * 0.5
+            ).astype(np.uint8)
+
+    def _render_speaker_panel(
+        self,
+        img: np.ndarray,
+        bg: np.ndarray,
+        faces_fidx: List[Dict[str, Any]],
+        state: dict,
+    ) -> bool:
+        """Render the speaker webcam feed matching professional vertical shorts composition.
+
+        Frames the person naturally with ample headroom, shoulders, and horizontal
+        breathing room on left and right, leaving comfortable margin at the bottom.
+        """
+        img_h, img_w = img.shape[:2]
+        panel_w = self.SCREEN_CARD_W
+        panel_h = self.SPEAKER_H
+
+        # --- Corner Facecam Identification ---
+        corner_face = None
+        if faces_fidx:
+            for f in faces_fidx:
+                raw_x = float(f.get("x", 0))
+                raw_y = float(f.get("y", 0))
+                raw_s = float(f.get("s", 0))
+                fx = raw_x / img_w if raw_x > 1.0 else raw_x
+                fy = raw_y / img_h if raw_y > 1.0 else raw_y
+                fs = raw_s / img_h if raw_s > 1.0 else raw_s
+                # Corner facecam usually <= 35% height and near outer quadrants
+                if 0.02 < fs <= 0.35 and ((fx < 0.35 or fx > 0.65) or (fy < 0.35 or fy > 0.65)):
+                    corner_face = f
+                    break
+
+        # Update face memory for smooth persistence
+        if corner_face is not None:
+            raw_x = float(corner_face.get("x", 0))
+            raw_y = float(corner_face.get("y", 0))
+            raw_s = float(corner_face.get("s", 0))
+            fx_px = raw_x * img_w if raw_x <= 1.0 else raw_x
+            fy_px = raw_y * img_h if raw_y <= 1.0 else raw_y
+            fs_px = raw_s * img_h if raw_s <= 1.0 else raw_s
+            if fs_px > 5:
+                state["sc_speaker_fx"] = fx_px
+                state["sc_speaker_fy"] = fy_px
+                state["sc_speaker_fs"] = fs_px
+                state["sc_speaker_frames_missing"] = 0
+
+        last_fx = state.get("sc_speaker_fx")
+        last_fy = state.get("sc_speaker_fy")
+        last_fs = state.get("sc_speaker_fs")
+        frames_missing = state.get("sc_speaker_frames_missing", 0)
+
+        if corner_face is None:
+            state["sc_speaker_frames_missing"] = frames_missing + 1
+
+        if last_fs is None or last_fs < 5 or frames_missing > 60:
+            return False
+
+        # --- Quadrant-Aware Bounds (prevents taskbar and browser spill) ---
+        crop_aspect = float(panel_w) / float(panel_h)
+        crop_h_src = min(float(img_h * 0.35), max(last_fs * 2.5, float(img_h * 0.22)))
+        crop_w_src = crop_h_src * crop_aspect
+        if crop_w_src > img_w:
+            crop_w_src = float(img_w)
+            crop_h_src = crop_w_src / crop_aspect
+
+        # Vertical centering: face in upper 40%, chin/neck/shoulders/body in lower 50%
+        cy_src = last_fy + last_fs * 0.45
+        cx_src = last_fx
+
+        # If in bottom quadrant, keep bottom edge above the OS taskbar
+        if last_fy > img_h * 0.60:
+            max_allowed_bottom = float(img_h) * 0.96
+            if cy_src + crop_h_src / 2.0 > max_allowed_bottom:
+                cy_src = max_allowed_bottom - crop_h_src / 2.0
+
+        # Clamp strictly within image bounds
+        half_w = crop_w_src / 2.0
+        half_h = crop_h_src / 2.0
+        cx_src = max(half_w, min(float(img_w) - half_w, cx_src))
+        cy_src = max(half_h, min(float(img_h) - half_h, cy_src))
+
+        # Smooth temporal camera motion (damping micro-jitter)
+        curr_cx = state.get("sc_speaker_cam_cx", cx_src)
+        curr_cy = state.get("sc_speaker_cam_cy", cy_src)
+
+        DEAD_ZONE_PX = 8.0
+        if abs(cx_src - curr_cx) > DEAD_ZONE_PX:
+            curr_cx += (cx_src - curr_cx) * 0.05
+        if abs(cy_src - curr_cy) > DEAD_ZONE_PX:
+            curr_cy += (cy_src - curr_cy) * 0.05
+
+        state["sc_speaker_cam_cx"] = curr_cx
+        state["sc_speaker_cam_cy"] = curr_cy
+
+        # Final crop coordinates clamped to bounds
+        x1 = max(0, min(int(curr_cx - half_w), img_w - int(crop_w_src)))
+        y1 = max(0, min(int(curr_cy - half_h), img_h - int(crop_h_src)))
+        x2 = min(img_w, x1 + int(crop_w_src))
+        y2 = min(img_h, y1 + int(crop_h_src))
+
+        if x2 - x1 < 10 or y2 - y1 < 10:
+            return False
+
+        speaker_crop = img[y1:y2, x1:x2]
+        speaker_resized = cv2.resize(speaker_crop, (panel_w, panel_h), interpolation=cv2.INTER_LANCZOS4)
+
+        # Subtle unsharp mask to restore facial clarity
+        blurred = cv2.GaussianBlur(speaker_resized, (0, 0), 1.2)
+        speaker_sharpened = cv2.addWeighted(speaker_resized, 1.22, blurred, -0.22, 0)
+
+        # Composite speaker panel onto background with rounded card mask
+        mask = state.get("_screencast_speaker_mask")
+        if mask is None or mask.shape[:2] != (panel_h, panel_w):
+            mask = self._make_rounded_mask(panel_w, panel_h, self.CORNER_RADIUS)
+            state["_screencast_speaker_mask"] = mask
+
+        card_x = (self.target_w - panel_w) // 2
+        card_y = self.SPEAKER_TOP
+        roi = bg[card_y: card_y + panel_h, card_x: card_x + panel_w]
+        mask_3ch = mask[:, :, np.newaxis].astype(np.float32) / 255.0
+        blended = (speaker_sharpened.astype(np.float32) * mask_3ch +
+                   roi.astype(np.float32) * (1.0 - mask_3ch))
+        bg[card_y: card_y + panel_h, card_x: card_x + panel_w] = blended.astype(np.uint8)
+
+        # Subtle drop shadow beneath the speaker card
+        shadow_y = card_y + panel_h
+        if shadow_y + 3 < self.target_h:
+            shadow_strip = bg[shadow_y: shadow_y + 3, card_x: card_x + panel_w]
+            bg[shadow_y: shadow_y + 3, card_x: card_x + panel_w] = (
+                shadow_strip.astype(np.float32) * 0.5
+            ).astype(np.uint8)
+
+        return True
+
+    def _render_fallback_letterbox(
+        self,
+        img: np.ndarray,
+        bg: np.ndarray,
+        state: dict,
+    ) -> None:
+        """Fallback: full-height centered letterbox card (no speaker panel)."""
+        CARD_W = self.target_w
+        CARD_H = int(self.target_h * 0.70)
+        img_h, img_w = img.shape[:2]
+        scale = CARD_H / float(max(img_h, 1))
+        scaled_h = CARD_H
+        scaled_w = int(img_w * scale)
+        res_scaled = cv2.resize(img, (max(scaled_w, 1), max(scaled_h, 1)), interpolation=cv2.INTER_AREA)
+
+        tx = max(0, min(scaled_w // 2 - CARD_W // 2, max(0, scaled_w - CARD_W)))
+        card = res_scaled[0:CARD_H, tx: tx + CARD_W]
+
+        start_y = (self.target_h - CARD_H) // 2
+        ch, cw = card.shape[:2]
+        bg[start_y: start_y + ch, 0: cw] = card
 
     def render_frame(
         self,
@@ -304,126 +650,35 @@ class ScreencastStrategy(RenderStrategy):
         faces_fidx: List[Dict[str, Any]],
         state: Dict[str, Any],
     ) -> np.ndarray:
-        bg = make_blurred_bg(img, target_w=self.target_w, target_h=self.target_h)
-        CARD_W = self.target_w
-        CARD_H = int(self.target_h * 0.70)
+        # --- Dynamic Shot Adaptation: Solo Talking Head Check ---
+        # If the frame contains a dominant full-screen talking head (not a corner facecam),
+        # dynamically adapt to ReframeStrategy (full vertical 9:16 framing).
         img_h, img_w = img.shape[:2]
-
-        small_w, small_h = 320, 180
-        gray_small = cv2.cvtColor(cv2.resize(img, (small_w, small_h)), cv2.COLOR_BGR2GRAY)
-
-        # 1. Detect Intentional Highlight Actions (Cursor Motion / Active Typing)
-        prev_gray = state.get("screencast_prev_gray")
-        has_highlight_action = False
-        action_x_pct = 0.5
-        action_y_pct = 0.4
-
-        if prev_gray is not None and prev_gray.shape == gray_small.shape:
-            try:
-                frame_diff = cv2.absdiff(gray_small, prev_gray)
-                _, thresh = cv2.threshold(frame_diff, 25, 255, cv2.THRESH_BINARY)
-                motion_pixels = cv2.countNonZero(thresh)
-
-                # Intentional action signature (mouse pointing / code typing)
-                if 15 < motion_pixels < 3500:
-                    moments = cv2.moments(thresh)
-                    if moments["m00"] > 0:
-                        action_x_pct = float(moments["m10"] / moments["m00"]) / float(small_w)
-                        action_y_pct = float(moments["m01"] / moments["m00"]) / float(small_h)
-                        has_highlight_action = True
-            except Exception:
-                has_highlight_action = False
-
-        state["screencast_prev_gray"] = gray_small
-
-        # 2. Editor Highlight Zoom Controller (Lock & Snappy Punch-In Zoom)
-        # Base state: 1.0x (Rock-solid stationary overview)
-        # Highlight state: 1.35x (Snappy punch-in directly on highlighted code)
-        zoom_hold_timer = state.get("screencast_zoom_timer", 0)
-
-        if has_highlight_action:
-            # Trigger a 2-second (60 frames) highlight zoom event
-            state["screencast_zoom_timer"] = 60
-            state["screencast_zoom_target_x"] = action_x_pct
-            state["screencast_zoom_target_y"] = action_y_pct
-            target_zoom = 1.35
-            target_cx_pct = action_x_pct
-            target_cy_pct = action_y_pct
-        elif zoom_hold_timer > 0:
-            state["screencast_zoom_timer"] = zoom_hold_timer - 1
-            target_zoom = 1.35
-            target_cx_pct = state.get("screencast_zoom_target_x", 0.5)
-            target_cy_pct = state.get("screencast_zoom_target_y", 0.4)
-        else:
-            # Stationary locked full overview (no drifting!)
-            target_zoom = 1.0
-            target_cx_pct = 0.5
-            target_cy_pct = 0.5
-
-        # 3. Smooth Camera & Zoom Easing
-        curr_zoom = state.get("screencast_curr_zoom", 1.0)
-        curr_cx_pct = state.get("screencast_curr_cx", 0.5)
-        curr_cy_pct = state.get("screencast_curr_cy", 0.5)
-
-        # Smooth easing curves
-        ZOOM_ALPHA = 0.08
-        PAN_ALPHA = 0.06
-
-        curr_zoom += (target_zoom - curr_zoom) * ZOOM_ALPHA
-        curr_cx_pct += (target_cx_pct - curr_cx_pct) * PAN_ALPHA
-        curr_cy_pct += (target_cy_pct - curr_cy_pct) * PAN_ALPHA
-
-        state["screencast_curr_zoom"] = curr_zoom
-        state["screencast_curr_cx"] = curr_cx_pct
-        state["screencast_curr_cy"] = curr_cy_pct
-
-        # 4. Render Zoomed Content onto Centered Card
-        scale = (CARD_H * curr_zoom) / float(max(img_h, 1))
-        scaled_h = int(CARD_H * curr_zoom)
-        scaled_w = int(img_w * scale)
-        res_scaled = cv2.resize(img, (max(scaled_w, 1), max(scaled_h, 1)), interpolation=cv2.INTER_AREA)
-
-        cx_px = curr_cx_pct * scaled_w
-        cy_px = curr_cy_pct * scaled_h
-
-        tx = max(0, min(int(cx_px - CARD_W // 2), max(0, scaled_w - CARD_W)))
-        ty = max(0, min(int(cy_px - CARD_H // 2), max(0, scaled_h - CARD_H)))
-        card_content = res_scaled[ty : min(ty + CARD_H, res_scaled.shape[0]), tx : min(tx + CARD_W, res_scaled.shape[1])]
-
-        start_y = max(0, (self.target_h - card_content.shape[0]) // 2)
-        bg[start_y : start_y + card_content.shape[0], 0 : card_content.shape[1]] = card_content
-
-        # 5. Instructor / Gamer Facecam Picture-in-Picture (PiP)
-        # Use state memory so PiP stays persistent and smooth even if face detection drops momentarily
         if faces_fidx:
-            best_face = max(faces_fidx, key=lambda f: f.get("s", 0))
-            fx, fy, fs = float(best_face.get("x", 0)), float(best_face.get("y", 0)), float(best_face.get("s", 0))
-            if fs > 5:
-                state["pip_last_fx"] = fx
-                state["pip_last_fy"] = fy
-                state["pip_last_fs"] = fs
+            for f in faces_fidx:
+                fx = float(f.get("x", 0)) / img_w if float(f.get("x", 0)) > 1.0 else float(f.get("x", 0))
+                fy = float(f.get("y", 0)) / img_h if float(f.get("y", 0)) > 1.0 else float(f.get("y", 0))
+                fs = float(f.get("s", 0)) / img_h if float(f.get("s", 0)) > 1.0 else float(f.get("s", 0))
+                is_corner = (fx < 0.30 or fx > 0.70) and (fy < 0.35 or fy > 0.65) and fs <= 0.28
+                if not is_corner and (fs >= 0.16 or (0.22 <= fx <= 0.78 and fs >= 0.11)):
+                    # Adaptive switch to Reframe talking head
+                    return ReframeStrategy(self.target_w, self.target_h).render_frame(img, fidx, faces_fidx, state)
 
-        last_fx = state.get("pip_last_fx")
-        last_fy = state.get("pip_last_fy")
-        last_fs = state.get("pip_last_fs")
+        # Ambient blurred background with dark contrast grade (Vizard style)
+        bg = make_blurred_bg(img, target_w=self.target_w, target_h=self.target_h)
+        bg = cv2.convertScaleAbs(bg, alpha=0.35, beta=0)
 
-        if last_fs is not None and last_fs > 5:
-            fw = min(int(last_fs * 3.0), img_w)
-            fh = min(int(last_fs * 3.0), img_h)
-            x1 = max(0, min(int(last_fx - fw // 2), max(0, img_w - fw)))
-            y1 = max(0, min(int(last_fy - fh // 2), max(0, img_h - fh)))
-            face_crop = img[y1 : min(y1 + fh, img_h), x1 : min(x1 + fw, img_w)]
-            if face_crop.shape[0] > 10 and face_crop.shape[1] > 10:
-                pip_size = 260
-                pip_resized = cv2.resize(face_crop, (pip_size, pip_size), interpolation=cv2.INTER_AREA)
-                # Premium rounded border / clean edge
-                cv2.rectangle(pip_resized, (0, 0), (pip_size - 1, pip_size - 1), (255, 255, 255), 4)
-                pip_y = min(start_y + card_content.shape[0] - pip_size - 30, self.target_h - pip_size - 30)
-                pip_x = min(self.target_w - pip_size - 30, self.target_w - pip_size - 30)
-                if pip_y >= 0 and pip_x >= 0:
-                    bg[pip_y : pip_y + pip_size, pip_x : pip_x + pip_size] = pip_resized
+        # Try 3-panel layout (screen card + caption zone + speaker)
+        has_speaker = self._render_speaker_panel(img, bg, faces_fidx, state)
+
+        if has_speaker:
+            self._render_screen_card(img, bg, state)
+        else:
+            self._render_fallback_letterbox(img, bg, state)
 
         return bg
+
+
 
 
 class GamingStrategy(RenderStrategy):
