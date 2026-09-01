@@ -60,6 +60,7 @@ export const processVideo = inngest.createFunction(
         // Read styling preset from the project record (saved during upload)
         const styling = {
           preset: projectData.captionStyle || "impact",
+          word_highlight: projectData.wordHighlight ?? true,
         }
 
         console.log(
@@ -336,6 +337,7 @@ export const processVideo = inngest.createFunction(
               status: "rendering" as const,
               captions,
               captionStyle: projectStyling?.preset || "impact",
+              wordHighlight: projectStyling?.word_highlight ?? true,
             }
           })
         )
@@ -501,6 +503,7 @@ export const renderClip = inngest.createFunction(
         // Resolve styling payload to send to Modal
         const stylingPayload = styling || {
           preset: clip.captionStyle || "impact",
+          word_highlight: clip.wordHighlight ?? true,
         }
 
         console.log(
@@ -683,6 +686,7 @@ export const batchReframeProject = inngest.createFunction(
         const clipsPayload = projectClips.map((clip) => {
           const stylingPayload = {
             preset: clip.captionStyle || "impact",
+            word_highlight: clip.wordHighlight ?? true,
           }
 
           return {
@@ -840,6 +844,7 @@ export const exportClip = inngest.createFunction(
       const exportResult = await step.run("export-on-modal", async () => {
         const stylingPayload = {
           preset: clip.captionStyle || "impact",
+          word_highlight: clip.wordHighlight ?? true,
         }
 
         const requestBody = {

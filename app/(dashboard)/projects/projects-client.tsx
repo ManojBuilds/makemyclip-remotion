@@ -40,6 +40,9 @@ export function ProjectsClient({
   useEffect(() => {
     if (typeof window !== "undefined") {
       const pending = sessionStorage.getItem("pending_youtube_url")
+      const pendingStylingRaw = sessionStorage.getItem(
+        "pending_caption_styling"
+      )
       const pendingTranscribe = sessionStorage.getItem(
         "pending_transcribe_language"
       )
@@ -51,12 +54,23 @@ export function ProjectsClient({
       )
       if (pending) {
         sessionStorage.removeItem("pending_youtube_url")
+        sessionStorage.removeItem("pending_caption_styling")
         sessionStorage.removeItem("pending_transcribe_language")
         sessionStorage.removeItem("pending_translate_language")
         sessionStorage.removeItem("pending_remove_silence")
+
+        let pendingStyling: CaptionTemplate | undefined = undefined
+        if (pendingStylingRaw) {
+          try {
+            pendingStyling = JSON.parse(pendingStylingRaw)
+          } catch {
+            // ignore JSON parse error
+          }
+        }
+
         handleUrlSubmit(
           pending,
-          undefined,
+          pendingStyling,
           pendingTranscribe || "auto",
           pendingTranslate || "none",
           undefined,

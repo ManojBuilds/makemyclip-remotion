@@ -11,6 +11,7 @@ export interface CaptionTemplate {
   name: string
   preset: CaptionPreset
   wordHighlightDefault: boolean
+  word_highlight?: boolean
 }
 
 // Single source of truth — kept in sync with modal/presets.py

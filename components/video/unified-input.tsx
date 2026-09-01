@@ -255,6 +255,7 @@ export function UnifiedInput({
         setLocalSubmitting(true)
         try {
           sessionStorage.setItem("pending_youtube_url", normalizeVideoUrl(youtubeUrl))
+          sessionStorage.setItem("pending_caption_styling", JSON.stringify(styling))
           sessionStorage.setItem("pending_transcribe_language", transcribeLang)
           sessionStorage.setItem("pending_translate_language", translateLang)
           sessionStorage.setItem("pending_remove_silence", removeSilence ? "true" : "false")

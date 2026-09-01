@@ -224,7 +224,7 @@ export function ConfirmDialog({
     const styling = CAPTION_TEMPLATES[selectedTemplate]
     if (styling) {
       onConfirm(
-        { ...styling, word_highlight: wordHighlight } as any,
+        { ...styling, word_highlight: wordHighlight },
         sourceLang,
         translateLang,
         removeSilence

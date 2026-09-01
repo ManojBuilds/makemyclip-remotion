@@ -63,6 +63,7 @@ export const projects = pgTable("projects", {
   errorMessage: text("error_message"),
   // Caption styling (project-level — applies to all clips)
   captionStyle: text("caption_style").default("impact"),
+  wordHighlight: boolean("word_highlight").notNull().default(true),
   videoFormat: text("video_format").default("reframe"),
   transcribeLanguage: text("transcribe_language").default("auto"),
   translateLanguage: text("translate_language").default("none"),
@@ -116,6 +117,7 @@ export const clips = pgTable("clips", {
     ],
   }).default("auto"),
   captionStyle: text("caption_style").notNull().default("impact"),
+  wordHighlight: boolean("word_highlight").notNull().default(true),
   captions: jsonb("captions").$type<ClipCaption[]>(),
   originalVideoUrl: text("original_video_url"),
   previewVideoUrl: text("preview_video_url"),

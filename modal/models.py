@@ -28,6 +28,7 @@ class CaptionStyle(BaseModel):
     shadow_depth: Optional[float] = None
     shadow_alpha: Optional[int] = None
     future_dim: Optional[bool] = None
+    word_highlight: Optional[bool] = None
 
 
 class WatermarkSpec(BaseModel):

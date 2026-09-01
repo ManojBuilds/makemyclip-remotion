@@ -26,8 +26,10 @@ export async function PATCH(
     }
 
     const hasStyleChanged =
-      body.captionStyle !== undefined &&
-      body.captionStyle !== clip.captionStyle
+      (body.captionStyle !== undefined &&
+        body.captionStyle !== clip.captionStyle) ||
+      (body.wordHighlight !== undefined &&
+        body.wordHighlight !== clip.wordHighlight)
 
     const hasTimeChanged =
       (body.startTime !== undefined && Number(body.startTime) !== clip.startTime) ||
@@ -49,6 +51,8 @@ export async function PATCH(
       title: body.title !== undefined ? body.title : clip.title,
       captionStyle:
         body.captionStyle !== undefined ? body.captionStyle : clip.captionStyle,
+      wordHighlight:
+        body.wordHighlight !== undefined ? Boolean(body.wordHighlight) : clip.wordHighlight,
       updatedAt: new Date(),
     }
 

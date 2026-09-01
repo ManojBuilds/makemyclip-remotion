@@ -19,12 +19,19 @@ export async function PATCH(
 
     // Update all clips for this project with the provided styles
     // Note: We don't update hookText or captions as they are clip-specific
+    const updatePayload: Partial<typeof clips.$inferInsert> = {
+      updatedAt: new Date(),
+    }
+    if (body.captionStyle !== undefined) {
+      updatePayload.captionStyle = body.captionStyle
+    }
+    if (body.wordHighlight !== undefined) {
+      updatePayload.wordHighlight = Boolean(body.wordHighlight)
+    }
+
     await db
       .update(clips)
-      .set({
-        captionStyle: body.captionStyle,
-        updatedAt: new Date(),
-      })
+      .set(updatePayload)
       .where(eq(clips.projectId, projectId))
 
     return NextResponse.json({ success: true })

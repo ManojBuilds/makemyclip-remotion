@@ -48,6 +48,7 @@ export async function POST(request: Request) {
         removeSilence: removeSilence !== undefined ? removeSilence : true,
         // Persist caption styling preset name at the project level.
         captionStyle: styling ? (styling.preset || styling.name || "impact") : "impact",
+        wordHighlight: styling?.word_highlight !== undefined ? Boolean(styling.word_highlight) : true,
       })
       .returning()
 

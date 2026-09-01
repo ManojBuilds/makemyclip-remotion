@@ -111,6 +111,7 @@ export async function POST(req: Request) {
         ...(styling
           ? {
               captionStyle: styling.preset || styling.name || "impact",
+              wordHighlight: styling.word_highlight !== undefined ? Boolean(styling.word_highlight) : true,
             }
           : {}),
       })
