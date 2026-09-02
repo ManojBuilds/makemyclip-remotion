@@ -22,7 +22,7 @@ from ass_builder import generate_ass
 from config import ai_secret, app, image
 from errors import DownloadError, InvalidInputError, RenderError
 from models import BurnCaptionsRequest, CaptionStyle, WatermarkSpec
-from r2_storage import upload_to_r2
+from r2_storage import is_r2_configured, upload_to_r2
 from utils import StageTimer, validate_url
 
 logger = logging.getLogger("makemyclip.burner")
@@ -335,16 +335,17 @@ def burn_captions_local(
         if result.returncode != 0:
             raise RenderError(f"FFmpeg failed: {result.stderr[-500:]}")
 
-    # 4. Upload to R2 (best-effort when running in local dev environments)
+    # 4. Upload to R2 (only when configured, e.g. Modal production)
     caption_video_url = local_output
-    try:
-        with StageTimer("upload_r2"):
-            filename = f"{qp['file_prefix']}_{uuid.uuid4()}.mp4"
-            caption_video_url = upload_to_r2(
-                local_output, f"{qp['r2_prefix']}/{filename}"
-            )
-    except Exception as e:
-        logger.warning("R2 upload skipped or failed (returning local file path): %s", e)
+    if is_r2_configured():
+        try:
+            with StageTimer("upload_r2"):
+                filename = f"{qp['file_prefix']}_{uuid.uuid4()}.mp4"
+                caption_video_url = upload_to_r2(
+                    local_output, f"{qp['r2_prefix']}/{filename}"
+                )
+        except Exception as e:
+            logger.warning("R2 upload skipped or failed (returning local file path): %s", e)
 
     # 5. Extract thumbnail (only for preview)
     thumbnail_url = None

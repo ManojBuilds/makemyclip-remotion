@@ -41,6 +41,20 @@ FONT_NAME_MAP: dict[str, str] = {
     "Inter Medium": "Inter",
     "Inter-Medium": "Inter",
 
+    # Poppins
+    "Poppins": "Poppins",
+    "Poppins SemiBold": "Poppins",
+    "Poppins-SemiBold": "Poppins",
+    "Poppins Light": "Poppins",
+    "Poppins-Light": "Poppins",
+
+    # TikTok Sans
+    "TikTok Sans": "TikTok Sans",
+    "TikTokSans": "TikTok Sans",
+    "TikTokSans-Bold": "TikTok Sans",
+    "TikTokSans-SemiBold": "TikTok Sans",
+    "TikTokSans-Medium": "TikTok Sans",
+
     # Bangers
     "Bangers-Regular": "Bangers",
     "Bangers": "Bangers",

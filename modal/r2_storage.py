@@ -23,6 +23,11 @@ REQUIRED_ENV_VARS = (
 )
 
 
+def is_r2_configured() -> bool:
+    """Return True if all required R2 environment variables are present and non-empty."""
+    return all(bool(os.environ.get(k)) for k in REQUIRED_ENV_VARS)
+
+
 def assert_r2_env() -> None:
     """Raise immediately if any required R2 env var is missing."""
     missing = [k for k in REQUIRED_ENV_VARS if not os.environ.get(k)]

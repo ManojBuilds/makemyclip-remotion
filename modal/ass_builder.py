@@ -123,6 +123,11 @@ def badge_animation(fs: int, duration: int = 150) -> str:
     return rf"\alpha&HFF&\t(0,{duration},\alpha&H00&)"
 
 
+def podcast_animation(fs: int, duration: int = 140) -> str:
+    """Smooth, clean fade entrance for conversational podcast captions."""
+    return rf"\alpha&HFF&\t(0,{duration},\alpha&H00&)"
+
+
 ANIMATION_BUILDERS: dict[str, Callable[..., str]] = {
     "impact": impact_animation,
     "creator": creator_animation,
@@ -131,6 +136,7 @@ ANIMATION_BUILDERS: dict[str, Callable[..., str]] = {
     "badge": badge_animation,
     "neon": neon_animation,
     "luxury": luxury_animation,
+    "podcast": podcast_animation,
 }
 
 
@@ -273,6 +279,18 @@ def badge_word_effect(ctx: WordCtx) -> str:
     return _wrap(prefix, ctx, suffix)
 
 
+def podcast_word_effect(ctx: WordCtx) -> str:
+    """Subtle punchy pop on active word (108% -> 100%) with crisp solid black border."""
+    mid = int(140 * 0.5)
+    prefix = (
+        rf"\fscx100\fscy100"
+        rf"\t(0,{mid},\fscx108\fscy108)"
+        rf"\t({mid},140,\fscx100\fscy100)"
+    )
+    suffix = r"\fscx100\fscy100"
+    return _wrap(prefix, ctx, suffix)
+
+
 WORD_EFFECTS: dict[str, Callable[[WordCtx], str]] = {
     "impact": impact_word_effect,
     "creator": creator_word_effect,
@@ -281,6 +299,7 @@ WORD_EFFECTS: dict[str, Callable[[WordCtx], str]] = {
     "badge": badge_word_effect,
     "neon": neon_word_effect,
     "luxury": luxury_word_effect,
+    "podcast": podcast_word_effect,
 }
 
 # Presets that anchor to a bottom baseline (all five use bottom-center).
@@ -439,9 +458,9 @@ def build_animation(
             tags.append(rf"\pos({CX},{y})")
     tags.append(shadow_tag)
     if preset == "badge":
-        xbord = max(1, int(32 * SCALE_FACTOR))
-        ybord = max(1, int(18 * SCALE_FACTOR))
-        tags.append(rf"\xbord{xbord}\ybord{ybord}\blur1\3c&HFFFFFF&\3a&H00&")
+        xbord = max(1, int(28 * SCALE_FACTOR))
+        ybord = max(1, int(14 * SCALE_FACTOR))
+        tags.append(rf"\xbord{xbord}\ybord{ybord}\blur2\3c&H141418&\3a&H35&")
     if animate:
         builder = ANIMATION_BUILDERS.get(preset, ANIMATION_BUILDERS[DEFAULT_PRESET])
         entrance = builder(fs)
@@ -752,6 +771,18 @@ def generate_ass(
     )
 
     base = get_preset_style(preset)
+    # Dynamic layout typography scaling: gracefully scale down for dense multi-panel layouts
+    if overrides.get("fontsize") is None:
+        layout_scale_map = {
+            "split": 0.90,
+            "panel": 0.90,
+            "screencast": 0.88,
+            "presentation": 0.88,
+            "letterbox": 0.92,
+        }
+        scale_mod = layout_scale_map.get((crop_mode or "").lower(), 1.0)
+        base["fontsize"] = int(base["fontsize"] * scale_mod)
+
     subs.styles["Default"] = _build_style(base, overrides, template)
 
     raw_items = _flatten_transcript(transcript)

@@ -1345,61 +1345,53 @@ class AIReframe:
         # Define scene boundaries or fall back to single scene
         sb = scene_bounds or [(0, max_frames)]
 
-        # Pre-compute layout per frame based on OpusClip global layout consistency.
-        # This completely prevents "random" letterbox / layout whiplash mid-clip.
+        # Pre-compute layout per frame based on scene cuts and active speaker presence.
+        # Differentiates between B-rolls / cutaways (letterbox full visual fit) and Speaker layouts (reframe / split / screencast).
         frame_layout = ["single"] * max_frames
-        if crop_mode in ("split", "letterbox", "panel", "gaming", "passthrough"):
-            mapped = crop_mode
-            frame_layout = [mapped] * max_frames
-        elif crop_mode in ("screencast", "presentation"):
-            # Adaptive Screencast Engine: Evaluate each scene cut individually.
-            # If a scene is a dominant solo talking head (e.g. host intro full-screen), use "single" (reframe).
-            # If a scene is screencast / corner webcam / slides, use "screencast".
-            for sf, ef in sb:
-                if sf >= max_frames:
-                    continue
-                ef = min(ef, max_frames)
-                if ef <= sf:
-                    continue
-                scene_tr, scene_sc = slice_tracks_and_scores(tracks, scores, sf, ef)
-                scene_layout = classify_layout(scene_tr, scene_sc, source_w, source_h)
-                if scene_layout == "reframe":
-                    mapped = "single"
-                elif scene_layout == "split":
-                    mapped = "split"
-                else:
-                    mapped = "screencast"
-                for f in range(sf, ef):
-                    frame_layout[f] = mapped
-            logger.info("Adaptive Screencast Engine: Evaluated %d scene cuts across clip", len(sb))
-        elif crop_mode == "auto":
-            # Per-scene intelligent layout adaptation (OpusClip style):
-            # Each genuine scene cut is evaluated individually. If a scene has 2 distinct simultaneous speakers,
-            # it uses split-screen; if solo/performer, it uses single vertical reframe.
-            # Never defaults to letterbox for human talking scenes.
-            for sf, ef in sb:
-                if sf >= max_frames:
-                    continue
-                ef = min(ef, max_frames)
-                if ef <= sf:
-                    continue
-
-                scene_tr, scene_sc = slice_tracks_and_scores(tracks, scores, sf, ef)
-                scene_layout = classify_layout(scene_tr, scene_sc, source_w, source_h)
-
-                # Map layout: "reframe" -> "single", "split" -> "split", "gaming" -> "gaming", "screencast" -> "screencast"
-                if scene_layout == "reframe":
-                    mapped = "single"
-                elif scene_layout in ("split", "gaming", "screencast", "presentation", "panel"):
-                    mapped = scene_layout
-                else:
-                    mapped = "single"
-                for f in range(sf, ef):
-                    frame_layout[f] = mapped
-            logger.info("OpusClip Multi-Scene Engine: Evaluated %d scene cuts across clip", len(sb))
+        if crop_mode == "passthrough":
+            frame_layout = ["passthrough"] * max_frames
+        elif crop_mode == "letterbox":
+            frame_layout = ["letterbox"] * max_frames
         else:
-            # crop_mode is "reframe" - strictly single vertical panning layout
-            frame_layout = ["single"] * max_frames
+            # Per-scene intelligent layout adaptation
+            for sf, ef in sb:
+                if sf >= max_frames:
+                    continue
+                ef = min(ef, max_frames)
+                if ef <= sf:
+                    continue
+
+                scene_tr, scene_sc = slice_tracks_and_scores(tracks, scores, sf, ef)
+                scene_layout = classify_layout(scene_tr, scene_sc, source_w, source_h)
+
+                if scene_layout == "letterbox":
+                    # True B-roll / cutaway / screen capture without active speaker -> preserve full visual with clean letterbox
+                    mapped = "letterbox"
+                elif crop_mode == "split":
+                    mapped = "split" if scene_layout == "split" else "single"
+                elif crop_mode in ("screencast", "presentation"):
+                    if scene_layout == "reframe":
+                        mapped = "single"
+                    elif scene_layout == "split":
+                        mapped = "split"
+                    else:
+                        mapped = "screencast"
+                elif crop_mode == "auto":
+                    if scene_layout == "reframe":
+                        mapped = "single"
+                    elif scene_layout in ("split", "gaming", "screencast", "presentation", "panel"):
+                        mapped = scene_layout
+                    else:
+                        mapped = "single"
+                elif crop_mode == "reframe":
+                    mapped = "single"
+                else:
+                    mapped = crop_mode if crop_mode in ("panel", "gaming") else "single"
+
+                for f in range(sf, ef):
+                    frame_layout[f] = mapped
+
+            logger.info("Adaptive Scene Engine: Evaluated %d scene cuts across clip for crop_mode=%s", len(sb), crop_mode)
 
         _letterbox_shadow = None
         _letterbox_mask = None

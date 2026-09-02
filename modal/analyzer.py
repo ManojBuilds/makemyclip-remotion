@@ -504,10 +504,10 @@ class VideoAnalyzer:
             )
 
             # If global classification definitively found a specialized layout (e.g. screencast / gaming),
-            # harmonize scene layouts that fell back to generic reframe/letterbox
+            # harmonize speaker scenes that fell back to generic reframe while preserving B-roll (letterbox) scenes intact
             if content_classification.recommended_crop_mode in ("screencast", "presentation", "gaming", "panel"):
                 for sl in scene_layouts:
-                    if sl["recommended_layout"] in ("reframe", "letterbox"):
+                    if sl["recommended_layout"] == "reframe":
                         sl["recommended_layout"] = content_classification.recommended_crop_mode
 
             # Build comprehensive analysis object

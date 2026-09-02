@@ -356,7 +356,7 @@ def enrich_clips_with_gemini(
     full_text: str = "",
     chapters: list[dict] | None = None,
 ) -> list[dict]:
-    """Enrich candidate short clips with Gemini-generated social metadata (title, hook, hashtags, etc.)."""
+    """Enrich candidate short clips with Gemini-generated viral scores and social metadata."""
     gemini_key = os.environ.get("GEMINI_API_KEY")
     if not gemini_key or not viral_clips:
         logger.info("GEMINI_API_KEY missing or no viral clips to enrich. Skipping Gemini enrichment.")
@@ -388,22 +388,30 @@ def enrich_clips_with_gemini(
         else:
             context_snippet = "N/A"
 
-        prompt = f"""You are an expert social media editor for TikTok, IG Reels, and YouTube Shorts.
-Analyze these pre-extracted viral video clip candidates and return a JSON object matching the schema.
+        prompt = f"""You are an expert viral short-form content curator and algorithm specialist for TikTok, IG Reels, and YouTube Shorts.
+Analyze these candidate video clips and return a structured JSON object matching the schema.
 
 CRITICAL ACCURACY & CONTEXT RULES:
 - Overall Video Context Snippet: {context_snippet}
 - Rely ONLY on the actual transcript context to determine who is speaking or being discussed.
-- DO NOT hallucinate famous podcasters or celebrity names (such as Joe Rogan, Andrew Huberman, Lex Fridman, etc.) UNLESS they are explicitly mentioned by name in the transcript.
+- DO NOT hallucinate famous podcasters or celebrity names UNLESS they are explicitly mentioned by name in the transcript.
 - Match titles, descriptions, and hashtags strictly to the actual speakers and content of the video.
+
+VIRAL SCORING RUBRIC (viralScore from 0.0 to 10.0):
+- Evaluate hook strength (first 3 seconds), emotional intensity/resonance, punchline/insight, curiosity gap, and retention potential.
+- Top-tier standout moments (insane hooks, explosive debates, incredible insights, high dopamine) MUST receive 9.0 - 9.9.
+- Strong, engaging clips should score 8.0 - 8.9.
+- Good informative/interesting clips should score 7.0 - 7.9.
+- Lower energy or weak hook clips should score below 7.0.
 
 For each candidate clip, generate:
 - title: Short, curiosity-inducing clickbait title (max 7 words)
 - hookText: Bold 1-3 word scroll-stopping caption for the first 3 seconds
-- viralReason: 1 sentence explaining why this clip will go viral
+- viralScore: Precise viral potential score from 0.0 to 10.0 (e.g. 9.6, 9.2, 8.8, 8.4) based on the rubric
+- viralReason: 1 punchy sentence explaining the specific psychological or algorithmic trigger that makes this clip perform
 - description: Engaging social media post description
 - hashtags: Top 5 space-separated hashtags (e.g. #shorts #viral)
-- clipType: one of ["hot_take", "funny_exchange", "quotable", "debate", "aha_moment"]
+- clipType: one of ["hot_take", "funny_exchange", "quotable", "debate", "aha_moment", "storytelling", "mind_blowing_fact"]
 
 Candidates:
 {"\n\n".join(candidate_summaries)}"""
@@ -418,6 +426,7 @@ Candidates:
                         "properties": {
                             "title": {"type": "STRING"},
                             "hookText": {"type": "STRING"},
+                            "viralScore": {"type": "NUMBER"},
                             "viralReason": {"type": "STRING"},
                             "description": {"type": "STRING"},
                             "hashtags": {"type": "STRING"},
@@ -465,6 +474,16 @@ Candidates:
                     if gem.get("hookText"):
                         c["hook_quote"] = gem["hookText"]
                         c["hookText"] = gem["hookText"]
+                    if gem.get("viralScore") is not None:
+                        try:
+                            score_val = float(gem["viralScore"])
+                            if score_val > 10.0:
+                                score_val = score_val / 10.0
+                            score_val = round(max(0.0, min(10.0, score_val)), 1)
+                            c["viral_score"] = score_val
+                            c["viralScore"] = score_val
+                        except (ValueError, TypeError):
+                            pass
                     if gem.get("viralReason"):
                         c["viralReason"] = gem["viralReason"]
                     if gem.get("description"):
@@ -474,7 +493,17 @@ Candidates:
                         c["hashtags"] = gem["hashtags"]
                     if gem.get("clipType"):
                         c["clipType"] = gem["clipType"]
-                logger.info("Successfully enriched %d clips with Gemini metadata directly in Modal transcriber.", len(viral_clips))
+
+                # Re-rank candidate clips by Gemini viral score descending
+                viral_clips.sort(key=lambda x: x.get("viral_score", 0.0), reverse=True)
+                for i, c in enumerate(viral_clips):
+                    c["id"] = f"short_clip_{i + 1}"
+
+                logger.info(
+                    "Successfully scored and enriched %d clips with Gemini metadata (top viral score: %s).",
+                    len(viral_clips),
+                    viral_clips[0].get("viral_score") if viral_clips else "N/A",
+                )
     except Exception as err:
         logger.warning("Gemini enrichment in Modal transcriber failed, proceeding with AssemblyAI defaults: %s", err)
 
@@ -667,7 +696,7 @@ def _generate_heuristic_candidates(
                         "headline": ch.get("headline", "Topic Highlight"),
                         "gist": ch.get("gist", "Key Topic"),
                         "summary": ch.get("summary", ""),
-                        "base_score": 45.0,
+                        "base_score": 8.0,
                     })
 
     # ── Source B: Sentiment peaks ──
@@ -695,7 +724,7 @@ def _generate_heuristic_candidates(
             "headline": f"Peak: {peak['text'][:40]}...",
             "gist": f"Viral Peak ({peak['sentiment']})",
             "summary": peak["text"],
-            "base_score": 40.0,
+            "base_score": 7.8,
         })
 
     # ── Source C: Highlights ──
@@ -720,7 +749,7 @@ def _generate_heuristic_candidates(
                 "headline": f"Highlight: {h.get('text', '')[:40]}",
                 "gist": h.get("text", "Key Highlight"),
                 "summary": h.get("text", ""),
-                "base_score": 38.0,
+                "base_score": 7.6,
             })
 
     # ── Source D: Speaker-exchange zones ──
@@ -751,7 +780,7 @@ def _generate_heuristic_candidates(
                         "headline": f"Discussion ({turns} exchanges)",
                         "gist": "Multi-Speaker Exchange",
                         "summary": "",
-                        "base_score": 42.0 + min(6.0, turns * 1.5),
+                        "base_score": 7.7 + min(0.8, turns * 0.2),
                     })
             cur += step
 
@@ -772,7 +801,7 @@ def _generate_heuristic_candidates(
                         "headline": f"High Energy ({v['wpm']:.0f} wpm)",
                         "gist": "High Energy Moment",
                         "summary": "",
-                        "base_score": 36.0,
+                        "base_score": 7.5,
                     })
 
     # ── Fallback: Boundary-aware zone windows (NOT sequential slicing) ──
@@ -794,7 +823,7 @@ def _generate_heuristic_candidates(
                     "headline": f"Video Segment {z + 1}",
                     "gist": "Video Highlight",
                     "summary": "",
-                    "base_score": 30.0,
+                    "base_score": 7.0,
                 })
 
     return candidates
@@ -808,12 +837,12 @@ def _score_with_signals(
     velocity_timeline: list,
     words: list,
 ) -> list[dict]:
-    """Score candidates using calibrated weighted multi-signal analysis.
+    """Score candidates using calibrated weighted multi-signal analysis (0.0 to 10.0 range).
 
-    Scoring breakdown (0-100 range):
-      base_score (30-48) + sentiment (0-12) + speakers (0-10)
-      + acoustics (0-12) + highlights (0-10) + velocity (0-6)
-      + sentiment_contrast (0-6) + completeness (0-4)
+    Scoring breakdown (0.0-10.0 range):
+      base_score (7.0-8.5) + sentiment (0-0.8) + speakers (0-0.6)
+      + acoustics (0-0.6) + highlights (0-0.5) + velocity (0-0.4)
+      + sentiment_contrast (0-0.4) + completeness (0-0.3)
     """
     scored: list[dict] = []
 
@@ -831,36 +860,38 @@ def _score_with_signals(
         if any(abs(s["start_ms"] - c_s_ms) < 10000 for s in scored):
             continue
 
-        score = cand.get("base_score", 35.0)
+        score = cand.get("base_score", 7.5)
+        if score > 10.0:
+            score = score / 10.0
 
-        # ── Sentiment intensity (0 to 12 pts) ──
+        # ── Sentiment intensity (0 to 0.8 pts) ──
         w_sent = [
             s for s in sentiments
             if int(s["start"] * 1000) >= c_s_ms and int(s["end"] * 1000) <= c_e_ms
         ]
         non_neutral = [s for s in w_sent if s.get("sentiment") != "NEUTRAL"]
-        score += min(12.0, len(non_neutral) * 3.0)
+        score += min(0.8, len(non_neutral) * 0.2)
 
-        # Sentiment contrast (shift within clip = dramatic arc, +6 pts)
+        # Sentiment contrast (shift within clip = dramatic arc, +0.4 pts)
         labels = {s.get("sentiment") for s in non_neutral}
         if "POSITIVE" in labels and "NEGATIVE" in labels:
-            score += 6.0
+            score += 0.4
 
-        # ── Speaker dynamics (0 to 10 pts) ──
+        # ── Speaker dynamics (0 to 0.6 pts) ──
         clip_w = [w for w in words if c_s_ms <= int(w["start"] * 1000) <= c_e_ms]
         speakers = set(w.get("speaker") for w in clip_w if w.get("speaker") is not None)
         if len(speakers) > 1:
-            score += min(10.0, (len(speakers) - 1) * 5.0)
+            score += min(0.6, (len(speakers) - 1) * 0.3)
 
-        # ── Acoustic events (0 to 12 pts) ──
+        # ── Acoustic events (0 to 0.6 pts) ──
         w_acst = [
             e for e in acoustic_events
             if e["start_ms"] >= c_s_ms and e["end_ms"] <= c_e_ms
         ]
         if w_acst:
-            score += min(12.0, len(w_acst) * 6.0)
+            score += min(0.6, len(w_acst) * 0.3)
 
-        # ── Highlight density (0 to 10 pts) ──
+        # ── Highlight density (0 to 0.5 pts) ──
         w_hl = [
             h for h in highlights
             if any(
@@ -868,9 +899,9 @@ def _score_with_signals(
                 for t in h.get("timestamps", [])
             )
         ]
-        score += min(10.0, len(w_hl) * 2.5)
+        score += min(0.5, len(w_hl) * 0.15)
 
-        # ── Velocity variance (0 to 6 pts) ──
+        # ── Velocity variance (0 to 0.4 pts) ──
         w_vel = [
             v for v in velocity_timeline
             if v["window_start_ms"] >= c_s_ms and v["window_end_ms"] <= c_e_ms
@@ -882,16 +913,16 @@ def _score_with_signals(
             wpms = [v["wpm"] for v in w_vel]
             variance = max(wpms) - min(wpms)
             if variance > 30:
-                score += min(6.0, variance / 10.0)
+                score += min(0.4, variance / 100.0)
 
-        # ── Content completeness (0 to 4 pts) ──
+        # ── Content completeness (0 to 0.3 pts) ──
         if clip_w:
             if clip_w[0]["word"] and clip_w[0]["word"][0].isupper():
-                score += 1.5
+                score += 0.1
             if clip_w[-1]["word"].rstrip().endswith((".", "?", "!")):
-                score += 2.5
+                score += 0.2
 
-        final_score = min(100.0, round(score, 1))
+        final_score = round(min(10.0, max(1.0, score)), 1)
 
         h_words = [w["word"] for w in clip_w[:6]]
         h_text = " ".join(h_words) if h_words else cand["headline"]
@@ -956,7 +987,7 @@ def _select_with_diversity(
             for sel in selected:
                 dist = abs(cand["start_ms"] - sel["start_ms"])
                 if dist < min_gap_ms:
-                    eff -= 15.0 * (1.0 - dist / min_gap_ms)
+                    eff -= 1.5 * (1.0 - dist / min_gap_ms)
             if eff > best_eff:
                 best_eff = eff
                 best_idx = idx

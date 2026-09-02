@@ -832,15 +832,24 @@ export async function enrichAssemblyAIClipsWithGemini(
       return `Clip ${i + 1} (${s.toFixed(1)}s - ${e.toFixed(1)}s):\nHeadline: ${c.headline || c.summary || ""}\nTranscript: ${cWords.slice(0, 600)}`
     }).join("\n\n")
 
-    const prompt = `You are an expert social media editor for TikTok, IG Reels, and YouTube Shorts.
+    const prompt = `You are an expert viral short-form content curator and algorithm specialist for TikTok, IG Reels, and YouTube Shorts.
 Analyze these pre-extracted viral video clip candidates and return a JSON object matching the schema.
+
+VIRAL SCORING RUBRIC (viralScore from 0.0 to 10.0):
+- Evaluate hook strength (first 3 seconds), emotional resonance, punchline/insight, curiosity gap, and retention potential.
+- Top-tier standout moments (insane hooks, explosive debates, incredible insights) MUST receive 9.0 - 9.9.
+- Strong, engaging clips should score 8.0 - 8.9.
+- Good informative/interesting clips should score 7.0 - 7.9.
+- Lower energy or weak hook clips should score below 7.0.
+
 For each candidate clip, generate:
 - title: Short, curiosity-inducing clickbait title (max 7 words)
 - hookText: Bold 1-3 word scroll-stopping caption for the first 3 seconds
+- viralScore: Precise viral potential rating from 0.0 to 10.0 (e.g., 9.6, 9.2, 8.8) based on the rubric
 - viralReason: 1 sentence explaining why this clip will go viral
 - description: Engaging social media post description
 - hashtags: Top 5 space-separated hashtags (e.g. #shorts #viral)
-- clipType: one of ["hot_take", "funny_exchange", "quotable", "debate", "aha_moment"]
+- clipType: one of ["hot_take", "funny_exchange", "quotable", "debate", "aha_moment", "storytelling", "mind_blowing_fact"]
 
 Candidates:
 ${candidateSummaries}`
@@ -855,6 +864,7 @@ ${candidateSummaries}`
             properties: {
               title: { type: Type.STRING },
               hookText: { type: Type.STRING },
+              viralScore: { type: Type.NUMBER },
               viralReason: { type: Type.STRING },
               description: { type: Type.STRING },
               hashtags: { type: Type.STRING },
@@ -871,7 +881,7 @@ ${candidateSummaries}`
       config: {
         responseMimeType: "application/json",
         responseSchema: enrichmentSchema,
-        temperature: 0.4,
+        temperature: 0.3,
       },
     })
 
@@ -880,13 +890,16 @@ ${candidateSummaries}`
       const parsed = JSON.parse(text)
       const suggestions: AIClipSuggestion[] = parsed.clips || (Array.isArray(parsed) ? parsed : [])
       if (Array.isArray(suggestions) && suggestions.length > 0) {
-        return rawViralClips.map((c: any, i: number) => {
+        const enrichedList = rawViralClips.map((c: any, i: number) => {
           const gem = suggestions[i] || {}
           const startSec = c.startTime !== undefined ? Number(c.startTime) : (Number(c.start_ms || 0) / 1000.0)
           const endSec = c.endTime !== undefined ? Number(c.endTime) : (Number(c.end_ms || 0) / 1000.0)
           const durSec = Number(c.duration_seconds || (endSec - startSec))
-          const rawScore = Number(c.viral_score || c.viralScore || 85.0)
+          const rawScore = Number(c.viral_score || c.viralScore || 8.5)
           const normalizedScore = Number(Math.min(10.0, Math.max(1.0, rawScore > 10 ? rawScore / 10.0 : rawScore)).toFixed(1))
+          const finalScore = gem.viralScore !== undefined && gem.viralScore !== null
+            ? Number(Math.min(10.0, Math.max(1.0, Number(gem.viralScore) > 10 ? Number(gem.viralScore) / 10.0 : Number(gem.viralScore))).toFixed(1))
+            : normalizedScore
 
           return {
             title: gem.title || c.headline || "Viral Short Highlight",
@@ -894,7 +907,7 @@ ${candidateSummaries}`
             startTime: startSec,
             endTime: endSec,
             durationSeconds: durSec,
-            viralScore: gem.viralScore || normalizedScore,
+            viralScore: finalScore,
             viralReason: gem.viralReason || c.signals?.pacing_note || "High viral potential.",
             description: gem.description || c.summary || "Featured viral short clip.",
             hashtags: gem.hashtags || "#shorts #viral",
@@ -902,6 +915,7 @@ ${candidateSummaries}`
             speakerDynamic: gem.speakerDynamic || c.signals?.pacing_note || "Speaker exchange",
           }
         })
+        return enrichedList.sort((a, b) => b.viralScore - a.viralScore)
       }
     }
   } catch (err) {
@@ -912,7 +926,7 @@ ${candidateSummaries}`
     const startSec = c.startTime !== undefined ? Number(c.startTime) : (Number(c.start_ms || 0) / 1000.0)
     const endSec = c.endTime !== undefined ? Number(c.endTime) : (Number(c.end_ms || 0) / 1000.0)
     const durSec = Number(c.duration_seconds || (endSec - startSec))
-    const rawScore = Number(c.viral_score || c.viralScore || 85.0)
+    const rawScore = Number(c.viral_score || c.viralScore || 8.5)
     const normalizedScore = Number(Math.min(10.0, Math.max(1.0, rawScore > 10 ? rawScore / 10.0 : rawScore)).toFixed(1))
     return {
       title: c.headline || c.title || "Viral Short Highlight",

@@ -195,43 +195,43 @@ export function NativeVideoPreview({
 }
 
 /* ─────────────────────────────────────────────
-   Viral score ring component matching Vizard.ai
+   Viral score ring component (0–10 scale)
    ───────────────────────────────────────────── */
 const VIRAL_SCORE_TIERS: Record<string, { range: string; desc: string; dot: string }> = {
-  "Very High": { range: "85–100", desc: "Ready to post — strong hook & high resonance.", dot: "bg-emerald-500" },
-  High: { range: "70–84", desc: "Likely to perform well on social platforms.", dot: "bg-amber-500" },
-  Medium: { range: "50–69", desc: "May need a tighter hook or edit to take off.", dot: "bg-indigo-500" },
-  Low: { range: "0–49", desc: "Consider reworking the angle or using as B-roll.", dot: "bg-rose-500" },
+  "Very High": { range: "8.5–10", desc: "Ready to post — strong hook & high resonance.", dot: "bg-emerald-500" },
+  High: { range: "7.0–8.4", desc: "Likely to perform well on social platforms.", dot: "bg-amber-500" },
+  Medium: { range: "5.0–6.9", desc: "May need a tighter hook or edit to take off.", dot: "bg-indigo-500" },
+  Low: { range: "0.0–4.9", desc: "Consider reworking the angle or using as B-roll.", dot: "bg-rose-500" },
 }
 
 export function ViralScoreRing({ score, reason }: { score: number; reason?: string }) {
-  const normalizedScore = Math.min(
-    100,
-    Math.max(0, score > 10 ? Math.round(score) : Math.round(score * 10))
+  const numScore = typeof score === "number" ? score : Number(score || 0)
+  const normalizedScore = Number(
+    (numScore > 10 ? Math.min(10, Math.max(0, numScore / 10)) : Math.min(10, Math.max(0, numScore))).toFixed(1)
   )
 
   const radius = 30
   const stroke = 5
   const normalizedRadius = radius - stroke * 2
   const circumference = normalizedRadius * 2 * Math.PI
-  const strokeDashoffset = circumference - (normalizedScore / 100) * circumference
+  const strokeDashoffset = circumference - (normalizedScore / 10) * circumference
 
   let strokeColor = "stroke-slate-250"
   let textColor = "text-slate-700"
   let bgColor = "bg-slate-50"
   let labelText = "Low"
 
-  if (normalizedScore >= 85) {
+  if (normalizedScore >= 8.5) {
     strokeColor = "stroke-emerald-500"
     textColor = "text-emerald-700"
     bgColor = "bg-emerald-50/50"
     labelText = "Very High"
-  } else if (normalizedScore >= 70) {
+  } else if (normalizedScore >= 7.0) {
     strokeColor = "stroke-amber-500"
     textColor = "text-amber-700"
     bgColor = "bg-amber-50/50"
     labelText = "High"
-  } else if (normalizedScore >= 50) {
+  } else if (normalizedScore >= 5.0) {
     strokeColor = "stroke-indigo-500"
     textColor = "text-indigo-700"
     bgColor = "bg-indigo-50/50"
@@ -291,21 +291,13 @@ export function ViralScoreRing({ score, reason }: { score: number; reason?: stri
                 {normalizedScore}
               </span>
             </div>
-            <span
-              className={cn(
-                "text-[9px] font-extrabold tracking-widest uppercase",
-                textColor === "text-slate-700" ? "text-slate-400" : textColor
-              )}
-            >
-              Viral Score
-            </span>
           </div>
         </TooltipTrigger>
         <TooltipContent side="top" sideOffset={6} className="max-w-[300px] px-3.5 py-2.5">
           <div className="flex items-start gap-2">
             <span className={cn("mt-1 h-2 w-2 shrink-0 rounded-full", VIRAL_SCORE_TIERS[labelText].dot)} />
             <div>
-              <p className="text-xs font-bold leading-tight">{labelText} <span className="font-normal opacity-60">({VIRAL_SCORE_TIERS[labelText].range}/100)</span></p>
+              <p className="text-xs font-bold leading-tight">{labelText} <span className="font-normal opacity-60">({VIRAL_SCORE_TIERS[labelText].range}/10)</span></p>
               <p className="mt-0.5 text-[11px] leading-snug opacity-75">{reason || VIRAL_SCORE_TIERS[labelText].desc}</p>
             </div>
           </div>

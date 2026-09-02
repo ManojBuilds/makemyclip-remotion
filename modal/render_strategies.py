@@ -263,7 +263,7 @@ class SplitStrategy(RenderStrategy):
 
 
 class LetterboxStrategy(RenderStrategy):
-    """Blurred background letterbox card."""
+    """Blurred background letterbox card for B-roll, wide visual cutaways, and screen captures."""
 
     def render_frame(
         self,
@@ -273,24 +273,26 @@ class LetterboxStrategy(RenderStrategy):
         state: Dict[str, Any],
     ) -> np.ndarray:
         bg = make_blurred_bg(img, target_w=self.target_w, target_h=self.target_h)
-        CARD_W = self.target_w
-        CARD_H = int(self.target_h * 0.68)
-        scale = (CARD_H * 1.10) / img.shape[0]
+        img_h, img_w = img.shape[:2]
 
-        scaled_h = int(CARD_H * 1.10)
-        scaled_w = int(img.shape[1] * scale)
-        res_scaled = cv2.resize(img, (scaled_w, scaled_h), interpolation=cv2.INTER_AREA)
+        # Fit 16:9 (or wide) B-roll across the 1080 width without clipping the edges
+        scale = float(self.target_w) / float(img_w)
+        scaled_w = self.target_w
+        scaled_h = int(img_h * scale)
 
-        target_cx = state.get("target_cx")
-        if target_cx is None:
-            target_cx = int((img.shape[1] * scale) / 2)
+        if scaled_h <= self.target_h:
+            res_scaled = cv2.resize(img, (scaled_w, scaled_h), interpolation=cv2.INTER_AREA)
+            # Position centered vertically (0.42 anchor) leaving lower area for captions
+            start_y = max(0, int((self.target_h - scaled_h) * 0.42))
+            bg[start_y : start_y + scaled_h, 0 : scaled_w] = res_scaled
+        else:
+            scale = float(self.target_h) / float(img_h)
+            scaled_h = self.target_h
+            scaled_w = int(img_w * scale)
+            res_scaled = cv2.resize(img, (scaled_w, scaled_h), interpolation=cv2.INTER_AREA)
+            start_x = max(0, (self.target_w - scaled_w) // 2)
+            bg[0 : self.target_h, start_x : start_x + scaled_w] = res_scaled
 
-        cx_card = (target_cx / (img.shape[1] * (self.target_h / img.shape[0]))) * scaled_w if img.shape[1] > 0 else scaled_w // 2
-        tx = max(min(int(cx_card) - CARD_W // 2, scaled_w - CARD_W), 0)
-        res = res_scaled[0:CARD_H, tx : tx + CARD_W]
-
-        start_y = 310
-        bg[start_y : start_y + res.shape[0], 0 : res.shape[1]] = res
         return bg
 
 

@@ -167,6 +167,7 @@ export const LANGUAGES = [
 
 // Preview asset paths from R2 (3s loops on black background)
 export const PREVIEW_IMAGES: Record<string, string> = {
+  podcast: "https://pub-dab84dec13074258806f788a00943c46.r2.dev/previews/black_template_podcast.webp",
   cinema: "https://pub-dab84dec13074258806f788a00943c46.r2.dev/previews/black_template_cinema.webp",
   creator: "https://pub-dab84dec13074258806f788a00943c46.r2.dev/previews/black_template_creator.webp",
   focus: "https://pub-dab84dec13074258806f788a00943c46.r2.dev/previews/black_template_focus.webp",
@@ -178,6 +179,7 @@ export const PREVIEW_IMAGES: Record<string, string> = {
 
 // Ultra-lightweight optimized MP4 preview paths from R2 (~8KB per clip)
 export const PREVIEW_VIDEOS: Record<string, string> = {
+  podcast: "https://pub-dab84dec13074258806f788a00943c46.r2.dev/previews/black_template_podcast.mp4",
   cinema: "https://pub-dab84dec13074258806f788a00943c46.r2.dev/previews/black_template_cinema.mp4",
   creator: "https://pub-dab84dec13074258806f788a00943c46.r2.dev/previews/black_template_creator.mp4",
   focus: "https://pub-dab84dec13074258806f788a00943c46.r2.dev/previews/black_template_focus.mp4",

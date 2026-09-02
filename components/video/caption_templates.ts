@@ -6,6 +6,7 @@ export type CaptionPreset =
   | "badge"
   | "neon"
   | "luxury"
+  | "podcast"
 
 export interface CaptionTemplate {
   name: string
@@ -25,6 +26,11 @@ export const CAPTION_TEMPLATES: Record<string, CaptionTemplate> = {
     name: "Creator",
     preset: "creator",
     wordHighlightDefault: true,
+  },
+  podcast: {
+    name: "Podcast",
+    preset: "podcast",
+    wordHighlightDefault: false,
   },
   cinema: {
     name: "Cinema",
