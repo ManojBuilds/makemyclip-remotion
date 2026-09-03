@@ -16,7 +16,7 @@ import modal
 
 from config import ai_secret, app, image, youtube_cookies_secret
 from errors import DownloadError, InvalidInputError, RenderError, TranscriptionError
-from models import TranscribeRequest
+from models import EnrichTranscriptRequest, SubmitTranscribeRequest, TranscribeRequest
 from utils import StageTimer, is_youtube_url, validate_url
 from ytdlp_helper import download_youtube_audio, remove_bgutil_pot_provider
 
@@ -35,319 +35,407 @@ class AudioTranscriber:
         # PO Token plugin here does not affect AIReframe (which may need it).
         remove_bgutil_pot_provider()
 
-    @modal.fastapi_endpoint(method="POST")
-    def transcribe(self, req: TranscribeRequest):
-        """Transcribe audio from a video URL with speaker diarization."""
+    def _process_and_enrich_transcript(
+        self,
+        transcript,
+        translate_language: str | None = None,
+        prompt: str | None = None,
+        keyterms: list[str] | None = None,
+    ):
+        """Map words, extract chapters/sentiments/highlights, score viral clips and enrich with Gemini."""
+        words = []
+        speaker_map = {}
+        next_speaker_id = 0
+        paragraphs = []
+        full_text = transcript.text
+
+        target_lang = translate_language
+        has_translation = False
+        if target_lang and target_lang != "none":
+            translated_texts = getattr(transcript, "translated_texts", None)
+            if translated_texts and target_lang in translated_texts:
+                has_translation = True
+
+        if has_translation:
+            full_text = transcript.translated_texts[target_lang]
+            utterances = getattr(transcript, "utterances", None)
+            if utterances:
+                for utt in utterances:
+                    speaker_id = None
+                    if utt.speaker:
+                        if utt.speaker not in speaker_map:
+                            speaker_map[utt.speaker] = next_speaker_id
+                            next_speaker_id += 1
+                        speaker_id = speaker_map[utt.speaker]
+
+                    utt_translation = utt.translated_texts.get(target_lang, "") if utt.translated_texts else ""
+                    if not utt_translation:
+                        continue
+
+                    utt_words = utt_translation.split()
+                    num_words = len(utt_words)
+                    if num_words == 0:
+                        continue
+
+                    start_sec = utt.start / 1000.0
+                    end_sec = utt.end / 1000.0
+                    duration = end_sec - start_sec
+                    word_duration = duration / num_words
+
+                    for idx, word_text in enumerate(utt_words):
+                        w_start = start_sec + (idx * word_duration)
+                        w_end = w_start + word_duration
+                        words.append({
+                            "word": word_text,
+                            "start": w_start,
+                            "end": w_end,
+                            "confidence": 0.99,
+                            "speaker": speaker_id,
+                        })
+
+                paragraphs = [
+                    utt.translated_texts.get(target_lang, "")
+                    for utt in utterances
+                    if utt.translated_texts and utt.translated_texts.get(target_lang, "")
+                ]
+
+            if not words:
+                all_words = full_text.split()
+                num_words = len(all_words)
+                if num_words > 0:
+                    total_duration = 0.0
+                    if transcript.words:
+                        total_duration = transcript.words[-1].end / 1000.0
+                    else:
+                        total_duration = 30.0
+                    word_duration = total_duration / num_words
+                    for idx, word_text in enumerate(all_words):
+                        words.append({
+                            "word": word_text,
+                            "start": idx * word_duration,
+                            "end": (idx + 1) * word_duration,
+                            "confidence": 0.99,
+                            "speaker": 0,
+                        })
+
+            if not paragraphs:
+                paragraphs = [full_text]
+        else:
+            for w in transcript.words:
+                speaker_id = None
+                if w.speaker:
+                    if w.speaker not in speaker_map:
+                        speaker_map[w.speaker] = next_speaker_id
+                        next_speaker_id += 1
+                    speaker_id = speaker_map[w.speaker]
+
+                words.append(
+                    {
+                        "word": w.text,
+                        "start": w.start / 1000.0,
+                        "end": w.end / 1000.0,
+                        "confidence": w.confidence,
+                        "speaker": speaker_id,
+                    }
+                )
+            paragraphs = [p.text for p in transcript.get_paragraphs()]
+
+        # Extract audio intelligence metrics (sentiments, chapters, highlights)
+        sentiments_out = []
+        if getattr(transcript, "sentiment_analysis", None):
+            for s in transcript.sentiment_analysis:
+                sentiments_out.append({
+                    "text": s.text,
+                    "start": s.start / 1000.0,
+                    "end": s.end / 1000.0,
+                    "sentiment": s.sentiment,
+                    "confidence": round(s.confidence, 4),
+                })
+
+        chapters_out = []
+        # 1. Check Speech Understanding summarization response
+        su_json = getattr(transcript, "json_response", {}) or {}
+        su_obj = su_json.get("speech_understanding") or {}
+        su_response = su_obj.get("response") or {}
+        summarization_data = su_response.get("summarization") or {}
+        su_summaries = summarization_data.get("summary") or []
+
+        if su_summaries:
+            for c in su_summaries:
+                chapters_out.append({
+                    "headline": c.get("headline", ""),
+                    "summary": c.get("text", "") or c.get("summary", ""),
+                    "gist": c.get("headline", "") or c.get("gist", ""),
+                    "start": (c.get("start") or 0) / 1000.0,
+                    "end": (c.get("end") or 0) / 1000.0,
+                })
+        # 2. Check transcript.chapters (from auto_chapters)
+        elif getattr(transcript, "chapters", None):
+            for c in transcript.chapters:
+                chapters_out.append({
+                    "headline": getattr(c, "headline", "") or "",
+                    "summary": getattr(c, "summary", "") or "",
+                    "gist": getattr(c, "gist", "") or "",
+                    "start": (getattr(c, "start", 0) or 0) / 1000.0,
+                    "end": (getattr(c, "end", 0) or 0) / 1000.0,
+                })
+
+        highlights_out = []
+        raw_hl = getattr(transcript.auto_highlights, "results", []) if getattr(transcript, "auto_highlights", None) else []
+        for h in raw_hl:
+            highlights_out.append({
+                "text": h.text,
+                "count": h.count,
+                "rank": h.rank,
+                "timestamps": [{"start": t.start / 1000.0, "end": t.end / 1000.0} for t in getattr(h, "timestamps", [])],
+            })
+
+        # Multi-signal viral short clip scoring engine (AssemblyAI Audio Intelligence + Chapters)
+        total_duration = words[-1]["end"] - words[0]["start"] if words else 0.0
+        velocity_timeline = calculate_speech_velocity(words)
+        acoustic_events = extract_acoustic_events(words, full_text)
+        viral_clips_out = score_and_rank_short_clips(
+            sentiments=sentiments_out,
+            acoustic_events=acoustic_events,
+            highlights=highlights_out,
+            velocity_timeline=velocity_timeline,
+            words=words,
+            total_duration_sec=total_duration,
+            chapters=chapters_out,
+        )
+
+        # Enrich candidate short clips with Gemini social metadata (title, hook, hashtags, etc.)
+        viral_clips_out = enrich_clips_with_gemini(
+            viral_clips_out, words, full_text=full_text, chapters=chapters_out
+        )
+
+        logger.info(
+            "Returning %d words, %d paragraphs, %d speakers, %d sentiments, %d chapters, %d short viral clips",
+            len(words),
+            len(paragraphs),
+            len(speaker_map),
+            len(sentiments_out),
+            len(chapters_out),
+            len(viral_clips_out),
+        )
+
+        return {
+            "success": True,
+            "fullText": full_text,
+            "words": words,
+            "paragraphs": paragraphs,
+            "sentiments": sentiments_out,
+            "chapters": chapters_out,
+            "highlights": highlights_out,
+            "viralClips": viral_clips_out,
+        }
+
+    def _submit_transcription(self, req: SubmitTranscribeRequest):
+        """Core logic to submit audio to AssemblyAI asynchronously."""
         import assemblyai as aai
         import requests
 
-        logger.info("=== TRANSCRIBE REQUEST ===")
-        logger.info("video_url: %s...", req.video_url[:100])
+        logger.info("=== SUBMIT TRANSCRIBE REQUEST ===")
+        logger.info("video_url: %s...", (req.video_url or "")[:100])
 
-        # --- Validate inputs ---
+        if not req.video_url:
+            raise InvalidInputError("video_url is required to submit transcription")
+
         vurl = validate_url(req.video_url, label="video_url")
 
-        # Configure AssemblyAI key
         aai.settings.api_key = os.environ.get("ASSEMBLYAI_API_KEY")
         if not aai.settings.api_key:
             raise InvalidInputError(
                 "ASSEMBLYAI_API_KEY environment variable is missing in Modal secret"
             )
 
-        with tempfile.TemporaryDirectory() as tmpdir:
+        config_kwargs = {
+            "speech_models": ["universal-3-5-pro", "universal-2"],
+            "speaker_labels": True,
+            "disfluencies": True,
+            "auto_highlights": True,
+            "sentiment_analysis": True,
+            "filter_profanity": True,
+            "auto_chapters": True,
+        }
 
-            # 1. Download source media
-            with StageTimer("download_media"):
-                if is_youtube_url(vurl):
-                    logger.info(
-                        "YouTube URL detected. Downloading audio only via yt-dlp..."
-                    )
-                    local_media = download_youtube_audio(vurl, tmpdir)
-                    logger.info("YouTube audio downloaded to: %s", local_media)
-                else:
-                    logger.info("Remote URL detected. Downloading directly...")
-                    local_media = os.path.join(tmpdir, "input_media")
-                    try:
-                        with requests.get(vurl, stream=True, timeout=120) as r:
-                            r.raise_for_status()
-                            with open(local_media, "wb") as f:
-                                for chunk in r.iter_content(chunk_size=8192):
-                                    if chunk:
-                                        f.write(chunk)
-                    except requests.RequestException as e:
-                        raise DownloadError(
-                            f"Failed to download media: {e}"
-                        ) from e
-                    logger.info("Remote file downloaded successfully.")
+        if req.transcribe_language and req.transcribe_language != "auto":
+            config_kwargs["language_code"] = req.transcribe_language
+        else:
+            config_kwargs["language_detection"] = True
 
-            # 2. Extract a clean 16 kHz mono WAV
-            with StageTimer("extract_audio"):
-                local_wav = os.path.join(tmpdir, "transcription_audio.wav")
-                logger.info("Extracting/converting audio with FFmpeg...")
-                cmd = [
-                    "ffmpeg", "-y",
-                    "-i", local_media,
-                    "-ac", "1",
-                    "-ar", "16000",
-                    "-vn",
-                    local_wav,
-                ]
-                result = subprocess.run(
-                    cmd, capture_output=True, text=True, timeout=300
-                )
-                if result.returncode != 0:
-                    raise RenderError(
-                        f"FFmpeg audio extraction failed: {result.stderr[-500:]}"
-                    )
-                logger.info(
-                    "Audio extraction successful: %s bytes",
-                    f"{os.path.getsize(local_wav):,}",
-                )
-
-            # 3. Transcribe via AssemblyAI
-            with StageTimer("transcribe_assemblyai"):
-                logger.info(
-                    "Submitting to AssemblyAI (transcribe_lang=%s, translate_lang=%s)...",
-                    req.transcribe_language,
-                    req.translate_language,
-                )
-                
-                config_kwargs = {
-                    "speech_models": ["universal-3-5-pro", "universal-2"],
-                    "speaker_labels": True,
-                    "disfluencies": True,
-                    "auto_highlights": True,
-                    "sentiment_analysis": True,
-                    "filter_profanity": True,
-                    "auto_chapters": True,
-                }
-                
-                if req.transcribe_language and req.transcribe_language != "auto":
-                    config_kwargs["language_code"] = req.transcribe_language
-                else:
-                    config_kwargs["language_detection"] = True
-                    
-                # Setup Speech Understanding features (optional Translation)
-                if req.translate_language and req.translate_language != "none":
-                    config_kwargs["speech_understanding"] = {
-                        "request": {
-                            "translation": {
-                                "target_languages": [req.translate_language],
-                                "match_original_utterance": True,
-                            }
-                        }
+        if req.translate_language and req.translate_language != "none":
+            config_kwargs["speech_understanding"] = {
+                "request": {
+                    "translation": {
+                        "target_languages": [req.translate_language],
+                        "match_original_utterance": True,
                     }
+                }
+            }
 
-                default_prompt = (
-                    "Video or podcast recording with spoken dialogue, key topics, and discussions."
-                )
-                config_kwargs["prompt"] = req.prompt if getattr(req, "prompt", None) else default_prompt
-                if getattr(req, "keyterms", None):
-                    config_kwargs["keyterms_prompt"] = req.keyterms
+        default_prompt = (
+            "Video or podcast recording with spoken dialogue, key topics, and discussions."
+        )
+        config_kwargs["prompt"] = req.prompt if getattr(req, "prompt", None) else default_prompt
+        if getattr(req, "keyterms", None):
+            config_kwargs["keyterms_prompt"] = req.keyterms
 
-                config = aai.TranscriptionConfig(**config_kwargs)
+        config = aai.TranscriptionConfig(**config_kwargs)
+        transcriber = aai.Transcriber(config=config)
 
-                transcriber = aai.Transcriber(config=config)
-                transcript = transcriber.transcribe(local_wav)
+        # For remote non-YouTube URLs (e.g. presigned R2 URLs), attempt direct URL submission first
+        if not is_youtube_url(vurl):
+            try:
+                logger.info("Attempting direct URL submission to AssemblyAI...")
+                transcript = transcriber.submit(vurl)
+                logger.info("AssemblyAI submission accepted directly for URL. ID: %s", transcript.id)
+                return {
+                    "success": True,
+                    "transcript_id": transcript.id,
+                    "status": str(transcript.status.value if hasattr(transcript.status, "value") else transcript.status),
+                }
+            except Exception as e:
+                logger.warning("Direct URL submission to AssemblyAI failed (%s), falling back to media extraction: %s", type(e).__name__, e)
 
-                if transcript.status == aai.TranscriptStatus.error:
-                    logger.error("AssemblyAI error: %s", transcript.error)
-                    raise TranscriptionError(
-                        f"AssemblyAI transcription failed: {transcript.error}"
-                    )
-
-                logger.info(
-                    "Transcription successful. Length: %d chars",
-                    len(transcript.text),
-                )
-
-            # 4. Map words to sequential speaker IDs and convert ms → seconds
-            words = []
-            speaker_map = {}
-            next_speaker_id = 0
-            paragraphs = []
-            full_text = transcript.text
-
-            target_lang = req.translate_language
-            has_translation = False
-            if target_lang and target_lang != "none":
-                translated_texts = getattr(transcript, "translated_texts", None)
-                if translated_texts and target_lang in translated_texts:
-                    has_translation = True
-
-            if has_translation:
-                full_text = transcript.translated_texts[target_lang]
-                utterances = getattr(transcript, "utterances", None)
-                if utterances:
-                    for utt in utterances:
-                        speaker_id = None
-                        if utt.speaker:
-                            if utt.speaker not in speaker_map:
-                                speaker_map[utt.speaker] = next_speaker_id
-                                next_speaker_id += 1
-                            speaker_id = speaker_map[utt.speaker]
-
-                        utt_translation = utt.translated_texts.get(target_lang, "") if utt.translated_texts else ""
-                        if not utt_translation:
-                            continue
-
-                        utt_words = utt_translation.split()
-                        num_words = len(utt_words)
-                        if num_words == 0:
-                            continue
-
-                        start_sec = utt.start / 1000.0
-                        end_sec = utt.end / 1000.0
-                        duration = end_sec - start_sec
-                        word_duration = duration / num_words
-
-                        for idx, word_text in enumerate(utt_words):
-                            w_start = start_sec + (idx * word_duration)
-                            w_end = w_start + word_duration
-                            words.append({
-                                "word": word_text,
-                                "start": w_start,
-                                "end": w_end,
-                                "confidence": 0.99,
-                                "speaker": speaker_id,
-                            })
-
-                    paragraphs = [
-                        utt.translated_texts.get(target_lang, "")
-                        for utt in utterances
-                        if utt.translated_texts and utt.translated_texts.get(target_lang, "")
-                    ]
-
-                if not words:
-                    all_words = full_text.split()
-                    num_words = len(all_words)
-                    if num_words > 0:
-                        total_duration = 0.0
-                        if transcript.words:
-                            total_duration = transcript.words[-1].end / 1000.0
-                        else:
-                            total_duration = 30.0
-                        word_duration = total_duration / num_words
-                        for idx, word_text in enumerate(all_words):
-                            words.append({
-                                "word": word_text,
-                                "start": idx * word_duration,
-                                "end": (idx + 1) * word_duration,
-                                "confidence": 0.99,
-                                "speaker": 0,
-                            })
-
-                if not paragraphs:
-                    paragraphs = [full_text]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            if is_youtube_url(vurl):
+                logger.info("YouTube URL detected. Downloading audio only via yt-dlp...")
+                local_media = download_youtube_audio(vurl, tmpdir)
             else:
-                for w in transcript.words:
-                    speaker_id = None
-                    if w.speaker:
-                        if w.speaker not in speaker_map:
-                            speaker_map[w.speaker] = next_speaker_id
-                            next_speaker_id += 1
-                        speaker_id = speaker_map[w.speaker]
+                logger.info("Downloading remote media for local extraction...")
+                local_media = os.path.join(tmpdir, "input_media")
+                with requests.get(vurl, stream=True, timeout=120) as r:
+                    r.raise_for_status()
+                    with open(local_media, "wb") as f:
+                        for chunk in r.iter_content(chunk_size=8192):
+                            if chunk:
+                                f.write(chunk)
 
-                    words.append(
-                        {
-                            "word": w.text,
-                            "start": w.start / 1000.0,
-                            "end": w.end / 1000.0,
-                            "confidence": w.confidence,
-                            "speaker": speaker_id,
-                        }
-                    )
-                paragraphs = [p.text for p in transcript.get_paragraphs()]
+            local_wav = os.path.join(tmpdir, "transcription_audio.wav")
+            logger.info("Extracting/converting audio with FFmpeg...")
+            cmd = [
+                "ffmpeg", "-y",
+                "-i", local_media,
+                "-ac", "1",
+                "-ar", "16000",
+                "-vn",
+                local_wav,
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+            if result.returncode != 0:
+                raise RenderError(f"FFmpeg audio extraction failed: {result.stderr[-500:]}")
 
-            # Extract audio intelligence metrics (sentiments, chapters, highlights)
-            sentiments_out = []
-            if getattr(transcript, "sentiment_analysis", None):
-                for s in transcript.sentiment_analysis:
-                    sentiments_out.append({
-                        "text": s.text,
-                        "start": s.start / 1000.0,
-                        "end": s.end / 1000.0,
-                        "sentiment": s.sentiment,
-                        "confidence": round(s.confidence, 4),
-                    })
-
-            chapters_out = []
-            # 1. Check Speech Understanding summarization response
-            su_json = getattr(transcript, "json_response", {}) or {}
-            su_obj = su_json.get("speech_understanding") or {}
-            su_response = su_obj.get("response") or {}
-            summarization_data = su_response.get("summarization") or {}
-            su_summaries = summarization_data.get("summary") or []
-
-            if su_summaries:
-                for c in su_summaries:
-                    chapters_out.append({
-                        "headline": c.get("headline", ""),
-                        "summary": c.get("text", "") or c.get("summary", ""),
-                        "gist": c.get("headline", "") or c.get("gist", ""),
-                        "start": (c.get("start") or 0) / 1000.0,
-                        "end": (c.get("end") or 0) / 1000.0,
-                    })
-            # 2. Check transcript.chapters (from auto_chapters)
-            elif getattr(transcript, "chapters", None):
-                for c in transcript.chapters:
-                    chapters_out.append({
-                        "headline": getattr(c, "headline", "") or "",
-                        "summary": getattr(c, "summary", "") or "",
-                        "gist": getattr(c, "gist", "") or "",
-                        "start": (getattr(c, "start", 0) or 0) / 1000.0,
-                        "end": (getattr(c, "end", 0) or 0) / 1000.0,
-                    })
-
-            highlights_out = []
-            raw_hl = getattr(transcript.auto_highlights, "results", []) if getattr(transcript, "auto_highlights", None) else []
-            for h in raw_hl:
-                highlights_out.append({
-                    "text": h.text,
-                    "count": h.count,
-                    "rank": h.rank,
-                    "timestamps": [{"start": t.start / 1000.0, "end": t.end / 1000.0} for t in getattr(h, "timestamps", [])],
-                })
-
-            # Multi-signal viral short clip scoring engine (AssemblyAI Audio Intelligence + Chapters)
-            total_duration = words[-1]["end"] - words[0]["start"] if words else 0.0
-            velocity_timeline = calculate_speech_velocity(words)
-            acoustic_events = extract_acoustic_events(words, full_text)
-            viral_clips_out = score_and_rank_short_clips(
-                sentiments=sentiments_out,
-                acoustic_events=acoustic_events,
-                highlights=highlights_out,
-                velocity_timeline=velocity_timeline,
-                words=words,
-                total_duration_sec=total_duration,
-                chapters=chapters_out,
-            )
-
-            # Enrich candidate short clips with Gemini social metadata (title, hook, hashtags, etc.)
-            viral_clips_out = enrich_clips_with_gemini(
-                viral_clips_out, words, full_text=full_text, chapters=chapters_out
-            )
-
-            logger.info(
-                "Returning %d words, %d paragraphs, %d speakers, %d sentiments, %d chapters, %d short viral clips",
-                len(words),
-                len(paragraphs),
-                len(speaker_map),
-                len(sentiments_out),
-                len(chapters_out),
-                len(viral_clips_out),
-            )
+            logger.info("Uploading and submitting local WAV to AssemblyAI...")
+            transcript = transcriber.submit(local_wav)
+            logger.info("AssemblyAI submit successful. Transcript ID: %s", transcript.id)
 
             return {
                 "success": True,
-                "fullText": full_text,
-                "words": words,
-                "paragraphs": paragraphs,
-                "sentiments": sentiments_out,
-                "chapters": chapters_out,
-                "highlights": highlights_out,
-                "viralClips": viral_clips_out,
+                "transcript_id": transcript.id,
+                "status": str(transcript.status.value if hasattr(transcript.status, "value") else transcript.status),
             }
+
+    def _enrich_transcript(self, req: EnrichTranscriptRequest):
+        """Core logic to fetch completed transcript from AssemblyAI and run viral scoring + Gemini enrichment."""
+        import assemblyai as aai
+
+        logger.info("=== ENRICH TRANSCRIPT REQUEST ===")
+        logger.info("transcript_id: %s", req.transcript_id)
+
+        aai.settings.api_key = os.environ.get("ASSEMBLYAI_API_KEY")
+        if not aai.settings.api_key:
+            raise InvalidInputError(
+                "ASSEMBLYAI_API_KEY environment variable is missing in Modal secret"
+            )
+
+        transcript = aai.Transcript.get_by_id(req.transcript_id)
+        if transcript.status == aai.TranscriptStatus.error:
+            logger.error("AssemblyAI transcript reported error: %s", transcript.error)
+            raise TranscriptionError(f"AssemblyAI transcription failed: {transcript.error}")
+
+        if transcript.status != aai.TranscriptStatus.completed:
+            logger.warning("Transcript %s is not yet completed (status: %s)", req.transcript_id, transcript.status)
+            return {
+                "success": False,
+                "status": str(transcript.status.value if hasattr(transcript.status, "value") else transcript.status),
+                "error": f"Transcript is not completed yet (status={transcript.status})"
+            }
+
+        return self._process_and_enrich_transcript(
+            transcript=transcript,
+            translate_language=req.translate_language,
+            prompt=req.prompt,
+            keyterms=req.keyterms,
+        )
+
+    @modal.fastapi_endpoint(method="POST")
+    def submit_transcription(self, req: SubmitTranscribeRequest):
+        """Endpoint to submit audio to AssemblyAI asynchronously."""
+        return self._submit_transcription(req)
+
+    @modal.fastapi_endpoint(method="POST")
+    def enrich_transcript(self, req: EnrichTranscriptRequest):
+        """Endpoint to fetch completed transcript from AssemblyAI and run viral scoring + Gemini enrichment."""
+        return self._enrich_transcript(req)
+
+    @modal.fastapi_endpoint(method="POST")
+    def transcribe(self, req: TranscribeRequest):
+        """Unified endpoint: supports submit, enrich, or monolithic transcribe."""
+        import assemblyai as aai
+        import time
+
+        # Mode A: Enrich an already-completed AssemblyAI transcript
+        if req.transcript_id:
+            return self._enrich_transcript(
+                EnrichTranscriptRequest(
+                    transcript_id=req.transcript_id,
+                    translate_language=req.translate_language,
+                    prompt=req.prompt,
+                    keyterms=req.keyterms,
+                )
+            )
+
+        # Mode B: Submit-only (async)
+        if req.submit_only:
+            return self._submit_transcription(
+                SubmitTranscribeRequest(
+                    video_url=req.video_url or "",
+                    transcribe_language=req.transcribe_language,
+                    translate_language=req.translate_language,
+                    prompt=req.prompt,
+                    keyterms=req.keyterms,
+                )
+            )
+
+        # Mode C: Monolithic fallback for backwards compatibility
+        logger.info("=== MONOLITHIC TRANSCRIBE REQUEST ===")
+        submit_res = self._submit_transcription(
+            SubmitTranscribeRequest(
+                video_url=req.video_url or "",
+                transcribe_language=req.transcribe_language,
+                translate_language=req.translate_language,
+                prompt=req.prompt,
+                keyterms=req.keyterms,
+            )
+        )
+        t_id = submit_res["transcript_id"]
+        aai.settings.api_key = os.environ.get("ASSEMBLYAI_API_KEY")
+
+        logger.info("Polling AssemblyAI for transcript %s...", t_id)
+        while True:
+            t = aai.Transcript.get_by_id(t_id)
+            if t.status == aai.TranscriptStatus.completed:
+                logger.info("Transcript %s completed. Enriching...", t_id)
+                return self._process_and_enrich_transcript(
+                    transcript=t,
+                    translate_language=req.translate_language,
+                    prompt=req.prompt,
+                    keyterms=req.keyterms,
+                )
+            elif t.status == aai.TranscriptStatus.error:
+                raise TranscriptionError(f"AssemblyAI transcription failed: {t.error}")
+            time.sleep(3)
 
 
 def enrich_clips_with_gemini(
@@ -437,29 +525,41 @@ Candidates:
             },
         }
 
-        models_to_try = ["gemini-2.5-flash", "gemini-2.5-pro"]
+        models_to_try = ["gemini-2.5-flash", "gemini-3.6-flash"]
         response_text = None
 
         for model in models_to_try:
-            try:
-                res = client.models.generate_content(
-                    model=model,
-                    contents=prompt,
-                    config=types.GenerateContentConfig(
-                        response_mime_type="application/json",
-                        response_schema=schema,
-                        temperature=0.3,
-                        automatic_function_calling=types.AutomaticFunctionCallingConfig(
-                            disable=True
+            for attempt in range(3):
+                try:
+                    logger.info("Calling Gemini model %s (attempt %d/3)...", model, attempt + 1)
+                    res = client.models.generate_content(
+                        model=model,
+                        contents=prompt,
+                        config=types.GenerateContentConfig(
+                            response_mime_type="application/json",
+                            response_schema=schema,
+                            temperature=0.3,
+                            automatic_function_calling=types.AutomaticFunctionCallingConfig(
+                                disable=True
+                            ),
                         ),
-                    ),
-                )
-                if res.text:
-                    response_text = res.text
-                    break
-            except Exception as e:
-                logger.warning("Gemini model %s failed: %s", model, e)
-                continue
+                    )
+                    if res.text:
+                        response_text = res.text
+                        logger.info("Gemini model %s succeeded!", model)
+                        break
+                except Exception as e:
+                    err_msg = str(e)
+                    logger.warning("Gemini model %s (attempt %d/3) failed: %s", model, attempt + 1, err_msg)
+                    # If 503 high demand or 429 rate limit, wait with backoff and retry
+                    if "503" in err_msg or "UNAVAILABLE" in err_msg or "429" in err_msg:
+                        import time
+                        time.sleep(2 * (attempt + 1))
+                        continue
+                    else:
+                        break  # Fall back to next model immediately for other errors
+            if response_text:
+                break
 
         if response_text:
             import json

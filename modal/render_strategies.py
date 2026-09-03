@@ -263,7 +263,11 @@ class SplitStrategy(RenderStrategy):
 
 
 class LetterboxStrategy(RenderStrategy):
-    """Blurred background letterbox card for B-roll, wide visual cutaways, and screen captures."""
+    """Blurred background letterbox card for B-roll, wide visual cutaways, and screen captures.
+
+    Renders an immersive, tall card (~70% of 1920 height, ~1344px) matching modern social video aesthetics
+    (OpusClip style) with subtle top and bottom blurred background, avoiding the tiny slit appearance of raw 16:9.
+    """
 
     def render_frame(
         self,
@@ -275,23 +279,37 @@ class LetterboxStrategy(RenderStrategy):
         bg = make_blurred_bg(img, target_w=self.target_w, target_h=self.target_h)
         img_h, img_w = img.shape[:2]
 
-        # Fit 16:9 (or wide) B-roll across the 1080 width without clipping the edges
-        scale = float(self.target_w) / float(img_w)
-        scaled_w = self.target_w
-        scaled_h = int(img_h * scale)
+        CARD_W = self.target_w  # 1080
+        CARD_H = int(self.target_h * 0.70)  # 1344px (~70% of 1920 height)
 
-        if scaled_h <= self.target_h:
-            res_scaled = cv2.resize(img, (scaled_w, scaled_h), interpolation=cv2.INTER_AREA)
-            # Position centered vertically (0.42 anchor) leaving lower area for captions
-            start_y = max(0, int((self.target_h - scaled_h) * 0.42))
-            bg[start_y : start_y + scaled_h, 0 : scaled_w] = res_scaled
+        scale = float(CARD_H) / float(img_h)
+        scaled_w = int(round(img_w * scale))
+        scaled_h = CARD_H
+
+        res_scaled = cv2.resize(img, (scaled_w, scaled_h), interpolation=cv2.INTER_AREA)
+
+        # Center-crop or subject-aware crop horizontally
+        target_cx = state.get("target_cx")
+        if target_cx is not None and img_w > 0:
+            cx_scaled = (float(target_cx) / float(img_w)) * scaled_w
+            tx = int(cx_scaled - CARD_W // 2)
         else:
-            scale = float(self.target_h) / float(img_h)
-            scaled_h = self.target_h
-            scaled_w = int(img_w * scale)
-            res_scaled = cv2.resize(img, (scaled_w, scaled_h), interpolation=cv2.INTER_AREA)
-            start_x = max(0, (self.target_w - scaled_w) // 2)
-            bg[0 : self.target_h, start_x : start_x + scaled_w] = res_scaled
+            tx = (scaled_w - CARD_W) // 2
+
+        tx = max(0, min(tx, max(0, scaled_w - CARD_W)))
+
+        if scaled_w >= CARD_W:
+            res = res_scaled[0:CARD_H, tx : tx + CARD_W]
+            start_x = 0
+            actual_w = CARD_W
+        else:
+            res = res_scaled
+            start_x = (CARD_W - scaled_w) // 2
+            actual_w = scaled_w
+
+        # Position vertically: upper-centered (40% offset), leaving generous room at bottom for captions
+        start_y = max(0, int((self.target_h - CARD_H) * 0.40))
+        bg[start_y : start_y + CARD_H, start_x : start_x + actual_w] = res
 
         return bg
 

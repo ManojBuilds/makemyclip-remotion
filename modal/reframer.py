@@ -1117,25 +1117,25 @@ class AIReframe:
             sc = scores[tidx]
 
             # --- FAKE FACE FILTER ---
-            is_valid, track_max_score, movement, rel_movement, mean_size = is_valid_face_track(tr, sc, frame_height=src_h)
+            is_valid, mean_sc, track_max_score, mean_size, dur = is_valid_face_track(tr, sc, frame_height=src_h)
 
             logger.info(
-                "Track %d evaluation: max_score=%.3f, movement=%.3f, rel_movement=%.3f, mean_size=%.3f",
+                "Track %d evaluation: mean_score=%.3f, max_score=%.3f, mean_size=%.1f, dur=%.0f",
                 tidx,
+                mean_sc,
                 track_max_score,
-                movement,
-                rel_movement,
                 mean_size,
+                dur,
             )
 
             if not is_valid:
                 logger.info(
-                    "Purged fake face track %d (score %.2f, move %.2f, rel_move %.3f, size %.1f)",
+                    "Purged fake face track %d (mean_sc %.2f, max_sc %.2f, size %.1f, dur %.0f)",
                     tidx,
+                    mean_sc,
                     track_max_score,
-                    movement,
-                    rel_movement,
                     mean_size,
+                    dur,
                 )
                 continue
 
@@ -1201,9 +1201,9 @@ class AIReframe:
         valid_tracks = []
         for tidx, tr in enumerate(tracks):
             sc = scores[tidx]
-            is_valid, track_max_score, movement, rel_movement, mean_size = is_valid_face_track(tr, sc, frame_height=src_h)
+            is_valid, mean_sc, track_max_score, mean_size, dur = is_valid_face_track(tr, sc, frame_height=src_h)
             if is_valid:
-                valid_tracks.append((tidx, tr, track_max_score, len(tr["track"]["frame"])))
+                valid_tracks.append((tidx, tr, track_max_score, dur))
 
         # Sort valid tracks by max ASD score (primary active speaker first), then track duration
         valid_tracks.sort(key=lambda item: (item[2], item[3]), reverse=True)

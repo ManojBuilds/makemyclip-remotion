@@ -88,8 +88,25 @@ class BatchReframeRequest(BaseModel):
     analysis_url: Optional[str] = None
 
 
-class TranscribeRequest(BaseModel):
+class SubmitTranscribeRequest(BaseModel):
     video_url: str
+    transcribe_language: Optional[str] = "auto"
+    translate_language: Optional[str] = "none"
+    prompt: Optional[str] = None
+    keyterms: Optional[List[str]] = None
+
+
+class EnrichTranscriptRequest(BaseModel):
+    transcript_id: str
+    translate_language: Optional[str] = "none"
+    prompt: Optional[str] = None
+    keyterms: Optional[List[str]] = None
+
+
+class TranscribeRequest(BaseModel):
+    video_url: Optional[str] = None
+    transcript_id: Optional[str] = None
+    submit_only: Optional[bool] = False
     transcribe_language: Optional[str] = "auto"
     translate_language: Optional[str] = "none"
     prompt: Optional[str] = None

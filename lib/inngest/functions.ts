@@ -4,7 +4,12 @@ import { projects, transcriptions, clips, user } from "@/lib/db/schema"
 import type { WordTimestamp, ClipCaption } from "@/lib/db/schema"
 import { eq, inArray, sql } from "drizzle-orm"
 import { getDownloadPresignedUrl } from "@/lib/r2"
-import { transcribeFromUrl } from "@/lib/assemblyai"
+import {
+  submitTranscription,
+  getAssemblyAiStatus,
+  enrichTranscript,
+  transcribeFromUrl,
+} from "@/lib/assemblyai"
 import { isHttpUrl, normalizeVideoUrl } from "@/lib/youtube"
 import {
   trackServerVideoAnalysisCompleted,
@@ -75,103 +80,68 @@ export const processVideo = inngest.createFunction(
         }
       })
 
-    // Parallel Execution: Run audio transcription + Gemini metadata enrichment and video analysis concurrently
-    const [transcription, videoAnalysis] = await Promise.all([
-      step.run("transcribe-video", async () => {
-        console.log(
-          `[processVideo] Step: transcribe-video for project: ${projectId}`
-        )
+    // Step 2: Check if transcription already exists
+    const existingTranscription = await step.run("check-existing-transcription", async () => {
+      const existingPromise = db
+        .select()
+        .from(transcriptions)
+        .where(eq(transcriptions.projectId, projectId))
+        .limit(1)
 
-        const existingPromise = db
-          .select()
-          .from(transcriptions)
-          .where(eq(transcriptions.projectId, projectId))
-          .limit(1)
-
-        const existingForSameKeyPromise = key
-          ? db
-            .select({
-              fullText: transcriptions.fullText,
-              words: transcriptions.words,
-              paragraphs: transcriptions.paragraphs,
-            })
-            .from(transcriptions)
-            .innerJoin(projects, eq(transcriptions.projectId, projects.id))
-            .where(eq(projects.sourceVideoKey, key))
-            .limit(1)
-          : Promise.resolve([])
-
-        const [existing, existingForSameKeyList] = await Promise.all([
-          existingPromise,
-          existingForSameKeyPromise
-        ])
-
-        if (existing.length > 0) {
-          console.log(
-            `[processVideo] Transcription already exists for project ${projectId}. Skipping transcribeFromUrl.`
-          )
-          return {
-            fullText: existing[0].fullText,
-            words: existing[0].words as WordTimestamp[],
-            paragraphs: existing[0].paragraphs,
-            viralClips: undefined as any[] | undefined,
-          }
-        }
-
-        if (key && existingForSameKeyList?.length > 0) {
-          const existingForSameKey = existingForSameKeyList[0]
-          console.log(
-            `[processVideo] Transcription found in another project with the same key: ${key}. Reusing it.`
-          )
-          await db.insert(transcriptions).values({
-            projectId,
-            fullText: existingForSameKey.fullText,
-            words: existingForSameKey.words,
-            paragraphs: existingForSameKey.paragraphs,
+      const existingForSameKeyPromise = key
+        ? db
+          .select({
+            fullText: transcriptions.fullText,
+            words: transcriptions.words,
+            paragraphs: transcriptions.paragraphs,
           })
-          return {
-            fullText: existingForSameKey.fullText,
-            words: existingForSameKey.words as WordTimestamp[],
-            paragraphs: existingForSameKey.paragraphs,
-            viralClips: undefined as any[] | undefined,
-          }
+          .from(transcriptions)
+          .innerJoin(projects, eq(transcriptions.projectId, projects.id))
+          .where(eq(projects.sourceVideoKey, key))
+          .limit(1)
+        : Promise.resolve([])
+
+      const [existing, existingForSameKeyList] = await Promise.all([
+        existingPromise,
+        existingForSameKeyPromise
+      ])
+
+      if (existing.length > 0) {
+        console.log(
+          `[processVideo] Transcription already exists for project ${projectId}. Skipping new transcription.`
+        )
+        return {
+          fullText: existing[0].fullText,
+          words: existing[0].words as WordTimestamp[],
+          paragraphs: existing[0].paragraphs,
+          viralClips: undefined as any[] | undefined,
         }
+      }
 
-        // Generate a presigned URL so Deepgram can fetch the video from R2
-        // Use a generous 1-hour expiry for large files
-        const presignedUrl =
-          videoUrl || (await getDownloadPresignedUrl(key, 3600))
-
-        // Call AssemblyAI for transcription and Gemini metadata enrichment via Modal
+      if (key && existingForSameKeyList?.length > 0) {
+        const existingForSameKey = existingForSameKeyList[0]
         console.log(
-          `[processVideo] Calling AssemblyAI with transcribeLanguage=${transcribeLanguage}, translateLanguage=${translateLanguage}...`
+          `[processVideo] Transcription found in another project with the same key: ${key}. Reusing it.`
         )
-        const result = await transcribeFromUrl(
-          presignedUrl,
-          transcribeLanguage,
-          translateLanguage
-        )
-        console.log(
-          `[processVideo] Transcription complete. Length: ${result.fullText.length} chars`
-        )
-
-        // Persist the transcription to the database
         await db.insert(transcriptions).values({
           projectId,
-          fullText: result.fullText,
-          words: result.words,
-          paragraphs: result.paragraphs,
+          fullText: existingForSameKey.fullText,
+          words: existingForSameKey.words,
+          paragraphs: existingForSameKey.paragraphs,
         })
-
         return {
-          fullText: result.fullText,
-          words: result.words,
-          paragraphs: result.paragraphs,
-          viralClips: result.viralClips,
+          fullText: existingForSameKey.fullText,
+          words: existingForSameKey.words as WordTimestamp[],
+          paragraphs: existingForSameKey.paragraphs,
+          viralClips: undefined as any[] | undefined,
         }
-      }),
+      }
 
-      step.run("analyze-video-modal", async () => {
+      return null
+    })
+
+    const runVideoAnalysis = async () => {
+      return await step.run("analyze-video-modal", async () => {
         const analyzerEndpoint = process.env.MODAL_ANALYZER_ENDPOINT || "https://ms8460149--makemyclip-ai-rendering-videoanalyzer-analyze.modal.run"
         console.log(`[processVideo] Step: analyze-video-modal calling endpoint: ${analyzerEndpoint}`)
 
@@ -249,11 +219,127 @@ export const processVideo = inngest.createFunction(
           await db.update(projects).set({ status: "error" }).where(eq(projects.id, projectId))
           throw error
         }
-      }),
-    ])
+      })
+    }
+
+    let transcription: {
+      fullText: string
+      words: WordTimestamp[]
+      paragraphs: string[]
+      viralClips?: any[]
+    }
+
+    if (existingTranscription) {
+      transcription = {
+        fullText: existingTranscription.fullText || "",
+        words: (existingTranscription.words || []) as WordTimestamp[],
+        paragraphs: (existingTranscription.paragraphs as string[]) || [],
+        viralClips: existingTranscription.viralClips,
+      }
+      await runVideoAnalysis()
+    } else {
+      const presignedUrl = videoUrl || (await getDownloadPresignedUrl(key, 3600))
+
+      // 1. Submit transcription to AssemblyAI (asynchronous, non-blocking, takes ~5-15s)
+      const { transcriptId } = await step.run("submit-transcription", async () => {
+        console.log(
+          `📡 [processVideo][submit-transcription] Submitting audio for project ${projectId} (lang=${transcribeLanguage}, translate=${translateLanguage})...`
+        )
+        const t0 = Date.now()
+        const res = await submitTranscription(
+          presignedUrl,
+          transcribeLanguage,
+          translateLanguage
+        )
+        console.log(
+          `✅ [processVideo][submit-transcription] Job accepted in ${(Date.now() - t0) / 1000}s! Transcript ID: ${res.transcriptId} (initial status: ${res.status})`
+        )
+        return res
+      })
+
+      // 2. Start video analysis in parallel
+      console.log(`🎬 [processVideo] Triggering video analysis concurrently...`)
+      const videoAnalysisPromise = runVideoAnalysis()
+
+      // 3. Non-blocking sleep polling loop for AssemblyAI (supports 2+ hours safely!)
+      let transcriptStatus = "queued"
+      let attempts = 0
+      const maxAttempts = 120 // 120 * 20s = 40 minutes polling window
+
+      console.log(
+        `⏳ [processVideo][polling] Starting non-blocking polling loop for transcript: ${transcriptId}...`
+      )
+
+      while (transcriptStatus !== "completed" && attempts < maxAttempts) {
+        attempts++
+        console.log(
+          `💤 [processVideo][polling] Sleeping 20s before poll attempt #${attempts} (elapsed: ~${(attempts - 1) * 20}s)...`
+        )
+        await step.sleep(`wait-transcription-${attempts}`, "20s")
+
+        const pollResult = await step.run(
+          `check-transcription-status-${attempts}`,
+          async () => {
+            const check = await getAssemblyAiStatus(transcriptId)
+            console.log(
+              `🔍 [processVideo][polling] Poll #${attempts}: status="${check.status}" (elapsed: ~${attempts * 20}s)`
+            )
+            return check
+          }
+        )
+
+        transcriptStatus = pollResult.status
+        if (transcriptStatus === "error") {
+          console.error(`❌ [processVideo][polling] AssemblyAI error: ${pollResult.error}`)
+          throw new Error(
+            `AssemblyAI transcription failed: ${pollResult.error || "Unknown error"}`
+          )
+        }
+      }
+
+      if (transcriptStatus !== "completed") {
+        throw new Error(
+          `AssemblyAI transcription timed out after ${maxAttempts * 20}s for transcript ID: ${transcriptId}`
+        )
+      }
+
+      console.log(
+        `🎉 [processVideo][polling] AssemblyAI transcription COMPLETED in ~${attempts * 20}s! Proceeding to enrichment...`
+      )
+
+      // 4. Fast transcript & viral clips enrichment (Modal, ~5-15s)
+      const enrichedResult = await step.run("enrich-transcription", async () => {
+        console.log(
+          `🧠 [processVideo][enrich-transcription] Calling Modal to calculate velocity, acoustic events, viral scores & Gemini metadata...`
+        )
+        const t0 = Date.now()
+        const result = await enrichTranscript(transcriptId, translateLanguage)
+        console.log(
+          `✨ [processVideo][enrich-transcription] Enriched in ${(Date.now() - t0) / 1000}s! Found ${result.viralClips?.length ?? 0} viral clips, ${result.words.length} words.`
+        )
+
+        // Persist the transcription to the database
+        await db.insert(transcriptions).values({
+          projectId,
+          fullText: result.fullText,
+          words: result.words,
+          paragraphs: result.paragraphs,
+        })
+        console.log(`💾 [processVideo][enrich-transcription] Saved transcription to DB for project ${projectId}`)
+
+        return result
+      })
+
+      // Await video analysis to finish before proceeding to save clips & batch reframe
+      console.log(`⏳ [processVideo] Ensuring video analysis completes...`)
+      await videoAnalysisPromise
+      console.log(`✅ [processVideo] Video analysis finished!`)
+
+      transcription = enrichedResult
+    }
 
     const aiClips = await step.run("save-clips-db", async () => {
-      console.log(`[processVideo] Step: save-clips-db saving AssemblyAI & Gemini enriched clips to DB...`)
+      console.log(`💾 [processVideo] Step: save-clips-db saving ${transcription.viralClips?.length ?? 0} clips to DB...`)
 
       const { clips } = await import("@/lib/db/schema")
       const { createId } = await import("@paralleldrive/cuid2")
