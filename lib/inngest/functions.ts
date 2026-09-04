@@ -140,87 +140,87 @@ export const processVideo = inngest.createFunction(
       return null
     })
 
-    const runVideoAnalysis = async () => {
-      return await step.run("analyze-video-modal", async () => {
-        const analyzerEndpoint = process.env.MODAL_ANALYZER_ENDPOINT || "https://ms8460149--makemyclip-ai-rendering-videoanalyzer-analyze.modal.run"
-        console.log(`[processVideo] Step: analyze-video-modal calling endpoint: ${analyzerEndpoint}`)
+    // Step 3: Check existing analysis or submit video analysis to Modal asynchronously
+    const analysisJob = await step.run("check-or-submit-video-analysis", async () => {
+      const projPromise = db
+        .select({ analysisPath: projects.analysisPath })
+        .from(projects)
+        .where(eq(projects.id, projectId))
+        .then(res => res[0])
 
-        const projPromise = db
+      const existingAnalysisPromise = key
+        ? db
           .select({ analysisPath: projects.analysisPath })
           .from(projects)
-          .where(eq(projects.id, projectId))
+          .where(eq(projects.sourceVideoKey, key))
+          .limit(1)
           .then(res => res[0])
+        : Promise.resolve(null)
 
-        const existingAnalysisPromise = key
-          ? db
-            .select({ analysisPath: projects.analysisPath })
-            .from(projects)
-            .where(eq(projects.sourceVideoKey, key))
-            .limit(1)
-            .then(res => res[0])
-          : Promise.resolve(null)
+      const [proj, existingAnalysis] = await Promise.all([
+        projPromise,
+        existingAnalysisPromise,
+      ])
 
-        const [proj, existingAnalysis] = await Promise.all([
-          projPromise,
-          existingAnalysisPromise
-        ])
+      if (proj?.analysisPath) {
+        console.log(`[processVideo] Analysis path already exists for project ${projectId}: ${proj.analysisPath}. Skipping new analysis.`)
+        return { status: "completed" as const, analysisUrl: proj.analysisPath, callId: null }
+      }
 
-        if (proj?.analysisPath) {
-          console.log(`[processVideo] Analysis path already exists for project ${projectId}: ${proj.analysisPath}. Skipping analyze-video-modal.`)
-          return { success: true, analysisUrl: proj.analysisPath }
-        }
-
-        if (key && existingAnalysis?.analysisPath) {
-          console.log(`[processVideo] Analysis path found in another project with the same key: ${key}. Reusing it.`)
-          await db
-            .update(projects)
-            .set({
-              analysisPath: existingAnalysis.analysisPath,
-            })
-            .where(eq(projects.id, projectId))
-          return { success: true, analysisUrl: existingAnalysis.analysisPath }
-        }
-
-        const presignedUrl = videoUrl || (await getDownloadPresignedUrl(key, 3600))
-        const videoDuration = duration || 600
-
-        try {
-          const response = await fetch(analyzerEndpoint, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              video_url: presignedUrl,
-              project_id: projectId,
-              duration: videoDuration,
-              detect_skip: 5,
-            }),
+      if (key && existingAnalysis?.analysisPath) {
+        console.log(`[processVideo] Analysis path found in another project with key: ${key}. Reusing it.`)
+        await db
+          .update(projects)
+          .set({
+            analysisPath: existingAnalysis.analysisPath,
           })
+          .where(eq(projects.id, projectId))
+        return { status: "completed" as const, analysisUrl: existingAnalysis.analysisPath, callId: null }
+      }
 
-          if (!response.ok) {
-            const errText = await response.text()
-            console.error(`[processVideo] Modal VideoAnalyzer failed with status ${response.status}: ${errText}`)
-            throw new Error(`VideoAnalyzer failed with status ${response.status}: ${errText}`)
-          }
+      const presignedUrl = videoUrl || (await getDownloadPresignedUrl(key, 14400))
+      const videoDuration = duration || 600
 
-          const resJson = await response.json()
-          if (resJson.success && resJson.analysis_url) {
-            console.log(`[processVideo] Saved analysis.json to R2: ${resJson.analysis_url}`)
-            await db
-              .update(projects)
-              .set({
-                analysisPath: resJson.analysis_url,
-              })
-              .where(eq(projects.id, projectId))
-            return { success: true, analysisUrl: resJson.analysis_url }
-          }
+      const submitEndpoint =
+        process.env.MODAL_ANALYZER_SUBMIT_ENDPOINT ||
+        (process.env.MODAL_ANALYZER_ENDPOINT
+          ? process.env.MODAL_ANALYZER_ENDPOINT.replace(/-analyze\.modal\.run$/, "-submit.modal.run")
+          : "https://ms8460149--makemyclip-ai-rendering-videoanalyzer-submit.modal.run")
 
-          throw new Error(resJson.error || "Modal VideoAnalyzer failed to produce analysis.json")
-        } catch (error) {
-          await db.update(projects).set({ status: "error" }).where(eq(projects.id, projectId))
-          throw error
+      console.log(`📡 [processVideo] Submitting async video analysis to: ${submitEndpoint}`)
+
+      try {
+        const response = await fetch(submitEndpoint, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            video_url: presignedUrl,
+            project_id: projectId,
+            duration: videoDuration,
+            detect_skip: 5,
+            async_mode: true,
+          }),
+        })
+
+        if (!response.ok) {
+          const errText = await response.text()
+          console.error(`[processVideo] Modal VideoAnalyzer submit failed with status ${response.status}: ${errText}`)
+          throw new Error(`VideoAnalyzer submit failed with status ${response.status}: ${errText}`)
         }
-      })
-    }
+
+        const resJson = await response.json()
+        const callId = resJson.call_id || resJson.callId
+        console.log(`✅ [processVideo] Video analysis job submitted! call_id=${callId}`)
+        return {
+          status: "processing" as const,
+          analysisUrl: null,
+          callId: callId as string,
+        }
+      } catch (error) {
+        await db.update(projects).set({ status: "error" }).where(eq(projects.id, projectId))
+        throw error
+      }
+    })
 
     let transcription: {
       fullText: string
@@ -229,6 +229,8 @@ export const processVideo = inngest.createFunction(
       viralClips?: any[]
     }
 
+    let transcriptId: string | null = null
+
     if (existingTranscription) {
       transcription = {
         fullText: existingTranscription.fullText || "",
@@ -236,12 +238,11 @@ export const processVideo = inngest.createFunction(
         paragraphs: (existingTranscription.paragraphs as string[]) || [],
         viralClips: existingTranscription.viralClips,
       }
-      await runVideoAnalysis()
     } else {
-      const presignedUrl = videoUrl || (await getDownloadPresignedUrl(key, 3600))
+      const presignedUrl = videoUrl || (await getDownloadPresignedUrl(key, 14400))
 
-      // 1. Submit transcription to AssemblyAI (asynchronous, non-blocking, takes ~5-15s)
-      const { transcriptId } = await step.run("submit-transcription", async () => {
+      // Submit transcription to AssemblyAI (asynchronous, non-blocking, takes ~1-3s)
+      const submitRes = await step.run("submit-transcription", async () => {
         console.log(
           `📡 [processVideo][submit-transcription] Submitting audio for project ${projectId} (lang=${transcribeLanguage}, translate=${translateLanguage})...`
         )
@@ -256,33 +257,37 @@ export const processVideo = inngest.createFunction(
         )
         return res
       })
+      transcriptId = submitRes.transcriptId
+    }
 
-      // 2. Start video analysis in parallel
-      console.log(`🎬 [processVideo] Triggering video analysis concurrently...`)
-      const videoAnalysisPromise = runVideoAnalysis()
+    // Unified non-blocking polling loop for transcription and video analysis
+    let transcriptStatus = existingTranscription ? "completed" : "queued"
+    let analysisStatus: "completed" | "processing" = analysisJob.status
+    let analysisUrl = analysisJob.analysisUrl || null
+    const analysisCallId = analysisJob.callId
 
-      // 3. Non-blocking sleep polling loop for AssemblyAI (supports 2+ hours safely!)
-      let transcriptStatus = "queued"
-      let attempts = 0
-      const maxAttempts = 120 // 120 * 20s = 40 minutes polling window
+    let attempts = 0
+    const maxAttempts = 360 // 360 * 20s = 120 minutes (2 hours) polling window
 
+    console.log(
+      `⏳ [processVideo][polling] Starting unified pipeline polling loop (transcript=${transcriptStatus}, analysis=${analysisStatus})...`
+    )
+
+    while ((transcriptStatus !== "completed" || analysisStatus !== "completed") && attempts < maxAttempts) {
+      attempts++
       console.log(
-        `⏳ [processVideo][polling] Starting non-blocking polling loop for transcript: ${transcriptId}...`
+        `💤 [processVideo][polling] Sleeping 20s before poll attempt #${attempts} (transcript=${transcriptStatus}, analysis=${analysisStatus})...`
       )
+      await step.sleep(`wait-pipeline-${attempts}`, "20s")
 
-      while (transcriptStatus !== "completed" && attempts < maxAttempts) {
-        attempts++
-        console.log(
-          `💤 [processVideo][polling] Sleeping 20s before poll attempt #${attempts} (elapsed: ~${(attempts - 1) * 20}s)...`
-        )
-        await step.sleep(`wait-transcription-${attempts}`, "20s")
-
+      // 1. Poll AssemblyAI transcription if not yet completed
+      if (transcriptStatus !== "completed" && transcriptId) {
         const pollResult = await step.run(
           `check-transcription-status-${attempts}`,
           async () => {
-            const check = await getAssemblyAiStatus(transcriptId)
+            const check = await getAssemblyAiStatus(transcriptId!)
             console.log(
-              `🔍 [processVideo][polling] Poll #${attempts}: status="${check.status}" (elapsed: ~${attempts * 20}s)`
+              `🔍 [processVideo][polling] Transcription Poll #${attempts}: status="${check.status}" (elapsed: ~${attempts * 20}s)`
             )
             return check
           }
@@ -297,23 +302,72 @@ export const processVideo = inngest.createFunction(
         }
       }
 
-      if (transcriptStatus !== "completed") {
-        throw new Error(
-          `AssemblyAI transcription timed out after ${maxAttempts * 20}s for transcript ID: ${transcriptId}`
+      // 2. Poll Modal VideoAnalyzer if not yet completed
+      if (analysisStatus !== "completed" && analysisCallId) {
+        const pollAnalysis = await step.run(
+          `check-analysis-status-${attempts}`,
+          async () => {
+            const statusEndpoint =
+              process.env.MODAL_ANALYZER_STATUS_ENDPOINT ||
+              (process.env.MODAL_ANALYZER_ENDPOINT
+                ? process.env.MODAL_ANALYZER_ENDPOINT.replace(/-analyze\.modal\.run$/, "-status.modal.run")
+                : "https://ms8460149--makemyclip-ai-rendering-videoanalyzer-status.modal.run")
+
+            const pollUrl = `${statusEndpoint}?call_id=${encodeURIComponent(analysisCallId)}&project_id=${encodeURIComponent(projectId)}`
+            const res = await fetch(pollUrl, { method: "GET" })
+            if (!res.ok) {
+              const errText = await res.text()
+              console.warn(`[processVideo][polling] VideoAnalyzer status poll returned ${res.status}: ${errText}`)
+              return { status: "processing" }
+            }
+            const json = await res.json()
+            console.log(`🔍 [processVideo][polling] Analysis Poll #${attempts}: status="${json.status}"`)
+            return json
+          }
         )
+
+        if (pollAnalysis.status === "error") {
+          console.error(`❌ [processVideo][polling] VideoAnalyzer error: ${pollAnalysis.error}`)
+          await db.update(projects).set({ status: "error" }).where(eq(projects.id, projectId))
+          throw new Error(`VideoAnalyzer failed: ${pollAnalysis.error || "Unknown error"}`)
+        }
+
+        if (pollAnalysis.status === "completed") {
+          analysisStatus = "completed"
+          analysisUrl = pollAnalysis.analysis_url || pollAnalysis.result?.analysis_url
+          console.log(`🎉 [processVideo][polling] VideoAnalyzer COMPLETED! analysisUrl=${analysisUrl}`)
+          if (analysisUrl) {
+            await db
+              .update(projects)
+              .set({ analysisPath: analysisUrl })
+              .where(eq(projects.id, projectId))
+          }
+        }
       }
+    }
 
-      console.log(
-        `🎉 [processVideo][polling] AssemblyAI transcription COMPLETED in ~${attempts * 20}s! Proceeding to enrichment...`
+    if (transcriptStatus !== "completed") {
+      throw new Error(
+        `AssemblyAI transcription timed out after ${maxAttempts * 20}s for transcript ID: ${transcriptId}`
       )
+    }
 
-      // 4. Fast transcript & viral clips enrichment (Modal, ~5-15s)
+    if (analysisStatus !== "completed") {
+      throw new Error(
+        `VideoAnalyzer timed out after ${maxAttempts * 20}s for call ID: ${analysisCallId}`
+      )
+    }
+
+    console.log(`🎉 [processVideo] Both transcription and video analysis are COMPLETED! Proceeding to enrichment...`)
+
+    if (!existingTranscription && transcriptId) {
+      // Enrich transcript & viral clips with Modal + Gemini (~5-15s)
       const enrichedResult = await step.run("enrich-transcription", async () => {
         console.log(
           `🧠 [processVideo][enrich-transcription] Calling Modal to calculate velocity, acoustic events, viral scores & Gemini metadata...`
         )
         const t0 = Date.now()
-        const result = await enrichTranscript(transcriptId, translateLanguage)
+        const result = await enrichTranscript(transcriptId!, translateLanguage)
         console.log(
           `✨ [processVideo][enrich-transcription] Enriched in ${(Date.now() - t0) / 1000}s! Found ${result.viralClips?.length ?? 0} viral clips, ${result.words.length} words.`
         )
@@ -330,13 +384,9 @@ export const processVideo = inngest.createFunction(
         return result
       })
 
-      // Await video analysis to finish before proceeding to save clips & batch reframe
-      console.log(`⏳ [processVideo] Ensuring video analysis completes...`)
-      await videoAnalysisPromise
-      console.log(`✅ [processVideo] Video analysis finished!`)
-
       transcription = enrichedResult
     }
+
 
     const aiClips = await step.run("save-clips-db", async () => {
       console.log(`💾 [processVideo] Step: save-clips-db saving ${transcription.viralClips?.length ?? 0} clips to DB...`)

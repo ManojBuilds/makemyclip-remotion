@@ -121,6 +121,7 @@ class AnalyzeVideoRequest(BaseModel):
     end_time: Optional[float] = None
     detect_skip: int = 5
     chunk_duration: float = 600.0  # 10 minutes per chunk
+    async_mode: Optional[bool] = False
 
 
 class AnalyzeVideoResponse(BaseModel):
@@ -130,6 +131,24 @@ class AnalyzeVideoResponse(BaseModel):
     total_frames: int
     num_tracks: int
     duration_secs: float
+    error: Optional[str] = None
+
+
+class AnalyzeSubmitResponse(BaseModel):
+    success: bool
+    call_id: str
+    project_id: str
+    status: str = "processing"
+    error: Optional[str] = None
+
+
+class AnalyzeStatusResponse(BaseModel):
+    status: str  # "processing", "completed", "error"
+    success: Optional[bool] = None
+    call_id: Optional[str] = None
+    project_id: Optional[str] = None
+    analysis_url: Optional[str] = None
+    result: Optional[dict] = None
     error: Optional[str] = None
 
 

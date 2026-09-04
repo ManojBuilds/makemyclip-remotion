@@ -198,7 +198,7 @@ def stitch_chunk_tracks(chunk_results: list[dict], fps: float) -> tuple[list[dic
 @app.cls(
     image=image,
     gpu=RECOMMENDED_GPU,
-    timeout=1200,
+    timeout=1800,
     secrets=[ai_secret, youtube_cookies_secret],
     max_containers=10,
 )
@@ -358,22 +358,27 @@ class VideoAnalyzer:
                 "scene_bounds": scene_bounds,
             }
 
-    @modal.fastapi_endpoint(method="POST")
-    def analyze(self, req: AnalyzeVideoRequest):
-        """Public endpoint: Runs full video analysis across 10-min parallel chunks."""
-        vurl = validate_url(req.video_url, label="video_url")
-        logger.info("=== VIDEO ANALYSIS REQUEST ===")
-        logger.info("project_id: %s, start_time: %s, end_time: %s, duration: %s", req.project_id, req.start_time, req.end_time, req.duration)
+    @modal.method()
+    def run_full_analysis(self, req_dict: dict) -> dict:
+        """Internal heavy worker: runs full video analysis across parallel GPU chunks."""
+        vurl = validate_url(req_dict["video_url"], label="video_url")
+        project_id = req_dict["project_id"]
+        req_duration = req_dict.get("duration")
+        req_start_time = req_dict.get("start_time")
+        req_end_time = req_dict.get("end_time")
+        detect_skip = req_dict.get("detect_skip", DETECT_SKIP_FRAMES)
+        req_chunk_duration = req_dict.get("chunk_duration", 600.0)
+
+        logger.info("=== RUNNING FULL VIDEO ANALYSIS ===")
+        logger.info("project_id: %s, start_time: %s, end_time: %s, duration: %s", project_id, req_start_time, req_end_time, req_duration)
 
         with tempfile.TemporaryDirectory() as tmpdir:
             fps = 25.0
 
             if is_youtube_url(vurl):
-                # Optimize: Do NOT download full video on coordinator container.
-                # Use yt-dlp metadata extraction to get duration/fps lightweightly.
                 from ytdlp_helper import get_youtube_info
                 info_dict = get_youtube_info(vurl)
-                full_duration = info_dict.get("duration") or (req.duration or 300.0)
+                full_duration = info_dict.get("duration") or (req_duration or 300.0)
                 fps = info_dict.get("fps") or 25.0
                 width = info_dict.get("width") or 1280
                 height = info_dict.get("height") or 720
@@ -384,22 +389,22 @@ class VideoAnalyzer:
                 fps = info.get("fps", 25.0)
                 width = info.get("width", 1920)
                 height = info.get("height", 1080)
-                full_duration = info.get("duration") or (req.duration or 300.0)
+                full_duration = info.get("duration") or (req_duration or 300.0)
 
             # Check if start_time / end_time range is specified
-            start_sec = req.start_time if req.start_time is not None else 0.0
-            if req.end_time is not None:
-                end_sec = min(req.end_time, full_duration)
-            elif req.duration is not None:
-                end_sec = min(start_sec + req.duration, full_duration)
+            start_sec = req_start_time if req_start_time is not None else 0.0
+            if req_end_time is not None:
+                end_sec = min(req_end_time, full_duration)
+            elif req_duration is not None:
+                end_sec = min(start_sec + req_duration, full_duration)
             else:
                 end_sec = full_duration
 
             duration_secs = max(1.0, end_sec - start_sec)
 
             # Dynamically calculate chunk parameters targeting up to 8 GPUs
-            if req.chunk_duration and req.chunk_duration != 600.0:
-                chunk_duration = req.chunk_duration
+            if req_chunk_duration and req_chunk_duration != 600.0:
+                chunk_duration = req_chunk_duration
                 num_chunks = max(1, math.ceil(duration_secs / chunk_duration))
             else:
                 chunk_duration, num_chunks = calculate_optimal_chunk_duration(duration_secs)
@@ -413,7 +418,7 @@ class VideoAnalyzer:
             for idx in range(num_chunks):
                 c_start = start_sec + idx * chunk_duration
                 c_dur = min(chunk_duration, end_sec - c_start)
-                chunk_tasks.append((req.video_url, c_start, c_dur, idx, num_chunks, fps, req.detect_skip))
+                chunk_tasks.append((vurl, c_start, c_dur, idx, num_chunks, fps, detect_skip))
 
             logger.info("Launching %d parallel chunk jobs via starmap (up to 8 GPUs)...", num_chunks)
             t0 = time.time()
@@ -446,7 +451,6 @@ class VideoAnalyzer:
                     global_ef = ef + offset_frame
                     global_scene_bounds.append((global_sf, global_ef))
 
-                    # Filter tracks & scores to only faces present in THIS scene's frame range
                     scene_tracks = []
                     scene_scores = []
                     for frames, px, py, ps, sc in zip(
@@ -464,7 +468,6 @@ class VideoAnalyzer:
                             })
                             scene_scores.append(sc[mask])
 
-                    # OpusClip-style per-scene layout classification
                     scene_layout = classify_layout(scene_tracks, scene_scores, int(width), int(height))
                     scene_layouts.append({
                         "start_frame": global_sf,
@@ -503,8 +506,6 @@ class VideoAnalyzer:
                 content_classification.recommended_crop_mode,
             )
 
-            # If global classification definitively found a specialized layout (e.g. screencast / gaming),
-            # harmonize speaker scenes that fell back to generic reframe while preserving B-roll (letterbox) scenes intact
             if content_classification.recommended_crop_mode in ("screencast", "presentation", "gaming", "panel"):
                 for sl in scene_layouts:
                     if sl["recommended_layout"] == "reframe":
@@ -513,7 +514,7 @@ class VideoAnalyzer:
             # Build comprehensive analysis object
             analysis_data = {
                 "version": "1.1",
-                "project_id": req.project_id,
+                "project_id": project_id,
                 "video_info": {
                     "width": width,
                     "height": height,
@@ -528,7 +529,7 @@ class VideoAnalyzer:
                     "skip_face_tracking": content_classification.skip_face_tracking,
                 },
                 "tracking_summary": {
-                    "detect_skip": req.detect_skip,
+                    "detect_skip": detect_skip,
                     "target_fps": 5.0,
                     "num_tracks": len(global_tracks),
                     "tracking_time_s": round(elapsed_tracking, 2),
@@ -539,20 +540,103 @@ class VideoAnalyzer:
                 "tracks": serialize_tracks_and_scores(global_tracks, global_scores, fps),
             }
             # Save and upload analysis.json to R2
-            local_analysis_file = os.path.join(tmpdir, f"analysis_{req.project_id}.json")
+            local_analysis_file = os.path.join(tmpdir, f"analysis_{project_id}.json")
             with open(local_analysis_file, "w") as f:
                 json.dump(analysis_data, f)
 
-            r2_key = f"analysis/{req.project_id}.json"
+            r2_key = f"analysis/{project_id}.json"
             analysis_url = upload_to_r2(local_analysis_file, r2_key)
 
             logger.info("✅ Analysis complete! Saved to R2: %s", analysis_url)
 
             return {
                 "success": True,
-                "project_id": req.project_id,
+                "project_id": project_id,
                 "analysis_url": analysis_url,
                 "total_frames": int(duration_secs * fps),
                 "num_tracks": len(global_tracks),
                 "duration_secs": round(duration_secs, 2),
             }
+
+    @modal.fastapi_endpoint(method="POST")
+    def submit(self, req: AnalyzeVideoRequest):
+        """Asynchronous submission endpoint: spawns video analysis job on GPU and returns call_id immediately."""
+        vurl = validate_url(req.video_url, label="video_url")
+        logger.info("=== VIDEO ANALYSIS SUBMIT (ASYNC) ===")
+        logger.info("project_id: %s, duration: %s", req.project_id, req.duration)
+
+        payload = req.model_dump()
+        payload["video_url"] = vurl
+        call = self.run_full_analysis.spawn(payload)
+        logger.info("Spawned analysis job call_id=%s for project_id=%s", call.object_id, req.project_id)
+
+        return {
+            "success": True,
+            "call_id": call.object_id,
+            "project_id": req.project_id,
+            "status": "processing",
+        }
+
+    @modal.fastapi_endpoint(method="GET")
+    def status(self, call_id: str, project_id: str = ""):
+        """Non-blocking status poll endpoint: checks FunctionCall status or R2 artifact."""
+        from modal.functions import FunctionCall
+        import urllib.request
+
+        if not call_id:
+            return {"status": "error", "error": "call_id query parameter is required"}
+
+        # 1. Check FunctionCall status
+        try:
+            call = FunctionCall.from_id(call_id)
+            try:
+                res = call.get(timeout=0)
+                return {
+                    "status": "completed",
+                    "success": True,
+                    "call_id": call_id,
+                    "project_id": project_id,
+                    "analysis_url": res.get("analysis_url") if isinstance(res, dict) else None,
+                    "result": res,
+                }
+            except TimeoutError:
+                pass
+        except Exception as exc:
+            logger.warning("Error polling FunctionCall %s: %s", call_id, exc)
+            return {
+                "status": "error",
+                "success": False,
+                "call_id": call_id,
+                "project_id": project_id,
+                "error": str(exc),
+            }
+
+        # 2. Safety fallback: check if analysis_{project_id}.json already exists in R2
+        if project_id and os.environ.get("R2_PUBLIC_URL"):
+            r2_url = f"{os.environ['R2_PUBLIC_URL']}/analysis/{project_id}.json"
+            try:
+                req = urllib.request.Request(r2_url, method="HEAD")
+                with urllib.request.urlopen(req, timeout=3) as resp:
+                    if resp.status == 200:
+                        return {
+                            "status": "completed",
+                            "success": True,
+                            "call_id": call_id,
+                            "project_id": project_id,
+                            "analysis_url": r2_url,
+                        }
+            except Exception:
+                pass
+
+        return {
+            "status": "processing",
+            "call_id": call_id,
+            "project_id": project_id,
+        }
+
+    @modal.fastapi_endpoint(method="POST")
+    def analyze(self, req: AnalyzeVideoRequest):
+        """Unified analysis endpoint: runs asynchronously if async_mode=True, else synchronously."""
+        if getattr(req, "async_mode", False):
+            return self.submit(req)
+        return self.run_full_analysis(req.model_dump())
