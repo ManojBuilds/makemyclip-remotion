@@ -6,6 +6,7 @@ import "./globals.css"
 import { Toaster } from "sonner"
 import { ThemeProvider } from "@/components/theme-provider"
 import { PostHogProvider } from "@/components/providers/posthog-provider"
+import { DashboardProvider } from "@/components/dashboard-context"
 import { cn } from "@/lib/utils"
 
 const siteName = "Kivio #1 AI Video Clipping Agent"
@@ -92,7 +93,9 @@ export default function RootLayout({
       >
         <body>
           <PostHogProvider>
-            <ThemeProvider>{children}</ThemeProvider>
+            <ThemeProvider>
+              <DashboardProvider>{children}</DashboardProvider>
+            </ThemeProvider>
             <Toaster position="top-right" richColors closeButton />
           </PostHogProvider>
         </body>

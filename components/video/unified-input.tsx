@@ -259,6 +259,12 @@ export function UnifiedInput({
           sessionStorage.setItem("pending_transcribe_language", transcribeLang)
           sessionStorage.setItem("pending_translate_language", translateLang)
           sessionStorage.setItem("pending_remove_silence", removeSilence ? "true" : "false")
+          if (videoDuration != null) {
+            sessionStorage.setItem("pending_video_duration", String(videoDuration))
+          }
+          if (videoTitle) {
+            sessionStorage.setItem("pending_video_title", videoTitle)
+          }
           router.push("/projects")
           setDialogOpen(false)
         } catch {

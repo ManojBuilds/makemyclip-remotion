@@ -30,12 +30,14 @@ import { Skeleton } from "@/components/ui/skeleton"
 import { Switch } from "@/components/ui/switch"
 
 
-// Helper function to format duration in MM:SS
+// Helper function to format duration in HH:MM:SS
 function formatDuration(seconds: number | null | undefined): string {
   if (seconds == null || isNaN(seconds)) return ""
-  const mins = Math.floor(seconds / 60)
-  const secs = Math.floor(seconds % 60)
-  return `${mins}:${secs.toString().padStart(2, "0")}`
+  const totalSecs = Math.max(0, Math.floor(seconds))
+  const hrs = Math.floor(totalSecs / 3600)
+  const mins = Math.floor((totalSecs % 3600) / 60)
+  const secs = totalSecs % 60
+  return `${hrs.toString().padStart(2, "0")}:${mins.toString().padStart(2, "0")}:${secs.toString().padStart(2, "0")}`
 }
 
 function formatShortSource(title: string | null | undefined): string {
@@ -172,14 +174,15 @@ export function ConfirmDialog({
   duration,
   fetchingMetadata,
 }: ConfirmDialogProps) {
-  const { user } = useDashboardUser()
+  const { user, status } = useDashboardUser()
+  const isLoadingUser = status === "loading"
   const plan = user?.plan || "free"
-  const isFree = plan === "free"
+  const isFree = isLoadingUser ? false : plan === "free"
 
   const planLimitConfig = getPlanLimit(plan)
   const limit = planLimitConfig.maxUploadDurationSeconds
   const limitLabel = planLimitConfig.label
-  const isOverLimit = duration ? duration > limit : false
+  const isOverLimit = isLoadingUser ? false : (duration ? duration > limit : false)
 
   const [selectedTemplate, setSelectedTemplate] = useState<string>("impact")
   const [wordHighlight, setWordHighlight] = useState<boolean>(true)
@@ -201,11 +204,11 @@ export function ConfirmDialog({
       setRemoveSilence(true)
       setShowAdvanced(false)
 
-      if (isOverLimit && isFree && !hasDismissedPrompt("upload_limit")) {
+      if (!isLoadingUser && isOverLimit && isFree && !hasDismissedPrompt("upload_limit")) {
         setActiveUpgradeTrigger("upload_limit")
       }
     }
-  }, [open, thumbnail, isOverLimit, isFree])
+  }, [open, thumbnail, isOverLimit, isFree, isLoadingUser])
 
   const handleSelectPreset = (id: string) => {
     setSelectedTemplate(id)
@@ -465,13 +468,18 @@ export function ConfirmDialog({
           <div className="shrink-0 border-t border-[#E5E7EB] bg-white p-4 pb-3 text-center shadow-lg">
             <Button
               onClick={handleConfirm}
-              disabled={isSubmitting}
+              disabled={isSubmitting || isLoadingUser}
               className="h-11 w-full rounded-[14px] bg-[#2563EB] text-sm font-semibold text-white shadow-sm transition-all duration-180 hover:bg-[#1d4ed8] hover:scale-[1.02] active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {isSubmitting ? (
                 <span className="flex items-center justify-center gap-2">
                   <Loader2 className="h-4 w-4 animate-spin" />
                   Generating…
+                </span>
+              ) : isLoadingUser ? (
+                <span className="flex items-center justify-center gap-2">
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                  Loading…
                 </span>
               ) : isOverLimit ? (
                 "Upgrade to Process Video"

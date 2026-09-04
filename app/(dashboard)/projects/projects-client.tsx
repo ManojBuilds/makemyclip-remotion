@@ -52,12 +52,16 @@ export function ProjectsClient({
       const pendingRemoveSilence = sessionStorage.getItem(
         "pending_remove_silence"
       )
+      const pendingDuration = sessionStorage.getItem("pending_video_duration")
+      const pendingTitle = sessionStorage.getItem("pending_video_title")
       if (pending) {
         sessionStorage.removeItem("pending_youtube_url")
         sessionStorage.removeItem("pending_caption_styling")
         sessionStorage.removeItem("pending_transcribe_language")
         sessionStorage.removeItem("pending_translate_language")
         sessionStorage.removeItem("pending_remove_silence")
+        sessionStorage.removeItem("pending_video_duration")
+        sessionStorage.removeItem("pending_video_title")
 
         let pendingStyling: CaptionTemplate | undefined = undefined
         if (pendingStylingRaw) {
@@ -73,8 +77,8 @@ export function ProjectsClient({
           pendingStyling,
           pendingTranscribe || "auto",
           pendingTranslate || "none",
-          undefined,
-          undefined,
+          pendingDuration ? Number(pendingDuration) : undefined,
+          pendingTitle || undefined,
           pendingRemoveSilence !== "false"
         )
       }
