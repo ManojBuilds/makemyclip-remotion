@@ -255,7 +255,7 @@ def download_youtube_video(
         start_time = None
         end_time = None
 
-    # mweb / android client provides HD formats without requiring PO Tokens.
+    # mweb client provides 1080p / 720p HD formats without requiring PO Tokens or falling back to format 18 (360p)
     ydl_opts = {
         "outtmpl": f"{tmpdir}/%(title)s.%(ext)s",
         "cookiefile": cookies_path,
@@ -268,6 +268,11 @@ def download_youtube_video(
         "concurrent_fragment_downloads": 8,
         "js_runtimes": {"deno": {"path": "/usr/local/bin/deno"}},
         "remote_components": ["ejs:github"],
+        "extractor_args": {
+            "youtube": {
+                "player_client": ["mweb", "web"],
+            }
+        },
         "format": "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=1080]+bestaudio/bestvideo+bestaudio/best[height<=1080]/best",
         "merge_output_format": "mp4",
         "format_sort": ["res:1080", "res:720", "vcodec:h264", "ext:mp4:m4a"],

@@ -479,11 +479,14 @@ def enrich_clips_with_gemini(
         prompt = f"""You are an expert viral short-form content curator and algorithm specialist for TikTok, IG Reels, and YouTube Shorts.
 Analyze these candidate video clips and return a structured JSON object matching the schema.
 
-CRITICAL ACCURACY & CONTEXT RULES:
+CRITICAL VIRAL HOOK & TITLE GUIDELINES:
 - Overall Video Context Snippet: {context_snippet}
 - Rely ONLY on the actual transcript context to determine who is speaking or being discussed.
 - DO NOT hallucinate famous podcasters or celebrity names UNLESS they are explicitly mentioned by name in the transcript.
-- Match titles, descriptions, and hashtags strictly to the actual speakers and content of the video.
+- TITLE: Must be an irresistible, scroll-stopping curiosity hook (max 6-7 words). Avoid generic labels like "Interview with..." or "Discussion about...". Use psychological hooks, strong emotional statements, contrasts, or surprising quotes (e.g., "The Rule Every Teen Hates", "Did She Really Just Say That?", "This Broke My Brain").
+- HOOKTEXT: Exactly 1 to 3 words. This is the giant overlay text that flashes in the first 2 seconds to stop thumbs scrolling (e.g., "WAIT FOR IT", "SHOTS FIRED!", "BARE MINIMUM", "UNREAL", "BIG MISTAKE"). Must NOT end with a question mark.
+- DESCRIPTION: 2-3 engaging sentences written in the voice of a social media creator, ending with an organic question to drive comments and debate.
+- HASHTAGS: Exactly 5 high-traffic, trending hashtags relevant to the topic (e.g., #shorts #viral #podcast).
 
 VIRAL SCORING RUBRIC (viralScore from 0.0 to 10.0):
 - Evaluate hook strength (first 3 seconds), emotional intensity/resonance, punchline/insight, curiosity gap, and retention potential.
@@ -493,8 +496,8 @@ VIRAL SCORING RUBRIC (viralScore from 0.0 to 10.0):
 - Lower energy or weak hook clips should score below 7.0.
 
 For each candidate clip, generate:
-- title: Short, curiosity-inducing clickbait title (max 7 words)
-- hookText: Bold 1-3 word scroll-stopping caption for the first 3 seconds
+- title: Short, curiosity-inducing viral title (max 7 words)
+- hookText: Bold 1-3 word scroll-stopping caption (e.g. "SHOTS FIRED!", "WAIT FOR IT")
 - viralScore: Precise viral potential score from 0.0 to 10.0 (e.g. 9.6, 9.2, 8.8, 8.4) based on the rubric
 - viralReason: 1 punchy sentence explaining the specific psychological or algorithmic trigger that makes this clip perform
 - description: Engaging social media post description

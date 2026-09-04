@@ -487,6 +487,34 @@ class VideoAnalyzer:
                     norm_s = mean_s / float(height) if mean_s > 1.0 else mean_s
                     face_positions.append({"x": norm_x, "y": norm_y, "s": norm_s})
 
+            # Determine maximum concurrent distinct speakers across any 10-second window
+            concurrent_distinct_faces = 1
+            if len(_track_frames) > 1:
+                frame_distinct_x: dict[int, list[float]] = {}
+                for frames, px in zip(_track_frames, _track_proc_x):
+                    if len(frames) > 15:  # Valid persistent track
+                        for f_val, x_val in zip(frames[::5], px[::5]):
+                            f_int = int(f_val)
+                            norm_x = float(x_val) / float(width) if float(x_val) > 1.0 else float(x_val)
+                            frame_distinct_x.setdefault(f_int, []).append(norm_x)
+                
+                # Check for frames with 3+ distinct simultaneous faces separated by >= 18% width
+                panel_frame_count = 0
+                for f_int, xs in frame_distinct_x.items():
+                    if len(xs) >= 3:
+                        distinct = []
+                        for x in xs:
+                            if not any(abs(x - dx) < 0.18 for dx in distinct):
+                                distinct.append(x)
+                        if len(distinct) >= 3:
+                            panel_frame_count += 1
+                
+                # Only consider 3+ speakers if sustained for at least 60 sampled frames (~10s)
+                if panel_frame_count >= 60:
+                    concurrent_distinct_faces = 3
+                elif any(len(xs) >= 2 for xs in frame_distinct_x.values()):
+                    concurrent_distinct_faces = 2
+
             # Run global heuristic content classification
             from content_classifier import classify_content
             content_classification = classify_content(
@@ -496,7 +524,7 @@ class VideoAnalyzer:
                 fps=float(fps),
                 duration=float(duration_secs),
                 start_time=float(start_sec),
-                known_face_count=len(global_tracks),
+                known_face_count=concurrent_distinct_faces,
                 face_positions=face_positions,
             )
             logger.info(

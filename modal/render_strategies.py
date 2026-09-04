@@ -168,30 +168,47 @@ class SplitStrategy(RenderStrategy):
         faces_fidx: List[Dict[str, Any]],
         state: Dict[str, Any],
     ) -> np.ndarray:
-        scale = self.target_h / img.shape[0]
-        face_top = None
-        face_bottom = None
+        sub_h, sub_w = img.shape[:2]
+        mid_x = float(sub_w) / 2.0
 
         if faces_fidx:
             if len(faces_fidx) >= 2:
                 sorted_lr = sorted(faces_fidx, key=lambda f: f.get("x", 0))
-                face_top = sorted_lr[0]
-                face_bottom = sorted_lr[-1]
+                # Ensure they are truly distinct people separated by at least 15% of frame width
+                if abs(float(sorted_lr[-1].get("x", 0)) - float(sorted_lr[0].get("x", 0))) >= (sub_w * 0.15):
+                    face_top = sorted_lr[0]
+                    face_bottom = sorted_lr[-1]
+                else:
+                    # Both detections are essentially on the same person -> assign according to side
+                    f_single = sorted_lr[0]
+                    if float(f_single.get("x", 0)) < mid_x:
+                        face_top = f_single
+                    else:
+                        face_bottom = f_single
             elif len(faces_fidx) == 1:
                 single_face = faces_fidx[0]
-                mid_x = (img.shape[1] * scale) / 2.0
-                if single_face.get("x", 0) < mid_x:
+                fx = float(single_face.get("x", 0))
+                if fx < mid_x:
                     face_top = single_face
                 else:
                     face_bottom = single_face
 
-        if face_top and face_bottom and abs(face_top.get("x", 0) - face_bottom.get("x", 0)) < 100.0:
+        # Safety Fallback: If both faces ever resolve too close to each other, drop bottom face
+        if face_top and face_bottom and abs(float(face_top.get("x", 0)) - float(face_bottom.get("x", 0))) < (sub_w * 0.15):
             face_bottom = None
 
         # Safety Fallback: If only 1 person exists and no 2nd person track has ever been established
         if (face_top is None or face_bottom is None) and (state.get("split_cx_top") is None or state.get("split_cx_bottom") is None):
             reframe_strat = ReframeStrategy(self.target_w, self.target_h)
             return reframe_strat.render_frame(img, fidx, faces_fidx, state)
+
+        # Additional Safety: If persistent top and bottom cameras have converged onto the same person (< 15% width), fallback to Reframe
+        top_cx_val = state.get("split_cx_top")
+        bot_cx_val = state.get("split_cx_bottom")
+        if top_cx_val is not None and bot_cx_val is not None:
+            if abs(float(top_cx_val) - float(bot_cx_val)) < (sub_w * 0.15):
+                reframe_strat = ReframeStrategy(self.target_w, self.target_h)
+                return reframe_strat.render_frame(img, fidx, faces_fidx, state)
 
         # Tracking state
         SPLIT_DEAD_ZONE = 25.0

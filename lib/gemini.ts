@@ -835,6 +835,12 @@ export async function enrichAssemblyAIClipsWithGemini(
     const prompt = `You are an expert viral short-form content curator and algorithm specialist for TikTok, IG Reels, and YouTube Shorts.
 Analyze these pre-extracted viral video clip candidates and return a JSON object matching the schema.
 
+CRITICAL VIRAL HOOK & TITLE GUIDELINES:
+- TITLE: Must be an irresistible, scroll-stopping curiosity hook (max 6-7 words). Avoid generic labels like "Rules!" or "Interview with...". Use psychological hooks, strong emotional statements, contrasts, or surprising quotes (e.g., "The Rule Every Teen Hates", "Did She Really Just Say That?", "This Broke My Brain").
+- HOOKTEXT: Exactly 1 to 3 words. This is the bold overlay text that flashes in the first 2 seconds to stop thumbs scrolling (e.g., "WAIT FOR IT", "SHOTS FIRED!", "BARE MINIMUM", "UNREAL", "BIG MISTAKE"). Must NOT end with a question mark.
+- DESCRIPTION: 2-3 engaging sentences written in the voice of a social media creator, ending with an organic question to drive comments and debate.
+- HASHTAGS: Exactly 5 high-traffic, trending hashtags relevant to the topic (e.g., #shorts #viral #podcast).
+
 VIRAL SCORING RUBRIC (viralScore from 0.0 to 10.0):
 - Evaluate hook strength (first 3 seconds), emotional resonance, punchline/insight, curiosity gap, and retention potential.
 - Top-tier standout moments (insane hooks, explosive debates, incredible insights) MUST receive 9.0 - 9.9.
@@ -843,8 +849,8 @@ VIRAL SCORING RUBRIC (viralScore from 0.0 to 10.0):
 - Lower energy or weak hook clips should score below 7.0.
 
 For each candidate clip, generate:
-- title: Short, curiosity-inducing clickbait title (max 7 words)
-- hookText: Bold 1-3 word scroll-stopping caption for the first 3 seconds
+- title: Short, curiosity-inducing viral title (max 7 words)
+- hookText: Bold 1-3 word scroll-stopping caption (e.g., "SHOTS FIRED!", "WAIT FOR IT")
 - viralScore: Precise viral potential rating from 0.0 to 10.0 (e.g., 9.6, 9.2, 8.8) based on the rubric
 - viralReason: 1 sentence explaining why this clip will go viral
 - description: Engaging social media post description

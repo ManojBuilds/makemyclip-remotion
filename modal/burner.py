@@ -263,15 +263,18 @@ def burn_captions_local(
             # High quality alpha compositing with opacity & anti-aliased bicubic scaling
             wm_filter = f"[1:v]scale={wm_width}:-1:flags=bicubic,format=rgba,colorchannelmixer=aa={wm_opacity}[wm]"
 
+            # To guarantee identical subtitle vertical alignment between preview (scaled) and export (native),
+            # burn ASS subtitles onto the native 1080x1920 canvas FIRST, then scale down.
             if qp["scale"]:
-                v_prep = f"[0:v]{qp['scale']}[v_base];[v_base][wm]overlay={overlay_expr}[v_wm]"
+                if has_subs:
+                    fc = f"[0:v]ass='{local_ass}',{qp['scale']}[v_base];{wm_filter};[v_base][wm]overlay={overlay_expr}[out]"
+                else:
+                    fc = f"[0:v]{qp['scale']}[v_base];{wm_filter};[v_base][wm]overlay={overlay_expr}[out]"
             else:
-                v_prep = f"[0:v][wm]overlay={overlay_expr}[v_wm]"
-
-            if has_subs:
-                fc = f"{wm_filter};{v_prep};[v_wm]ass='{local_ass}'[out]"
-            else:
-                fc = f"{wm_filter};{v_prep}[out]"
+                if has_subs:
+                    fc = f"{wm_filter};[0:v]ass='{local_ass}'[v_sub];[v_sub][wm]overlay={overlay_expr}[out]"
+                else:
+                    fc = f"{wm_filter};[0:v][wm]overlay={overlay_expr}[out]"
 
             cmd = [
                 "ffmpeg",
@@ -293,10 +296,10 @@ def burn_captions_local(
             ]
         else:
             filters = []
-            if qp["scale"]:
-                filters.append(qp["scale"])
             if has_subs:
                 filters.append(f"ass='{local_ass}'")
+            if qp["scale"]:
+                filters.append(qp["scale"])
 
             vf_str = ",".join(filters) if filters else "null"
 
