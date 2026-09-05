@@ -190,24 +190,46 @@ class AudioTranscriber:
                 "timestamps": [{"start": t.start / 1000.0, "end": t.end / 1000.0} for t in getattr(h, "timestamps", [])],
             })
 
-        # Multi-signal viral short clip scoring engine (AssemblyAI Audio Intelligence + Chapters)
+        # Build structured grammatical sentence units with timing & speaker metadata
         total_duration = words[-1]["end"] - words[0]["start"] if words else 0.0
-        velocity_timeline = calculate_speech_velocity(words)
-        acoustic_events = extract_acoustic_events(words, full_text)
-        viral_clips_out = score_and_rank_short_clips(
-            sentiments=sentiments_out,
-            acoustic_events=acoustic_events,
-            highlights=highlights_out,
-            velocity_timeline=velocity_timeline,
-            words=words,
-            total_duration_sec=total_duration,
-            chapters=chapters_out,
-        )
+        sentences = build_sentence_stream(words)
 
-        # Enrich candidate short clips with Gemini social metadata (title, hook, hashtags, etc.)
-        viral_clips_out = enrich_clips_with_gemini(
-            viral_clips_out, words, full_text=full_text, chapters=chapters_out
-        )
+        # Primary Tier: LLM Semantic Discovery with Gemini (1M-token context, understands hooks & punchlines)
+        viral_clips_out = []
+        gemini_key = os.environ.get("GEMINI_API_KEY")
+        if gemini_key and len(sentences) >= 3:
+            logger.info("Attempting Gemini primary semantic discovery for viral clips...")
+            viral_clips_out = discover_viral_clips_with_gemini(
+                sentences=sentences,
+                words=words,
+                full_text=full_text,
+                chapters=chapters_out,
+                highlights=highlights_out,
+                sentiments=sentiments_out,
+                total_duration_sec=total_duration,
+                gemini_key=gemini_key,
+            )
+
+        # Fallback Tier: Enhanced sentence-aware multi-signal heuristic engine
+        if not viral_clips_out or len(viral_clips_out) < 3:
+            logger.info("Using enhanced sentence-aware multi-signal fallback engine...")
+            velocity_timeline = calculate_speech_velocity(words)
+            acoustic_events = extract_acoustic_events(words, full_text)
+            viral_clips_out = score_and_rank_short_clips(
+                sentiments=sentiments_out,
+                acoustic_events=acoustic_events,
+                highlights=highlights_out,
+                velocity_timeline=velocity_timeline,
+                words=words,
+                sentences=sentences,
+                total_duration_sec=total_duration,
+                chapters=chapters_out,
+            )
+            # Enrich candidate short clips with Gemini social metadata if available
+            if gemini_key and viral_clips_out:
+                viral_clips_out = enrich_clips_with_gemini(
+                    viral_clips_out, words, full_text=full_text, chapters=chapters_out
+                )
 
         logger.info(
             "Returning %d words, %d paragraphs, %d speakers, %d sentiments, %d chapters, %d short viral clips",
@@ -438,6 +460,461 @@ class AudioTranscriber:
             time.sleep(3)
 
 
+FILLER_WORDS = {
+    "um", "uh", "like", "so", "yeah", "yes", "right", "well", "and",
+    "basically", "actually", "you know", "i mean", "okay", "ok"
+}
+
+HOOK_INDICATORS = [
+    "why do", "how to", "what if", "did you know", "have you noticed",
+    "the biggest mistake", "the problem is", "the secret to", "nobody talks about",
+    "never do", "always remember", "unpopular opinion", "the truth about",
+    "i realized", "worst mistake", "best advice", "shocking truth", "insane story",
+    "stop doing", "don't ever", "this changed my", "mind-blowing", "most people don't",
+    "if you want", "here's why", "the reason why", "the crazy thing is", "do you think",
+    "can you imagine"
+]
+
+
+def build_sentence_stream(words: list[dict]) -> list[dict]:
+    """Segment words into grammatical sentence units with timing and speaker metadata."""
+    if not words:
+        return []
+
+    sentences: list[dict] = []
+    current_words: list[dict] = []
+
+    for i, w in enumerate(words):
+        current_words.append(w)
+        text = w["word"].rstrip().rstrip("\"')}]")
+        is_punct = text.endswith((".", "?", "!"))
+
+        is_long_pause = False
+        is_speaker_turn = False
+        if i < len(words) - 1:
+            gap = words[i + 1]["start"] - w["end"]
+            if gap > 0.65:
+                is_long_pause = True
+            if (
+                w.get("speaker") is not None
+                and words[i + 1].get("speaker") is not None
+                and w.get("speaker") != words[i + 1].get("speaker")
+            ):
+                is_speaker_turn = True
+
+        # Split sentence on punctuation, speaker turn, pause gap, or length safeguard
+        is_clause_split = len(current_words) >= 25 and (text.endswith((",", ";", ":")) or is_long_pause)
+        is_runaway_split = len(current_words) >= 38
+
+        if (
+            is_punct
+            or (is_speaker_turn and len(current_words) >= 3)
+            or (is_long_pause and len(current_words) >= 4)
+            or is_clause_split
+            or is_runaway_split
+        ):
+            s_text = " ".join(cw["word"] for cw in current_words).strip()
+            if s_text:
+                sentences.append({
+                    "index": len(sentences),
+                    "text": s_text,
+                    "start": current_words[0]["start"],
+                    "end": current_words[-1]["end"],
+                    "start_ms": int(round(current_words[0]["start"] * 1000)),
+                    "end_ms": int(round(current_words[-1]["end"] * 1000)),
+                    "speaker": current_words[0].get("speaker"),
+                    "words": current_words,
+                })
+            current_words = []
+
+    if current_words:
+        s_text = " ".join(cw["word"] for cw in current_words).strip()
+        if s_text:
+            sentences.append({
+                "index": len(sentences),
+                "text": s_text,
+                "start": current_words[0]["start"],
+                "end": current_words[-1]["end"],
+                "start_ms": int(round(current_words[0]["start"] * 1000)),
+                "end_ms": int(round(current_words[-1]["end"] * 1000)),
+                "speaker": current_words[0].get("speaker"),
+                "words": current_words,
+            })
+
+    return sentences
+
+
+def prune_leading_fillers(clip_words: list[dict]) -> tuple[float, list[dict]]:
+    """Prune conversational filler words from the very start of a clip so it opens on a punchy word."""
+    if not clip_words or len(clip_words) <= 5:
+        return (clip_words[0]["start"] if clip_words else 0.0, clip_words)
+
+    start_idx = 0
+    while start_idx < min(4, len(clip_words) - 5):
+        clean_word = clip_words[start_idx]["word"].strip().lower().rstrip(".,!?")
+        if clean_word in FILLER_WORDS:
+            start_idx += 1
+        else:
+            break
+
+    pruned = clip_words[start_idx:]
+    return (pruned[0]["start"], pruned)
+
+
+def _clean_text_for_matching(text: str) -> str:
+    import re
+    return re.sub(r"[^a-z0-9\s]", "", (text or "").lower()).strip()
+
+
+def _find_matching_sentence(
+    quote: str,
+    target_time: float,
+    sentences: list[dict],
+    is_start: bool = True,
+    search_window_sec: float = 60.0,
+) -> int:
+    """Find the best sentence index matching a quote near target_time, with global fallback."""
+    if not sentences:
+        return 0
+
+    clean_quote = _clean_text_for_matching(quote)
+    quote_tokens = set(clean_quote.split()) if clean_quote else set()
+
+    # 1. Proximity-window search (within search_window_sec)
+    candidates = []
+    for idx, s in enumerate(sentences):
+        t = s["start"] if is_start else s["end"]
+        diff = abs(t - target_time)
+        if diff <= search_window_sec:
+            s_clean = _clean_text_for_matching(s["text"])
+            score = 0.0
+            if clean_quote and clean_quote in s_clean:
+                score = 4.0
+            elif quote_tokens:
+                s_tokens = set(s_clean.split())
+                overlap = len(quote_tokens & s_tokens)
+                if overlap > 0:
+                    score = (overlap / max(1, len(quote_tokens))) * 2.0
+            candidates.append((score, -diff, idx))
+
+    if candidates:
+        candidates.sort(key=lambda x: (x[0], x[1]), reverse=True)
+        if candidates[0][0] > 0.4:
+            return candidates[0][2]
+
+    # 2. Global quote substring search across all sentences if quote is substantial
+    if clean_quote and len(clean_quote.split()) >= 3:
+        for idx, s in enumerate(sentences):
+            s_clean = _clean_text_for_matching(s["text"])
+            if clean_quote in s_clean:
+                return idx
+
+    # 3. Proximity fallback
+    best_idx = 0
+    best_dist = float("inf")
+    for idx, s in enumerate(sentences):
+        t = s["start"] if is_start else s["end"]
+        dist = abs(t - target_time)
+        if dist < best_dist:
+            best_dist = dist
+            best_idx = idx
+
+    return best_idx
+
+
+def _clips_overlap_too_much(
+    s1: float, e1: float, s2: float, e2: float, max_overlap_ratio: float = 0.35
+) -> bool:
+    """Check if two clip intervals overlap by more than max_overlap_ratio of the shorter clip."""
+    overlap_start = max(s1, s2)
+    overlap_end = min(e1, e2)
+    overlap = max(0.0, overlap_end - overlap_start)
+    if overlap <= 0:
+        return False
+    min_dur = min(e1 - s1, e2 - s2)
+    if min_dur <= 0:
+        return True
+    return (overlap / min_dur) > max_overlap_ratio
+
+
+def discover_viral_clips_with_gemini(
+    sentences: list[dict],
+    words: list[dict],
+    full_text: str = "",
+    chapters: list[dict] | None = None,
+    highlights: list[dict] | None = None,
+    sentiments: list[dict] | None = None,
+    total_duration_sec: float = 0.0,
+    gemini_key: str = "",
+) -> list[dict]:
+    """Primary discovery engine: Uses Gemini 2.5 Flash (1M token window) to identify the most viral, complete moments."""
+    if not gemini_key or not sentences or len(sentences) < 3:
+        return []
+
+    try:
+        from google import genai
+        from google.genai import types
+
+        client = genai.Client(api_key=gemini_key)
+        target_count = calculate_sweet_spot_clip_count(total_duration_sec)
+
+        # Build formatted transcript with timestamps and speaker labels
+        formatted_lines = []
+        for s in sentences:
+            mins = int(s["start"] // 60)
+            secs = int(s["start"] % 60)
+            spk = f"Speaker {s['speaker']}" if s.get("speaker") is not None else "Speaker"
+            formatted_lines.append(f"[{mins:02d}:{secs:02d}] ({spk}): {s['text']}")
+        transcript_text = "\n".join(formatted_lines)
+
+        chapters_context = ""
+        if chapters:
+            ch_items = [
+                f"- [{int(c.get('start', 0)//60):02d}:{int(c.get('start', 0)%60):02d} - {int(c.get('end', 0)//60):02d}:{int(c.get('end', 0)%60):02d}] {c.get('gist', c.get('headline', 'Topic'))}: {c.get('summary', '')[:120]}"
+                for c in chapters
+            ]
+            chapters_context = "VIDEO CHAPTERS & TOPICS:\n" + "\n".join(ch_items)
+
+        hl_context = ""
+        if highlights:
+            hl_names = [h.get("text", "") for h in highlights[:12] if h.get("text")]
+            if hl_names:
+                hl_context = f"RECURRING THEMES & HIGHLIGHTS: {', '.join(hl_names)}"
+
+        prompt = f"""You are a master viral short-form content curator and growth strategist for TikTok, YouTube Shorts, and Instagram Reels.
+Your objective: Find the {target_count} absolute most viral, captivating, and high-retention short clips from this recording.
+
+{chapters_context}
+
+{hl_context}
+
+FULL TRANSCRIPT WITH TIMESTAMPS:
+{transcript_text}
+
+CRITICAL RULES FOR SELECTING VIRAL CLIPS:
+1. **The Hook (First 3-5 Seconds)**:
+   - Must immediately grab attention and stop thumbs from scrolling past.
+   - Look for: shocking confessions, controversial claims, intriguing questions, high-stakes revelations, or emotional debates.
+   - Avoid slow intros, conversational filler ("Um, so yeah, basically..."), or administrative banter.
+2. **Self-Contained Narrative Arc**:
+   - The clip MUST make complete sense to a random viewer with zero prior context.
+   - Must have a coherent setup -> tension/insight -> punchline or satisfying payoff.
+   - NEVER cut off mid-thought or mid-sentence. The thought MUST conclude cleanly.
+3. **Clip Duration**:
+   - Target 25 to 60 seconds (sweet spot for short-form retention).
+   - Up to 75 seconds ONLY for gripping stories or intense debates. NEVER under 18 seconds.
+4. **Distribution & Topic Diversity**:
+   - Spread the {target_count} clips across different chapters and topics throughout the entire recording. Do not cluster all clips in one spot.
+5. **Exact Quote Anchoring**:
+   - `startQuote`: The EXACT first 4 to 8 words spoken at the beginning of the clip.
+   - `endQuote`: The EXACT last 4 to 8 words spoken at the end of the clip.
+   - `startTimeSec` & `endTimeSec`: Approximate timestamps in seconds.
+
+For each clip, return:
+- title: Irresistible curiosity-driven headline (max 6-7 words, e.g. "The Rule Every Teen Hates", "Did He Really Say That?").
+- hookText: Exactly 1 to 3 BOLD uppercase words for the first 2-second screen overlay (e.g. "WAIT FOR IT", "SHOTS FIRED!", "BIG MISTAKE", "UNREAL", "STOP DOING THIS"). Must NOT end with a question mark.
+- startQuote: Exact first 4-8 words of the clip.
+- endQuote: Exact last 4-8 words of the clip.
+- startTimeSec: Approximate start time (float).
+- endTimeSec: Approximate end time (float).
+- viralScore: Precise score from 7.5 to 9.9 (e.g. 9.7, 9.4, 8.9) based on hook power, emotional intensity, retention, and shareability.
+- viralReason: 1 punchy sentence explaining why this clip will perform.
+- description: 2-3 engaging social sentences ending with a question to provoke comments.
+- hashtags: 5 trending hashtags (e.g. #shorts #viral #podcast).
+- clipType: one of ["hot_take", "funny_exchange", "quotable", "debate", "aha_moment", "storytelling", "mind_blowing_fact"]."""
+
+        schema = {
+            "type": "OBJECT",
+            "properties": {
+                "clips": {
+                    "type": "ARRAY",
+                    "items": {
+                        "type": "OBJECT",
+                        "properties": {
+                            "title": {"type": "STRING"},
+                            "hookText": {"type": "STRING"},
+                            "startQuote": {"type": "STRING"},
+                            "endQuote": {"type": "STRING"},
+                            "startTimeSec": {"type": "NUMBER"},
+                            "endTimeSec": {"type": "NUMBER"},
+                            "viralScore": {"type": "NUMBER"},
+                            "viralReason": {"type": "STRING"},
+                            "description": {"type": "STRING"},
+                            "hashtags": {"type": "STRING"},
+                            "clipType": {"type": "STRING"},
+                        },
+                        "required": [
+                            "title", "hookText", "startQuote", "endQuote",
+                            "startTimeSec", "endTimeSec", "viralScore", "viralReason"
+                        ],
+                    },
+                }
+            },
+            "required": ["clips"],
+        }
+
+        models_to_try = ["gemini-2.5-flash", "gemini-2.5-pro"]
+        response_text = None
+
+        for model in models_to_try:
+            for attempt in range(2):
+                try:
+                    logger.info("Calling Gemini model %s for viral discovery (attempt %d/2)...", model, attempt + 1)
+                    res = client.models.generate_content(
+                        model=model,
+                        contents=prompt,
+                        config=types.GenerateContentConfig(
+                            response_mime_type="application/json",
+                            response_schema=schema,
+                            temperature=0.3,
+                            automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
+                        ),
+                    )
+                    if res.text:
+                        response_text = res.text
+                        logger.info("Gemini model %s successfully discovered viral clips!", model)
+                        break
+                except Exception as e:
+                    err_msg = str(e)
+                    logger.warning("Gemini model %s attempt %d failed: %s", model, attempt + 1, err_msg)
+                    if "503" in err_msg or "UNAVAILABLE" in err_msg or "429" in err_msg:
+                        import time
+                        time.sleep(2 * (attempt + 1))
+                        continue
+                    else:
+                        break
+            if response_text:
+                break
+
+        if not response_text:
+            return []
+
+        import json
+        raw_text = response_text.strip()
+        if raw_text.startswith("```"):
+            lines = raw_text.splitlines()
+            if lines[0].startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].startswith("```"):
+                lines = lines[:-1]
+            raw_text = "\n".join(lines).strip()
+
+        parsed = json.loads(raw_text)
+        suggestions = parsed.get("clips", [])
+        if not isinstance(suggestions, list) or not suggestions:
+            return []
+
+        candidates_out = []
+        for raw in suggestions:
+            approx_s = float(raw.get("startTimeSec", 0.0))
+            approx_e = float(raw.get("endTimeSec", approx_s + 35.0))
+            start_q = raw.get("startQuote", "")
+            end_q = raw.get("endQuote", "")
+
+            start_idx = _find_matching_sentence(start_q, approx_s, sentences, is_start=True, search_window_sec=40.0)
+            end_idx = _find_matching_sentence(end_q, approx_e, sentences, is_start=False, search_window_sec=40.0)
+
+            if end_idx <= start_idx:
+                # Ensure at least 15-20s duration
+                cur_dur = 0.0
+                end_idx = start_idx
+                while end_idx < len(sentences) - 1 and cur_dur < 25.0:
+                    end_idx += 1
+                    cur_dur = sentences[end_idx]["end"] - sentences[start_idx]["start"]
+
+            # Anchor to sentence boundaries
+            start_sent = sentences[start_idx]
+            end_sent = sentences[end_idx]
+
+            # Prune filler words from the opening sentence
+            clip_words_slice = [
+                w for w in words
+                if w["start"] >= start_sent["start"] - 0.05 and w["end"] <= end_sent["end"] + 0.05
+            ]
+            pruned_start_sec, pruned_words = prune_leading_fillers(clip_words_slice)
+            actual_start_sec = pruned_start_sec
+            actual_end_sec = end_sent["end"]
+            duration = actual_end_sec - actual_start_sec
+
+            if duration < 15.0:
+                # Extend to next sentence if too short
+                if end_idx < len(sentences) - 1:
+                    end_idx += 1
+                    actual_end_sec = sentences[end_idx]["end"]
+                    duration = actual_end_sec - actual_start_sec
+            elif duration > 80.0:
+                # Pull back if excessively long
+                while end_idx > start_idx + 1 and (sentences[end_idx]["end"] - actual_start_sec) > 60.0:
+                    end_idx -= 1
+                actual_end_sec = sentences[end_idx]["end"]
+                duration = actual_end_sec - actual_start_sec
+
+            if not (15.0 <= duration <= 85.0):
+                continue
+
+            # Check overlap against already chosen clips
+            if any(_clips_overlap_too_much(actual_start_sec, actual_end_sec, c["start_sec"], c["end_sec"]) for c in candidates_out):
+                continue
+
+            raw_score = float(raw.get("viralScore", 8.5))
+            if raw_score > 10.0:
+                raw_score = raw_score / 10.0
+            viral_score = round(max(1.0, min(9.9, raw_score)), 1)
+
+            start_ms = int(actual_start_sec * 1000)
+            end_ms = int(actual_end_sec * 1000)
+
+            title = raw.get("title", "Viral Highlight")
+            hook_text = raw.get("hookText", "WATCH THIS").upper().rstrip("?")
+            if not hook_text:
+                hook_text = "WATCH THIS"
+
+            candidates_out.append({
+                "id": f"short_clip_{len(candidates_out) + 1}",
+                "type": "short",
+                "headline": title,
+                "title": title,
+                "gist": title,
+                "summary": raw.get("description", ""),
+                "description": raw.get("description", ""),
+                "hook_quote": hook_text,
+                "hookText": hook_text,
+                "start_ms": start_ms,
+                "end_ms": end_ms,
+                "start_sec": actual_start_sec,
+                "end_sec": actual_end_sec,
+                "startTime": actual_start_sec,
+                "endTime": actual_end_sec,
+                "duration_seconds": round(duration, 2),
+                "viral_score": viral_score,
+                "viralScore": viral_score,
+                "viralReason": raw.get("viralReason", "High engagement viral short format."),
+                "hashtags": raw.get("hashtags", "#shorts #viral #podcast"),
+                "clipType": raw.get("clipType", "hot_take"),
+                "is_shorts_ready": True,
+                "words": _build_clip_words(words, start_ms, end_ms),
+                "signals": {
+                    "source": "gemini_semantic_discovery",
+                    "pacing_note": "Curated by Gemini 2.5 Flash for maximum viral retention",
+                },
+            })
+
+        candidates_out.sort(key=lambda x: x["viral_score"], reverse=True)
+        for i, c in enumerate(candidates_out):
+            c["id"] = f"short_clip_{i + 1}"
+
+        logger.info(
+            "Gemini discovered %d high-potential viral clips (top score: %s)",
+            len(candidates_out),
+            candidates_out[0]["viral_score"] if candidates_out else "N/A",
+        )
+        return candidates_out
+
+    except Exception as err:
+        logger.warning("Gemini primary discovery failed: %s", err)
+        return []
+
+
 def enrich_clips_with_gemini(
     viral_clips: list[dict],
     words: list[dict],
@@ -447,7 +924,6 @@ def enrich_clips_with_gemini(
     """Enrich candidate short clips with Gemini-generated viral scores and social metadata."""
     gemini_key = os.environ.get("GEMINI_API_KEY")
     if not gemini_key or not viral_clips:
-        logger.info("GEMINI_API_KEY missing or no viral clips to enrich. Skipping Gemini enrichment.")
         return viral_clips
 
     try:
@@ -462,10 +938,11 @@ def enrich_clips_with_gemini(
             e = c.get("end_ms", 0) / 1000.0
             c_words = " ".join([w["word"] for w in words if w["start"] >= s and w["end"] <= e])
             candidate_summaries.append(
-                f"Clip {i + 1} ({s:.1f}s - {e:.1f}s):\nHeadline: {c.get('headline', '')}\nTranscript: {c_words[:600]}"
+                f"Clip {i + 1} ({s:.1f}s - {e:.1f}s):\nHeadline: {c.get('headline', '')}\nTranscript: {c_words[:1000]}"
             )
 
-        if chapters and len(chapters) > 0:
+        context_snippet = "N/A"
+        if chapters:
             ch_lines = [
                 f"- {c.get('gist', c.get('headline', ''))} ({c.get('start', 0)/60:.0f}m - {c.get('end', 0)/60:.0f}m): {c.get('summary', '')[:100]}"
                 for c in chapters[:12]
@@ -473,36 +950,19 @@ def enrich_clips_with_gemini(
             context_snippet = "Video Chapters Breakdown:\n" + "\n".join(ch_lines)
         elif full_text:
             context_snippet = full_text[:1500]
-        else:
-            context_snippet = "N/A"
 
         prompt = f"""You are an expert viral short-form content curator and algorithm specialist for TikTok, IG Reels, and YouTube Shorts.
-Analyze these candidate video clips and return a structured JSON object matching the schema.
+Analyze these pre-extracted video clips and return a structured JSON object matching the schema.
 
-CRITICAL VIRAL HOOK & TITLE GUIDELINES:
-- Overall Video Context Snippet: {context_snippet}
-- Rely ONLY on the actual transcript context to determine who is speaking or being discussed.
-- DO NOT hallucinate famous podcasters or celebrity names UNLESS they are explicitly mentioned by name in the transcript.
-- TITLE: Must be an irresistible, scroll-stopping curiosity hook (max 6-7 words). Avoid generic labels like "Interview with..." or "Discussion about...". Use psychological hooks, strong emotional statements, contrasts, or surprising quotes (e.g., "The Rule Every Teen Hates", "Did She Really Just Say That?", "This Broke My Brain").
-- HOOKTEXT: Exactly 1 to 3 words. This is the giant overlay text that flashes in the first 2 seconds to stop thumbs scrolling (e.g., "WAIT FOR IT", "SHOTS FIRED!", "BARE MINIMUM", "UNREAL", "BIG MISTAKE"). Must NOT end with a question mark.
-- DESCRIPTION: 2-3 engaging sentences written in the voice of a social media creator, ending with an organic question to drive comments and debate.
-- HASHTAGS: Exactly 5 high-traffic, trending hashtags relevant to the topic (e.g., #shorts #viral #podcast).
-
-VIRAL SCORING RUBRIC (viralScore from 0.0 to 10.0):
-- Evaluate hook strength (first 3 seconds), emotional intensity/resonance, punchline/insight, curiosity gap, and retention potential.
-- Top-tier standout moments (insane hooks, explosive debates, incredible insights, high dopamine) MUST receive 9.0 - 9.9.
-- Strong, engaging clips should score 8.0 - 8.9.
-- Good informative/interesting clips should score 7.0 - 7.9.
-- Lower energy or weak hook clips should score below 7.0.
-
-For each candidate clip, generate:
-- title: Short, curiosity-inducing viral title (max 7 words)
-- hookText: Bold 1-3 word scroll-stopping caption (e.g. "SHOTS FIRED!", "WAIT FOR IT")
-- viralScore: Precise viral potential score from 0.0 to 10.0 (e.g. 9.6, 9.2, 8.8, 8.4) based on the rubric
-- viralReason: 1 punchy sentence explaining the specific psychological or algorithmic trigger that makes this clip perform
-- description: Engaging social media post description
-- hashtags: Top 5 space-separated hashtags (e.g. #shorts #viral)
-- clipType: one of ["hot_take", "funny_exchange", "quotable", "debate", "aha_moment", "storytelling", "mind_blowing_fact"]
+CRITICAL VIRAL GUIDELINES:
+- Context: {context_snippet}
+- TITLE: Must be an irresistible, scroll-stopping curiosity hook (max 6-7 words). Avoid generic labels. Use psychological hooks, strong emotional statements, contrasts, or surprising quotes.
+- HOOKTEXT: Exactly 1 to 3 words in ALL CAPS (e.g. "WAIT FOR IT", "SHOTS FIRED!", "BIG MISTAKE", "UNREAL"). Must NOT end with a question mark.
+- VIRALSCORE: Precise viral potential score from 7.0 to 9.9.
+- VIRALREASON: 1 punchy sentence explaining the algorithmic/psychological trigger.
+- DESCRIPTION: 2-3 engaging sentences ending with a question to drive comments.
+- HASHTAGS: 5 high-traffic hashtags (e.g. #shorts #viral #podcast).
+- CLIPTYPE: one of ["hot_take", "funny_exchange", "quotable", "debate", "aha_moment", "storytelling", "mind_blowing_fact"].
 
 Candidates:
 {"\n\n".join(candidate_summaries)}"""
@@ -532,9 +992,9 @@ Candidates:
         response_text = None
 
         for model in models_to_try:
-            for attempt in range(3):
+            for attempt in range(2):
                 try:
-                    logger.info("Calling Gemini model %s (attempt %d/3)...", model, attempt + 1)
+                    logger.info("Calling Gemini %s for clip enrichment (attempt %d/2)...", model, attempt + 1)
                     res = client.models.generate_content(
                         model=model,
                         contents=prompt,
@@ -542,31 +1002,36 @@ Candidates:
                             response_mime_type="application/json",
                             response_schema=schema,
                             temperature=0.3,
-                            automatic_function_calling=types.AutomaticFunctionCallingConfig(
-                                disable=True
-                            ),
+                            automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
                         ),
                     )
                     if res.text:
                         response_text = res.text
-                        logger.info("Gemini model %s succeeded!", model)
                         break
                 except Exception as e:
                     err_msg = str(e)
-                    logger.warning("Gemini model %s (attempt %d/3) failed: %s", model, attempt + 1, err_msg)
-                    # If 503 high demand or 429 rate limit, wait with backoff and retry
+                    logger.warning("Gemini enrichment attempt failed (%s): %s", model, err_msg)
                     if "503" in err_msg or "UNAVAILABLE" in err_msg or "429" in err_msg:
                         import time
                         time.sleep(2 * (attempt + 1))
                         continue
                     else:
-                        break  # Fall back to next model immediately for other errors
+                        break
             if response_text:
                 break
 
         if response_text:
             import json
-            parsed = json.loads(response_text)
+            raw_text = response_text.strip()
+            if raw_text.startswith("```"):
+                lines = raw_text.splitlines()
+                if lines[0].startswith("```"):
+                    lines = lines[1:]
+                if lines and lines[-1].startswith("```"):
+                    lines = lines[:-1]
+                raw_text = "\n".join(lines).strip()
+
+            parsed = json.loads(raw_text)
             suggestions = parsed.get("clips", [])
             if isinstance(suggestions, list) and suggestions:
                 for i, c in enumerate(viral_clips):
@@ -575,14 +1040,15 @@ Candidates:
                         c["headline"] = gem["title"]
                         c["title"] = gem["title"]
                     if gem.get("hookText"):
-                        c["hook_quote"] = gem["hookText"]
-                        c["hookText"] = gem["hookText"]
+                        h_val = gem["hookText"].upper().rstrip("?")
+                        c["hook_quote"] = h_val
+                        c["hookText"] = h_val
                     if gem.get("viralScore") is not None:
                         try:
                             score_val = float(gem["viralScore"])
                             if score_val > 10.0:
                                 score_val = score_val / 10.0
-                            score_val = round(max(0.0, min(10.0, score_val)), 1)
+                            score_val = round(max(1.0, min(9.9, score_val)), 1)
                             c["viral_score"] = score_val
                             c["viralScore"] = score_val
                         except (ValueError, TypeError):
@@ -597,18 +1063,12 @@ Candidates:
                     if gem.get("clipType"):
                         c["clipType"] = gem["clipType"]
 
-                # Re-rank candidate clips by Gemini viral score descending
                 viral_clips.sort(key=lambda x: x.get("viral_score", 0.0), reverse=True)
                 for i, c in enumerate(viral_clips):
                     c["id"] = f"short_clip_{i + 1}"
 
-                logger.info(
-                    "Successfully scored and enriched %d clips with Gemini metadata (top viral score: %s).",
-                    len(viral_clips),
-                    viral_clips[0].get("viral_score") if viral_clips else "N/A",
-                )
     except Exception as err:
-        logger.warning("Gemini enrichment in Modal transcriber failed, proceeding with AssemblyAI defaults: %s", err)
+        logger.warning("Gemini enrichment failed: %s", err)
 
     return viral_clips
 
@@ -652,84 +1112,6 @@ def extract_acoustic_events(words: list, full_text: str) -> list[dict]:
                 "speaker": w.get("speaker"),
             })
     return events
-# ═══════════════════════════════════════════════════════════════════════════════
-# MULTI-SIGNAL VIRAL CLIP SCORING ENGINE
-#
-# Pipeline:
-#   1. Natural Boundary Snapping (sentence ends, pauses, speaker turns)
-#   2. Multi-Signal Candidate Generation (chapters, sentiments, highlights,
-#      speaker exchanges, velocity spikes)
-#   3. Multi-Signal Scoring (intensity, contrast, dynamics, acoustics, pacing)
-#   4. Temporal Diversity Selection (penalty-based greedy selection)
-# ═══════════════════════════════════════════════════════════════════════════════
-
-
-def _find_natural_boundaries(words: list) -> list[dict]:
-    """Detect natural cut points: sentence ends, pauses, speaker turns.
-
-    Returns sorted list of ``{time, type, strength}`` dicts (strength 0-1).
-    """
-    if not words:
-        return []
-
-    boundaries: list[dict] = []
-    for i, w in enumerate(words):
-        t = w["end"]
-        text = w["word"].rstrip()
-
-        # Strong boundary: sentence end
-        if text.endswith((".", "?", "!")):
-            boundaries.append({"time": t, "type": "sentence_end", "strength": 1.0})
-        # Weak boundary: clause end
-        elif text.endswith((",", ";", ":")):
-            boundaries.append({"time": t, "type": "clause_end", "strength": 0.5})
-
-        if i < len(words) - 1:
-            gap = words[i + 1]["start"] - w["end"]
-            # Natural pause (> 400 ms)
-            if gap > 0.4:
-                boundaries.append(
-                    {"time": t, "type": "pause", "strength": min(1.0, gap / 2.0)}
-                )
-            # Speaker turn
-            if (
-                w.get("speaker") is not None
-                and w.get("speaker") != words[i + 1].get("speaker")
-            ):
-                boundaries.append({"time": t, "type": "speaker_turn", "strength": 0.9})
-
-    boundaries.sort(key=lambda b: b["time"])
-    return boundaries
-
-
-def _snap_to_boundary(
-    target: float,
-    boundaries: list[dict],
-    direction: str = "nearest",
-    max_shift: float = 3.0,
-) -> float:
-    """Snap *target* to the highest-quality nearby boundary.
-
-    *direction*: ``"nearest"``, ``"before"``, or ``"after"``.
-    """
-    best_time = target
-    best_score = -1.0
-
-    for b in boundaries:
-        dist = abs(b["time"] - target)
-        if dist > max_shift:
-            continue
-        if direction == "before" and b["time"] > target + 0.1:
-            continue
-        if direction == "after" and b["time"] < target - 0.1:
-            continue
-
-        score = b["strength"] * 0.6 + (1.0 - dist / max_shift) * 0.4
-        if score > best_score:
-            best_score = score
-            best_time = b["time"]
-
-    return best_time
 
 
 def _build_clip_words(words: list, start_ms: int, end_ms: int) -> list[dict]:
@@ -749,335 +1131,194 @@ def _build_clip_words(words: list, start_ms: int, end_ms: int) -> list[dict]:
     ]
 
 
-# ---------------------------------------------------------------------------
-# Multi-Signal Candidate Anchor Generation
-# ---------------------------------------------------------------------------
+# ═══════════════════════════════════════════════════════════════════════════════
+# ENHANCED SENTENCE-AWARE MULTI-SIGNAL HEURISTIC ENGINE (FALLBACK)
+# ═══════════════════════════════════════════════════════════════════════════════
 
-def _generate_heuristic_candidates(
+def _score_sentence_hook(text: str) -> float:
+    """Evaluate hook power of an opening sentence (0.0 to 1.5 pts)."""
+    clean = text.lower().strip()
+    score = 0.0
+
+    # Question mark indicates curiosity hook
+    if clean.endswith("?"):
+        score += 0.8
+
+    # Check for hook phrases
+    for hook in HOOK_INDICATORS:
+        if hook in clean:
+            score += 0.7
+            break
+
+    # Contrast word at start (e.g. "But the real reason...")
+    first_word = clean.split()[0] if clean.split() else ""
+    if first_word in {"but", "however", "actually", "honestly", "listen"}:
+        score += 0.3
+
+    return min(1.5, score)
+
+
+def _generate_sentence_candidates(
+    sentences: list[dict],
+    words: list[dict],
     sentiments: list,
     acoustic_events: list,
     highlights: list,
     velocity_timeline: list,
-    words: list,
     chapters: list | None,
-    boundaries: list[dict],
 ) -> list[dict]:
-    """Generate candidate anchors from multiple signal sources.
+    """Generate candidates from multi-sentence windows strictly aligned to sentence boundaries."""
+    if not sentences:
+        return []
 
-    Improvements over the original:
-      - Boundary-snapped timestamps (never cut mid-sentence)
-      - Speaker-exchange detection for dialogue-heavy content
-      - Velocity-spike detection for high-energy moments
-      - Boundary-aware zone windows instead of sequential slicing
-    """
     candidates: list[dict] = []
+    avg_wpm = (
+        sum(v["wpm"] for v in velocity_timeline) / len(velocity_timeline)
+        if velocity_timeline else 160.0
+    )
 
-    # ── Source A: Chapters ──
-    if chapters:
-        for ch in chapters:
-            ch_s = ch.get("start", 0)
-            ch_e = ch.get("end", 0)
-            ch_dur = ch_e - ch_s
+    n_sentences = len(sentences)
 
-            if ch_dur >= 15.0:
-                # Trim long chapters to a ~35s window
-                if ch_dur > 55.0:
-                    trim_end = ch_s + 35.0
-                    ch_e = min(
-                        _snap_to_boundary(trim_end, boundaries, "after", 5.0),
-                        ch_s + 55.0,
-                    )
+    for i in range(n_sentences):
+        cur_start_sent = sentences[i]
+        start_sec = cur_start_sent["start"]
 
-                snapped_s = _snap_to_boundary(ch_s, boundaries, "after", 3.0)
-                snapped_e = _snap_to_boundary(ch_e, boundaries, "before", 3.0)
+        # Check multi-sentence windows of 18 to 65 seconds (up to 28 sentences for snappy dialogue)
+        for j in range(i + 1, min(i + 28, n_sentences)):
+            cur_end_sent = sentences[j]
+            raw_dur = cur_end_sent["end"] - start_sec
 
-                if snapped_e - snapped_s >= 15.0:
-                    candidates.append({
-                        "start_sec": snapped_s,
-                        "end_sec": snapped_e,
-                        "source": "chapter",
-                        "headline": ch.get("headline", "Topic Highlight"),
-                        "gist": ch.get("gist", "Key Topic"),
-                        "summary": ch.get("summary", ""),
-                        "base_score": 8.0,
-                    })
+            if raw_dur < 18.0:
+                continue
+            if raw_dur > 65.0:
+                break
 
-    # ── Source B: Sentiment peaks ──
-    intense = [
-        s for s in sentiments
-        if s.get("confidence", 0) > 0.80 and s.get("sentiment") != "NEUTRAL"
-    ]
-    for peak in intense:
-        raw_s = max(0, peak["start"] - 5.0)
-        raw_e = peak["end"] + 25.0
+            # Prune fillers from start
+            sub_words = [
+                w for w in words
+                if w["start"] >= start_sec - 0.05 and w["end"] <= cur_end_sent["end"] + 0.05
+            ]
+            pruned_start, pruned_words = prune_leading_fillers(sub_words)
+            dur = cur_end_sent["end"] - pruned_start
 
-        snapped_s = _snap_to_boundary(raw_s, boundaries, "before", 4.0)
-        snapped_e = _snap_to_boundary(raw_e, boundaries, "after", 4.0)
+            if not (18.0 <= dur <= 65.0):
+                continue
 
-        dur = snapped_e - snapped_s
-        if dur < 15.0:
-            snapped_e = snapped_s + 30.0
-        elif dur > 55.0:
-            snapped_e = snapped_s + 40.0
+            c_s_ms = int(round(pruned_start * 1000))
+            c_e_ms = int(round(cur_end_sent["end"] * 1000))
 
-        candidates.append({
-            "start_sec": snapped_s,
-            "end_sec": snapped_e,
-            "source": "sentiment",
-            "headline": f"Peak: {peak['text'][:40]}...",
-            "gist": f"Viral Peak ({peak['sentiment']})",
-            "summary": peak["text"],
-            "base_score": 7.8,
-        })
+            # --- Scoring signals ---
+            base_score = 7.2
 
-    # ── Source C: Highlights ──
-    for h in (highlights or [])[:10]:
-        for t in h.get("timestamps", []):
-            raw_s = max(0, t["start"] - 3.0)
-            raw_e = t["end"] + 20.0
+            # 1. Opening hook score
+            hook_score = _score_sentence_hook(cur_start_sent["text"])
+            base_score += hook_score
 
-            snapped_s = _snap_to_boundary(raw_s, boundaries, "before", 3.0)
-            snapped_e = _snap_to_boundary(raw_e, boundaries, "after", 3.0)
+            # 2. Speaker dynamic (turns within window)
+            window_speakers = set(
+                sentences[k].get("speaker") for k in range(i, j + 1)
+                if sentences[k].get("speaker") is not None
+            )
+            turns = sum(
+                1 for k in range(i, j)
+                if sentences[k].get("speaker") != sentences[k + 1].get("speaker")
+            )
+            if len(window_speakers) > 1:
+                base_score += min(0.8, 0.3 + turns * 0.15)
 
-            dur = snapped_e - snapped_s
-            if dur < 15.0:
-                snapped_e = snapped_s + 30.0
-            elif dur > 55.0:
-                snapped_e = snapped_s + 40.0
+            # 3. Acoustic events (laughter, applause)
+            w_acst = [
+                e for e in acoustic_events
+                if e["start_ms"] >= c_s_ms and e["end_ms"] <= c_e_ms
+            ]
+            if w_acst:
+                base_score += min(0.6, len(w_acst) * 0.3)
+
+            # 4. Sentiments (intensity + contrast)
+            w_sent = [
+                s for s in sentiments
+                if int(s["start"] * 1000) >= c_s_ms and int(s["end"] * 1000) <= c_e_ms
+            ]
+            non_neutral = [s for s in w_sent if s.get("sentiment") != "NEUTRAL"]
+            if non_neutral:
+                base_score += min(0.6, len(non_neutral) * 0.15)
+            labels = {s.get("sentiment") for s in non_neutral}
+            if "POSITIVE" in labels and "NEGATIVE" in labels:
+                base_score += 0.4
+
+            # 5. Highlights
+            w_hl = [
+                h for h in highlights
+                if any(
+                    int(t["start"] * 1000) >= c_s_ms and int(t["end"] * 1000) <= c_e_ms
+                    for t in h.get("timestamps", [])
+                )
+            ]
+            if w_hl:
+                base_score += min(0.5, len(w_hl) * 0.15)
+
+            # 6. Pacing & velocity
+            w_vel = [
+                v for v in velocity_timeline
+                if v["window_start_ms"] >= c_s_ms and v["window_end_ms"] <= c_e_ms
+            ]
+            if w_vel:
+                max_wpm = max(v["wpm"] for v in w_vel)
+                if max_wpm > avg_wpm * 1.3:
+                    base_score += 0.3
+
+            final_score = round(max(1.0, min(9.9, base_score)), 1)
+
+            first_words = [w["word"].strip() for w in pruned_words[:6]] if pruned_words else cur_start_sent["text"].split()[:6]
+            headline = " ".join(first_words) if first_words else "Viral Highlight"
 
             candidates.append({
-                "start_sec": snapped_s,
-                "end_sec": snapped_e,
-                "source": "highlight",
-                "headline": f"Highlight: {h.get('text', '')[:40]}",
-                "gist": h.get("text", "Key Highlight"),
-                "summary": h.get("text", ""),
-                "base_score": 7.6,
+                "start_sec": pruned_start,
+                "end_sec": cur_end_sent["end"],
+                "start_ms": c_s_ms,
+                "end_ms": c_e_ms,
+                "duration_seconds": round(dur, 2),
+                "headline": headline,
+                "summary": cur_start_sent["text"],
+                "gist": headline,
+                "hook_quote": "WATCH THIS",
+                "viral_score": final_score,
+                "speakers_count": len(window_speakers),
+                "turns_count": turns,
             })
-
-    # ── Source D: Speaker-exchange zones ──
-    if words and len(words) > 10:
-        window, step = 30.0, 15.0
-        t0, t1 = words[0]["start"], words[-1]["end"]
-        cur = t0
-        while cur < t1 - 15.0:
-            w_end = min(cur + window, t1)
-            win_w = [w for w in words if cur <= w["start"] <= w_end]
-
-            turns = sum(
-                1 for i in range(1, len(win_w))
-                if win_w[i].get("speaker") is not None
-                and win_w[i - 1].get("speaker") is not None
-                and win_w[i].get("speaker") != win_w[i - 1].get("speaker")
-            )
-
-            if turns >= 2:
-                sn_s = _snap_to_boundary(cur, boundaries, "before", 3.0)
-                sn_e = _snap_to_boundary(w_end, boundaries, "after", 3.0)
-                dur = sn_e - sn_s
-                if 15.0 <= dur <= 55.0:
-                    candidates.append({
-                        "start_sec": sn_s,
-                        "end_sec": sn_e,
-                        "source": "speaker_exchange",
-                        "headline": f"Discussion ({turns} exchanges)",
-                        "gist": "Multi-Speaker Exchange",
-                        "summary": "",
-                        "base_score": 7.7 + min(0.8, turns * 0.2),
-                    })
-            cur += step
-
-    # ── Source E: Velocity spikes ──
-    if velocity_timeline:
-        avg_wpm = sum(v["wpm"] for v in velocity_timeline) / len(velocity_timeline)
-        for v in velocity_timeline:
-            if v["wpm"] > avg_wpm * 1.4:
-                spike_s = v["window_start_ms"] / 1000.0
-                sn_s = _snap_to_boundary(spike_s, boundaries, "before", 3.0)
-                sn_e = _snap_to_boundary(spike_s + 30.0, boundaries, "after", 3.0)
-                dur = sn_e - sn_s
-                if 15.0 <= dur <= 55.0:
-                    candidates.append({
-                        "start_sec": sn_s,
-                        "end_sec": sn_e,
-                        "source": "velocity_spike",
-                        "headline": f"High Energy ({v['wpm']:.0f} wpm)",
-                        "gist": "High Energy Moment",
-                        "summary": "",
-                        "base_score": 7.5,
-                    })
-
-    # ── Fallback: Boundary-aware zone windows (NOT sequential slicing) ──
-    if not candidates and words:
-        logger.info("No signal candidates — generating boundary-aware zone windows.")
-        total_dur = words[-1]["end"] - words[0]["start"]
-        num_zones = max(3, int(total_dur / 60.0) + 1)
-        zone_size = total_dur / num_zones
-
-        for z in range(num_zones):
-            zone_mid = words[0]["start"] + z * zone_size + zone_size / 2
-            best_s = _snap_to_boundary(zone_mid - 15.0, boundaries, "before", 10.0)
-            best_e = _snap_to_boundary(best_s + 30.0, boundaries, "after", 5.0)
-            if best_e - best_s >= 15.0:
-                candidates.append({
-                    "start_sec": best_s,
-                    "end_sec": best_e,
-                    "source": "zone_window",
-                    "headline": f"Video Segment {z + 1}",
-                    "gist": "Video Highlight",
-                    "summary": "",
-                    "base_score": 7.0,
-                })
 
     return candidates
 
 
-def _score_with_signals(
-    candidates: list[dict],
+def score_and_rank_short_clips(
     sentiments: list,
     acoustic_events: list,
     highlights: list,
     velocity_timeline: list,
     words: list,
-) -> list[dict]:
-    """Score candidates using calibrated weighted multi-signal analysis (0.0 to 10.0 range).
-
-    Scoring breakdown (0.0-10.0 range):
-      base_score (7.0-8.5) + sentiment (0-0.8) + speakers (0-0.6)
-      + acoustics (0-0.6) + highlights (0-0.5) + velocity (0-0.4)
-      + sentiment_contrast (0-0.4) + completeness (0-0.3)
-    """
-    scored: list[dict] = []
-
-    for cand in candidates:
-        c_s = cand["start_sec"]
-        c_e = cand["end_sec"]
-        dur = c_e - c_s
-        if not (15.0 <= dur <= 60.0):
-            continue
-
-        c_s_ms = int(c_s * 1000)
-        c_e_ms = int(c_e * 1000)
-
-        # Overlap guard
-        if any(abs(s["start_ms"] - c_s_ms) < 10000 for s in scored):
-            continue
-
-        score = cand.get("base_score", 7.5)
-        if score > 10.0:
-            score = score / 10.0
-
-        # ── Sentiment intensity (0 to 0.8 pts) ──
-        w_sent = [
-            s for s in sentiments
-            if int(s["start"] * 1000) >= c_s_ms and int(s["end"] * 1000) <= c_e_ms
-        ]
-        non_neutral = [s for s in w_sent if s.get("sentiment") != "NEUTRAL"]
-        score += min(0.8, len(non_neutral) * 0.2)
-
-        # Sentiment contrast (shift within clip = dramatic arc, +0.4 pts)
-        labels = {s.get("sentiment") for s in non_neutral}
-        if "POSITIVE" in labels and "NEGATIVE" in labels:
-            score += 0.4
-
-        # ── Speaker dynamics (0 to 0.6 pts) ──
-        clip_w = [w for w in words if c_s_ms <= int(w["start"] * 1000) <= c_e_ms]
-        speakers = set(w.get("speaker") for w in clip_w if w.get("speaker") is not None)
-        if len(speakers) > 1:
-            score += min(0.6, (len(speakers) - 1) * 0.3)
-
-        # ── Acoustic events (0 to 0.6 pts) ──
-        w_acst = [
-            e for e in acoustic_events
-            if e["start_ms"] >= c_s_ms and e["end_ms"] <= c_e_ms
-        ]
-        if w_acst:
-            score += min(0.6, len(w_acst) * 0.3)
-
-        # ── Highlight density (0 to 0.5 pts) ──
-        w_hl = [
-            h for h in highlights
-            if any(
-                int(t["start"] * 1000) >= c_s_ms and int(t["end"] * 1000) <= c_e_ms
-                for t in h.get("timestamps", [])
-            )
-        ]
-        score += min(0.5, len(w_hl) * 0.15)
-
-        # ── Velocity variance (0 to 0.4 pts) ──
-        w_vel = [
-            v for v in velocity_timeline
-            if v["window_start_ms"] >= c_s_ms and v["window_end_ms"] <= c_e_ms
-        ]
-        avg_wpm = (
-            sum(v["wpm"] for v in w_vel) / len(w_vel) if w_vel else 160.0
-        )
-        if len(w_vel) >= 2:
-            wpms = [v["wpm"] for v in w_vel]
-            variance = max(wpms) - min(wpms)
-            if variance > 30:
-                score += min(0.4, variance / 100.0)
-
-        # ── Content completeness (0 to 0.3 pts) ──
-        if clip_w:
-            if clip_w[0]["word"] and clip_w[0]["word"][0].isupper():
-                score += 0.1
-            if clip_w[-1]["word"].rstrip().endswith((".", "?", "!")):
-                score += 0.2
-
-        final_score = round(min(10.0, max(1.0, score)), 1)
-
-        h_words = [w["word"] for w in clip_w[:6]]
-        h_text = " ".join(h_words) if h_words else cand["headline"]
-
-        scored.append({
-            "id": f"short_clip_{len(scored) + 1}",
-            "type": "short",
-            "headline": cand["headline"],
-            "summary": cand["summary"],
-            "gist": cand["gist"],
-            "hook_quote": h_text,
-            "start_ms": c_s_ms,
-            "end_ms": c_e_ms,
-            "duration_seconds": round(dur, 2),
-            "viral_score": final_score,
-            "is_shorts_ready": True,
-            "words": _build_clip_words(words, c_s_ms, c_e_ms),
-            "signals": {
-                "source": cand["source"],
-                "speakers_count": len(speakers),
-                "sentiment_count": len(w_sent),
-                "acoustic_events": [e["event"] for e in w_acst],
-                "highlights_count": len(w_hl),
-                "average_wpm": round(avg_wpm, 1),
-                "pacing_note": "Multi-signal scored (enhanced heuristic)",
-            },
-        })
-
-    return scored
-
-
-# ---------------------------------------------------------------------------
-# DIVERSITY & FINAL SELECTION
-# ---------------------------------------------------------------------------
-
-def _select_with_diversity(
-    scored_clips: list[dict],
+    sentences: list[dict],
     total_duration_sec: float,
-    target_count: int,
+    chapters: list | None = None,
 ) -> list[dict]:
-    """Greedy diversified selection with temporal proximity penalty.
+    """Overhauled multi-signal sentence-aware engine (Fallback if Gemini is unavailable)."""
+    target_count = calculate_sweet_spot_clip_count(total_duration_sec)
 
-    Clips near already-selected ones get their effective score reduced,
-    naturally spreading picks across the entire timeline.
-    """
-    if len(scored_clips) <= target_count:
-        for i, c in enumerate(scored_clips):
-            c["id"] = f"short_clip_{i + 1}"
-        return scored_clips
+    candidates = _generate_sentence_candidates(
+        sentences=sentences,
+        words=words,
+        sentiments=sentiments,
+        acoustic_events=acoustic_events,
+        highlights=highlights,
+        velocity_timeline=velocity_timeline,
+        chapters=chapters,
+    )
 
-    pool = sorted(scored_clips, key=lambda c: c["viral_score"], reverse=True)
-    min_gap_ms = max(30000, int(total_duration_sec * 1000 / (target_count * 1.5)))
+    if not candidates:
+        return []
+
+    # Greedy diversity selection with proximity penalty
+    pool = sorted(candidates, key=lambda c: c["viral_score"], reverse=True)
+    min_gap_sec = max(30.0, total_duration_sec / (target_count * 1.5))
     selected: list[dict] = []
 
     for _ in range(target_count):
@@ -1086,11 +1327,16 @@ def _select_with_diversity(
 
         best_idx, best_eff = -1, -1.0
         for idx, cand in enumerate(pool):
+            # Check overlap with already selected
+            if any(_clips_overlap_too_much(cand["start_sec"], cand["end_sec"], sel["start_sec"], sel["end_sec"]) for sel in selected):
+                continue
+
             eff = cand["viral_score"]
             for sel in selected:
-                dist = abs(cand["start_ms"] - sel["start_ms"])
-                if dist < min_gap_ms:
-                    eff -= 1.5 * (1.0 - dist / min_gap_ms)
+                dist = abs(cand["start_sec"] - sel["start_sec"])
+                if dist < min_gap_sec:
+                    eff -= 1.5 * (1.0 - dist / min_gap_sec)
+
             if eff > best_eff:
                 best_eff = eff
                 best_idx = idx
@@ -1098,60 +1344,42 @@ def _select_with_diversity(
         if best_idx >= 0:
             selected.append(pool.pop(best_idx))
 
-    selected.sort(key=lambda c: c["start_ms"])
+    selected.sort(key=lambda c: c["start_sec"])
+
+    out: list[dict] = []
     for i, c in enumerate(selected):
-        c["id"] = f"short_clip_{i + 1}"
-    return selected
+        c_id = f"short_clip_{i + 1}"
+        out.append({
+            "id": c_id,
+            "type": "short",
+            "headline": c["headline"],
+            "title": c["headline"],
+            "gist": c["gist"],
+            "summary": c["summary"],
+            "description": c["summary"],
+            "hook_quote": c["hook_quote"],
+            "hookText": c["hook_quote"],
+            "start_ms": c["start_ms"],
+            "end_ms": c["end_ms"],
+            "start_sec": c["start_sec"],
+            "end_sec": c["end_sec"],
+            "startTime": c["start_sec"],
+            "endTime": c["end_sec"],
+            "duration_seconds": c["duration_seconds"],
+            "viral_score": c["viral_score"],
+            "viralScore": c["viral_score"],
+            "viralReason": "Multi-signal audio intelligence peak (sentence-aligned)",
+            "hashtags": "#shorts #viral #podcast",
+            "clipType": "hot_take",
+            "is_shorts_ready": True,
+            "words": _build_clip_words(words, c["start_ms"], c["end_ms"]),
+            "signals": {
+                "source": "multi_signal_fallback",
+                "pacing_note": "Multi-signal scored (sentence-aligned)",
+            },
+        })
 
-
-# ---------------------------------------------------------------------------
-# MAIN ORCHESTRATOR
-# ---------------------------------------------------------------------------
-
-def score_and_rank_short_clips(
-    sentiments: list,
-    acoustic_events: list,
-    highlights: list,
-    velocity_timeline: list,
-    words: list,
-    total_duration_sec: float,
-    chapters: list | None = None,
-) -> list[dict]:
-    """Viral clip extraction and scoring engine relying strictly on multi-signal analysis.
-
-    Pipeline:
-      1. Boundary detection (natural pauses, sentence ends, speaker turns)
-      2. Multi-signal candidate generation (chapters, sentiment peaks, highlights, speaker exchanges, velocity spikes)
-      3. Weighted signal scoring (sentiment intensity, contrast, speaker dynamics, acoustics, highlight density, velocity variance)
-      4. Diversity & temporal spacing selection (greedy selection with proximity penalty)
-    """
-    target_count = calculate_sweet_spot_clip_count(total_duration_sec)
-    boundaries = _find_natural_boundaries(words)
-
-    candidates = _generate_heuristic_candidates(
-        sentiments=sentiments,
-        acoustic_events=acoustic_events,
-        highlights=highlights,
-        velocity_timeline=velocity_timeline,
-        words=words,
-        chapters=chapters,
-        boundaries=boundaries,
-    )
-
-    scored = _score_with_signals(
-        candidates=candidates,
-        sentiments=sentiments,
-        acoustic_events=acoustic_events,
-        highlights=highlights,
-        velocity_timeline=velocity_timeline,
-        words=words,
-    )
-
-    if not scored:
-        logger.warning("No clips could be scored from signals — returning empty list.")
-        return []
-
-    return _select_with_diversity(scored, total_duration_sec, target_count)
+    return out
 
 
 def calculate_sweet_spot_clip_count(total_duration_sec: float) -> int:
@@ -1169,6 +1397,7 @@ def calculate_sweet_spot_clip_count(total_duration_sec: float) -> int:
         return 16
     else:
         return 18
+
 
 
 
