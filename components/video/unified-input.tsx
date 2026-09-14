@@ -2,7 +2,7 @@
 
 import { useState, useRef, useEffect, useCallback } from "react"
 import { useRouter } from "next/navigation"
-import { Upload, Sparkles, Info } from "lucide-react"
+import { Upload, Sparkles, Info, X, Video, Loader2 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { cn } from "@/lib/utils"
@@ -10,9 +10,22 @@ import { toast } from "sonner"
 import { useAuth } from "@clerk/nextjs"
 import { useDashboardUser } from "@/components/dashboard-context"
 import { getPlanLimit } from "@/lib/config"
-import { ConfirmDialog } from "./confirm-dialog"
+import { ConfirmDialog, type SingleClipOptions } from "./confirm-dialog"
 import { CaptionTemplate } from "./caption_templates"
 import { normalizeVideoUrl } from "@/lib/youtube"
+import {
+  detectPlatform,
+  isSupportedVideoUrl,
+  PLATFORM_INFO,
+} from "@/lib/video-sources"
+import {
+  PlatformLogo,
+  YouTubeLogo,
+  GoogleDriveLogo,
+  VimeoLogo,
+  LoomLogo,
+  TwitchLogo,
+} from "./platform-logos"
 import {
   Tooltip,
   TooltipContent,
@@ -20,12 +33,72 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip"
 
-const isValidYoutubeUrl = (url: string): boolean => {
-  if (!url) return false
-  const normalized = normalizeVideoUrl(url)
-  const re =
-    /^(?:https?:\/\/)?(?:www\.)?(?:youtube\.com\/(?:watch\?(?:.*&)?v=|embed\/|shorts\/)|youtu\.be\/)([a-zA-Z0-9_-]{11})/
-  return re.test(normalized)
+function formatDuration(seconds: number): string {
+  if (isNaN(seconds) || seconds <= 0) return "0:00"
+  const hrs = Math.floor(seconds / 3600)
+  const mins = Math.floor((seconds % 3600) / 60)
+  const secs = Math.floor(seconds % 60)
+  if (hrs > 0) {
+    return `${hrs}:${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`
+  }
+  return `${mins}:${String(secs).padStart(2, "0")}`
+}
+
+const extractVideoThumbnailAndDuration = (
+  file: File
+): Promise<{ thumbnail: string; duration: number }> => {
+  return new Promise((resolve) => {
+    const video = document.createElement("video")
+    video.preload = "metadata"
+    video.muted = true
+    video.playsInline = true
+
+    const objectUrl = URL.createObjectURL(file)
+    video.src = objectUrl
+
+    let hasResolved = false
+    const finish = (thumbnail: string, duration: number) => {
+      if (hasResolved) return
+      hasResolved = true
+      URL.revokeObjectURL(objectUrl)
+      resolve({ thumbnail, duration })
+    }
+
+    const timeout = setTimeout(() => {
+      finish("", video.duration || 0)
+    }, 4000)
+
+    video.onloadedmetadata = () => {
+      const duration = video.duration || 0
+      const seekTime = duration > 2 ? 1 : Math.max(0.1, duration * 0.2)
+      video.currentTime = seekTime
+    }
+
+    video.onseeked = () => {
+      try {
+        const canvas = document.createElement("canvas")
+        canvas.width = Math.min(video.videoWidth || 320, 640)
+        canvas.height = Math.min(video.videoHeight || 180, 360)
+        const ctx = canvas.getContext("2d")
+        if (ctx) {
+          ctx.drawImage(video, 0, 0, canvas.width, canvas.height)
+          const dataUrl = canvas.toDataURL("image/jpeg", 0.8)
+          clearTimeout(timeout)
+          finish(dataUrl, video.duration || 0)
+          return
+        }
+      } catch (err) {
+        console.error("Failed to capture video thumbnail:", err)
+      }
+      clearTimeout(timeout)
+      finish("", video.duration || 0)
+    }
+
+    video.onerror = () => {
+      clearTimeout(timeout)
+      finish("", 0)
+    }
+  })
 }
 
 type UnifiedInputProps = {
@@ -36,14 +109,16 @@ type UnifiedInputProps = {
     translateLanguage?: string,
     duration?: number | null,
     title?: string | null,
-    removeSilence?: boolean
+    removeSilence?: boolean,
+    singleClipOptions?: SingleClipOptions
   ) => Promise<boolean> | boolean | void
   onFileSelect?: (
     file: File,
     styling: CaptionTemplate,
     transcribeLanguage?: string,
     translateLanguage?: string,
-    removeSilence?: boolean
+    removeSilence?: boolean,
+    singleClipOptions?: SingleClipOptions
   ) => Promise<void> | void
   isSubmitting?: boolean
   className?: string
@@ -55,7 +130,7 @@ export function UnifiedInput({
   onFileSelect,
   isSubmitting = false,
   className,
-  placeholder = "Drop a video link",
+  placeholder = "Drop a file or paste a video link…",
 }: UnifiedInputProps) {
   const router = useRouter()
   const { isSignedIn } = useAuth()
@@ -70,6 +145,7 @@ export function UnifiedInput({
   const [videoDuration, setVideoDuration] = useState<number | null>(null)
   const [fetchingMetadata, setFetchingMetadata] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const urlInputRef = useRef<HTMLInputElement>(null)
   const lastAutoOpenedUrlRef = useRef("")
 
   // Trigger file picker from URL query param (landing-page redirect)
@@ -82,20 +158,21 @@ export function UnifiedInput({
     }
   }, [])
 
-
   const isSubmittingState = isSubmitting || localSubmitting
+
+  const detectedPlatform = detectPlatform(youtubeUrl)
 
   const isUrlValid = (() => {
     let u = youtubeUrl.trim()
     if (!/^https?:\/\//i.test(u)) u = `https://${u}`
-    return isValidYoutubeUrl(u)
+    return isSupportedVideoUrl(u)
   })()
 
-  // Auto-extract YouTube thumbnail and metadata as soon as URL becomes valid
+  // Auto-extract thumbnail and metadata as soon as URL becomes valid
   useEffect(() => {
     let u = youtubeUrl.trim()
     if (!/^https?:\/\//i.test(u)) u = `https://${u}`
-    if (!isValidYoutubeUrl(u)) {
+    if (!isSupportedVideoUrl(u)) {
       // eslint-disable-next-line react-hooks/set-state-in-effect
       setThumbnail(null)
       // eslint-disable-next-line react-hooks/set-state-in-effect
@@ -104,6 +181,8 @@ export function UnifiedInput({
       setVideoDuration(null)
       return
     }
+
+    // Instant thumbnail if YouTube
     const match = u.match(
       /[?&]v=([a-zA-Z0-9_-]{11})|youtu\.be\/([a-zA-Z0-9_-]{11})|shorts\/([a-zA-Z0-9_-]{11})/
     )
@@ -124,6 +203,9 @@ export function UnifiedInput({
           if (data.success && data.metadata) {
             setVideoTitle(data.metadata.title)
             setVideoDuration(data.metadata.duration)
+            if (data.metadata.thumbnail) {
+              setThumbnail(data.metadata.thumbnail)
+            }
           }
         })
         .catch((err) => console.error("Error fetching metadata:", err))
@@ -131,12 +213,12 @@ export function UnifiedInput({
     }
   }, [youtubeUrl, isSignedIn])
 
-  // Auto-open dialog when a valid YouTube URL is entered
+  // Auto-open dialog when a valid URL is entered
   useEffect(() => {
     let u = youtubeUrl.trim()
     if (!/^https?:\/\//i.test(u)) u = `https://${u}`
 
-    if (isValidYoutubeUrl(u)) {
+    if (isSupportedVideoUrl(u)) {
       if (
         !dialogOpen &&
         !isSubmittingState &&
@@ -161,7 +243,7 @@ export function UnifiedInput({
       try {
         sessionStorage.setItem("pending_youtube_url", youtubeUrl)
       } catch { }
-      router.push("/login")
+      router.push("/projects")
       return
     }
     action()
@@ -170,17 +252,30 @@ export function UnifiedInput({
   const openDialogForUrl = useCallback(() => {
     let u = youtubeUrl.trim()
     if (!/^https?:\/\//i.test(u)) u = `https://${u}`
-    if (!isValidYoutubeUrl(u)) return
+    if (!isSupportedVideoUrl(u)) return
     setYoutubeUrl(u)
     setPendingFile(null)
     setDialogOpen(true)
   }, [youtubeUrl])
 
-  const openDialogForFile = useCallback((file: File) => {
-    setPendingFile(file)
+  const clearSelection = useCallback(() => {
+    setPendingFile(null)
     setThumbnail(null)
-    setVideoTitle(file.name)
-    setDialogOpen(true)
+    setVideoTitle(null)
+    setVideoDuration(null)
+    setYoutubeUrl("")
+    if (fileInputRef.current) {
+      fileInputRef.current.value = ""
+    }
+  }, [])
+
+  const clearUrl = useCallback(() => {
+    setYoutubeUrl("")
+    setThumbnail(null)
+    setVideoTitle(null)
+    setVideoDuration(null)
+    lastAutoOpenedUrlRef.current = ""
+    urlInputRef.current?.focus()
   }, [])
 
   const processFile = async (file: File) => {
@@ -197,24 +292,30 @@ export function UnifiedInput({
       })
       return
     }
-    setVideoDuration(null)
-    openDialogForFile(file)
+
+    setPendingFile(file)
+    setVideoTitle(file.name)
+    setYoutubeUrl("")
+    setDialogOpen(true)
+    setFetchingMetadata(true)
 
     try {
-      const duration = await new Promise<number>((resolve, reject) => {
-        const video = document.createElement("video")
-        video.preload = "metadata"
-        video.onloadedmetadata = () => {
-          resolve(video.duration)
-          URL.revokeObjectURL(video.src)
-        }
-        video.onerror = () => reject(new Error("Could not read video metadata"))
-        video.src = URL.createObjectURL(file)
-      })
-      setVideoDuration(duration)
+      const { thumbnail: thumb, duration } = await extractVideoThumbnailAndDuration(file)
+      setThumbnail(thumb || null)
+      setVideoDuration(duration || null)
     } catch (err) {
-      console.error("Error reading file duration:", err)
+      console.error("Error generating video preview:", err)
       setVideoDuration(null)
+    } finally {
+      setFetchingMetadata(false)
+    }
+  }
+
+  const handleGenerateClick = () => {
+    if (pendingFile) {
+      requireAuth(() => setDialogOpen(true))
+    } else if (isUrlValid) {
+      requireAuth(openDialogForUrl)
     }
   }
 
@@ -222,7 +323,8 @@ export function UnifiedInput({
     styling: CaptionTemplate,
     transcribeLang: string,
     translateLang: string,
-    removeSilence: boolean
+    removeSilence: boolean,
+    singleClipOptions?: SingleClipOptions
   ) => {
     requireAuth(async () => {
       if (pendingFile) {
@@ -233,7 +335,8 @@ export function UnifiedInput({
             styling,
             transcribeLang,
             translateLang,
-            removeSilence
+            removeSilence,
+            singleClipOptions
           )
         return
       }
@@ -246,7 +349,8 @@ export function UnifiedInput({
           translateLang,
           videoDuration,
           videoTitle,
-          removeSilence
+          removeSilence,
+          singleClipOptions
         )
         if (success) {
           setDialogOpen(false)
@@ -277,7 +381,7 @@ export function UnifiedInput({
 
   return (
     <>
-      <div className="mx-auto w-full max-w-4xl">
+      <div className={cn("mx-auto w-full max-w-2xl", className)}>
         <input
           ref={fileInputRef}
           type="file"
@@ -289,14 +393,21 @@ export function UnifiedInput({
           }}
         />
 
+        {/* Single Unified Capsule Container (Klap layout) */}
         <div
           onDragOver={(e) => {
             e.preventDefault()
             setIsDragging(true)
           }}
+          onDragEnter={(e) => {
+            e.preventDefault()
+            setIsDragging(true)
+          }}
           onDragLeave={(e) => {
             e.preventDefault()
-            setIsDragging(false)
+            if (!e.currentTarget.contains(e.relatedTarget as Node)) {
+              setIsDragging(false)
+            }
           }}
           onDrop={(e) => {
             e.preventDefault()
@@ -305,60 +416,165 @@ export function UnifiedInput({
             if (file) processFile(file)
           }}
           className={cn(
-            "flex flex-col items-center gap-4 w-full sm:flex-row sm:gap-6",
-            className
+            "group relative flex w-full items-center rounded-2xl border bg-white p-1.5 sm:p-2 transition-all duration-200 shadow-[0_4px_20px_rgba(0,0,0,0.06)]",
+            isDragging
+              ? "border-2 border-dashed border-primary bg-primary/[0.03] scale-[1.01] shadow-lg shadow-primary/10"
+              : "border-slate-200/90 hover:border-slate-300 focus-within:border-primary focus-within:ring-4 focus-within:ring-primary/15"
           )}
         >
-          {/* Main URL Input Capsule Wrapper */}
-          <div
-            className="w-full sm:flex-1 rounded-full bg-white transition-all duration-300"
-            style={{
-              border: '6px solid #0075de33',
-              padding: '1px'
-            }}
-          >
-            <div
-              className={cn(
-                "relative flex w-full items-center rounded-full border border-primary bg-white p-1.5 transition-all duration-300 pl-4 sm:pl-6",
-                isDragging
-                  ? "border-dashed border-primary bg-primary/5 scale-[1.01]"
-                  : "focus-within:border-primary-active focus-within:ring-[3px] focus-within:ring-primary/20"
+          {/* Drag Overlay */}
+          {isDragging && (
+            <div className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center gap-2.5 rounded-2xl bg-white/95 backdrop-blur-sm text-primary font-semibold text-sm sm:text-base animate-in fade-in duration-150">
+              <Upload className="h-5 w-5 animate-bounce" />
+              <span>Drop your video file to start</span>
+            </div>
+          )}
+
+          {/* Left Upload Icon Button (shown when no video is selected) */}
+          {!pendingFile && (
+            <TooltipProvider delayDuration={200}>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <button
+                    type="button"
+                    onClick={() => fileInputRef.current?.click()}
+                    className="flex h-10 w-10 sm:h-11 sm:w-11 shrink-0 items-center justify-center rounded-xl text-slate-400 hover:text-slate-700 hover:bg-slate-100/80 active:scale-95 transition-all duration-150"
+                    aria-label="Upload video file"
+                  >
+                    <Upload className="h-5 w-5" strokeWidth={2} />
+                  </button>
+                </TooltipTrigger>
+                <TooltipContent side="top" className="text-xs bg-slate-900 text-white rounded-lg px-2.5 py-1">
+                  Upload video file (or drop anywhere)
+                </TooltipContent>
+              </Tooltip>
+            </TooltipProvider>
+          )}
+
+          {/* Middle: Either Dropped Video Preview Card OR URL Input */}
+          {pendingFile ? (
+            <div className="flex min-w-0 flex-1 items-center gap-3 py-0.5 pl-1 pr-2 animate-in fade-in zoom-in-95 duration-200">
+              {/* Video Thumbnail with Klap-Style Duration Badge */}
+              <div className="relative h-12 w-20 sm:h-13 sm:w-24 shrink-0 overflow-hidden rounded-xl border border-slate-200/80 bg-slate-900 shadow-sm">
+                {thumbnail ? (
+                  <img
+                    src={thumbnail}
+                    alt={pendingFile.name}
+                    className="h-full w-full object-cover"
+                  />
+                ) : (
+                  <div className="flex h-full w-full items-center justify-center bg-slate-100 text-slate-400">
+                    {fetchingMetadata ? (
+                      <Loader2 className="h-4 w-4 animate-spin text-primary" />
+                    ) : (
+                      <Video className="h-5 w-5" />
+                    )}
+                  </div>
+                )}
+
+                {/* Duration Badge in Bottom-Right */}
+                {videoDuration != null && (
+                  <div className="absolute bottom-1 right-1 rounded bg-black/80 px-1.5 py-0.5 text-[10px] sm:text-[11px] font-bold text-white tracking-wider backdrop-blur-xs">
+                    {formatDuration(videoDuration)}
+                  </div>
+                )}
+              </div>
+
+              {/* File Info */}
+              <div className="flex min-w-0 flex-1 flex-col justify-center">
+                <span className="truncate text-sm font-semibold text-slate-800">
+                  {pendingFile.name}
+                </span>
+                <span className="text-xs text-slate-500 font-medium">
+                  {(pendingFile.size / (1024 * 1024)).toFixed(1)} MB
+                  {videoDuration != null && ` • ${formatDuration(videoDuration)}`}
+                  {fetchingMetadata && " • loading preview…"}
+                </span>
+              </div>
+
+              {/* Clear Selection Button */}
+              <button
+                type="button"
+                onClick={clearSelection}
+                className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-slate-400 hover:bg-slate-100 hover:text-slate-600 transition-colors"
+                title="Remove video"
+                aria-label="Remove video"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+          ) : (
+            <div className="flex min-w-0 flex-1 items-center">
+              {detectedPlatform !== "unsupported" && (
+                <div
+                  title={PLATFORM_INFO[detectedPlatform].name}
+                  className="ml-1.5 mr-0.5 flex h-7 w-7 sm:h-8 sm:w-8 shrink-0 items-center justify-center rounded-lg bg-slate-50 border border-slate-200/80 shadow-2xs animate-in fade-in zoom-in-95 duration-150"
+                >
+                  <PlatformLogo platform={detectedPlatform} className="h-4 w-4 sm:h-4.5 sm:w-4.5" />
+                </div>
               )}
-            >
               <Input
+                ref={urlInputRef}
                 type="text"
                 placeholder={placeholder}
-                className="h-auto w-full flex-1 border-0 bg-transparent px-1 py-2 sm:py-3 text-[14px] sm:text-[15px] text-slate-700 shadow-none placeholder:text-slate-400 focus:outline-none focus-visible:ring-0 focus-visible:ring-offset-0"
+                className="h-10 sm:h-11 w-full flex-1 border-0 bg-transparent px-2 sm:px-3 text-[14px] sm:text-[15px] font-normal text-slate-800 shadow-none placeholder:text-slate-400 focus:outline-none focus-visible:ring-0 focus-visible:ring-offset-0"
                 value={youtubeUrl}
                 onChange={(e) => setYoutubeUrl(e.target.value)}
                 onKeyDown={(e) => {
-                  if (e.key === "Enter" && isUrlValid && !isSubmittingState)
-                    requireAuth(openDialogForUrl)
+                  if (e.key === "Enter" && (isUrlValid || pendingFile) && !isSubmittingState)
+                    handleGenerateClick()
                 }}
               />
-
-              <Button
-                onClick={() => requireAuth(openDialogForUrl)}
-                disabled={isSubmittingState || !isUrlValid}
-                className="flex h-9 sm:h-11 items-center justify-center rounded-full border-0 bg-primary px-4 sm:px-7 font-semibold text-white shadow-sm transition-all duration-200 hover:bg-primary-active active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50 text-xs sm:text-sm"
-              >
-                <span>{isSubmittingState ? "Generating…" : "Get free clips"}</span>
-              </Button>
+              {youtubeUrl && (
+                <button
+                  type="button"
+                  onClick={clearUrl}
+                  className="mr-1 sm:mr-1.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-slate-400 hover:bg-slate-100 hover:text-slate-600 transition-colors"
+                  title="Clear URL"
+                  aria-label="Clear URL"
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              )}
             </div>
-          </div>
+          )}
 
-          {/* Separator */}
-          <span className="text-[14px] sm:text-[15px] font-medium text-slate-400/90">or</span>
-
-          {/* Upload Button */}
+          {/* Right Action Button */}
           <Button
-            type="button"
-            onClick={() => fileInputRef.current?.click()}
-            className="flex h-12 sm:h-14 w-full sm:w-auto items-center justify-center rounded-full border border-slate-200 bg-white px-8 font-semibold text-slate-800 shadow-[0_4px_12px_rgba(0,0,0,0.03)] transition-all duration-200 hover:bg-slate-50 hover:border-slate-300 hover:shadow-[0_6px_16px_rgba(0,0,0,0.06)] active:scale-[0.98] text-sm sm:text-base"
+            onClick={handleGenerateClick}
+            disabled={isSubmittingState || (!isUrlValid && !pendingFile)}
+            className="flex h-10 sm:h-11 items-center justify-center rounded-xl bg-primary px-4 sm:px-6 font-semibold text-white shadow-sm transition-all duration-200 hover:bg-primary-active active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40 text-xs sm:text-sm shrink-0 gap-1.5"
           >
-            <span>Upload files</span>
+            <Sparkles className="h-4 w-4" />
+            <span>{isSubmittingState ? "Generating…" : "Generate"}</span>
           </Button>
         </div>
+        {detectedPlatform !== "unsupported" && PLATFORM_INFO[detectedPlatform]?.hint ? (
+          <p className="mt-1.5 text-center text-xs text-amber-600/90 font-medium animate-in fade-in duration-200">
+            💡 {PLATFORM_INFO[detectedPlatform].hint}
+          </p>
+        ) : !youtubeUrl && !pendingFile ? (
+          <div className="mt-2.5 flex items-center justify-center gap-2 text-xs text-slate-400 select-none">
+            <span className="text-[11px] font-medium text-slate-400/80">Supports</span>
+            <div className="flex items-center gap-2">
+              <span title="YouTube" className="flex items-center justify-center h-5 w-5 rounded hover:scale-110 transition-transform cursor-default">
+                <YouTubeLogo className="h-4 w-4" />
+              </span>
+              <span title="Google Drive" className="flex items-center justify-center h-5 w-5 rounded hover:scale-110 transition-transform cursor-default">
+                <GoogleDriveLogo className="h-4 w-4" />
+              </span>
+              <span title="Vimeo" className="flex items-center justify-center h-5 w-5 rounded hover:scale-110 transition-transform cursor-default">
+                <VimeoLogo className="h-4 w-4" />
+              </span>
+              <span title="Loom" className="flex items-center justify-center h-5 w-5 rounded hover:scale-110 transition-transform cursor-default">
+                <LoomLogo className="h-4 w-4" />
+              </span>
+              <span title="Twitch" className="flex items-center justify-center h-5 w-5 rounded hover:scale-110 transition-transform cursor-default">
+                <TwitchLogo className="h-4 w-4" />
+              </span>
+            </div>
+          </div>
+        ) : null}
       </div>
 
       <ConfirmDialog
@@ -370,6 +586,7 @@ export function UnifiedInput({
         videoTitle={videoTitle}
         duration={videoDuration}
         fetchingMetadata={fetchingMetadata}
+        videoFile={pendingFile}
       />
     </>
   )

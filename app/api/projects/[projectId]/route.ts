@@ -3,8 +3,7 @@ import { getServerSession } from "@/lib/auth-server"
 import { db } from "@/lib/db"
 import { projects, clips } from "@/lib/db/schema"
 import { eq, desc } from "drizzle-orm"
-import { isHttpUrl } from "@/lib/youtube"
-import { getDownloadPresignedUrl } from "@/lib/r2"
+import { resolveSourceVideoUrl } from "@/lib/r2"
 
 const MAX_TITLE_LENGTH = 200
 
@@ -28,6 +27,7 @@ export async function GET(
         status: projects.status,
         sourceVideoKey: projects.sourceVideoKey,
         createdAt: projects.createdAt,
+        isSingleClip: projects.isSingleClip,
       })
       .from(projects)
       .where(eq(projects.id, projectId))
@@ -87,11 +87,7 @@ export async function GET(
         .from(clips)
         .where(eq(clips.projectId, projectId))
         .orderBy(desc(clips.viralScore)),
-      project.sourceVideoKey
-        ? isHttpUrl(project.sourceVideoKey)
-          ? Promise.resolve(project.sourceVideoKey)
-          : getDownloadPresignedUrl(project.sourceVideoKey, 3600)
-        : Promise.resolve(""),
+      resolveSourceVideoUrl(project.sourceVideoKey, 3600),
     ])
 
     const { userId: _userId, ...projectData } = project

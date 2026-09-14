@@ -3,10 +3,11 @@ import { db } from "@/lib/db"
 import { projects, transcriptions, clips, user } from "@/lib/db/schema"
 import type { WordTimestamp, ClipCaption } from "@/lib/db/schema"
 import { eq, inArray, sql } from "drizzle-orm"
-import { getDownloadPresignedUrl } from "@/lib/r2"
+import { getDownloadPresignedUrl, resolveSourceVideoUrl } from "@/lib/r2"
 import {
   submitTranscription,
   getAssemblyAiStatus,
+  getAssemblyAiTranscript,
   enrichTranscript,
   transcribeFromUrl,
 } from "@/lib/assemblyai"
@@ -15,14 +16,7 @@ import {
   trackServerVideoAnalysisCompleted,
   trackServerClipRenderCompleted,
 } from "@/lib/posthog-server"
-
-async function resolveSourceVideoUrl(
-  sourceVideoKeyOrUrl: string,
-  expiresInSeconds: number
-) {
-  if (isHttpUrl(sourceVideoKeyOrUrl)) return normalizeVideoUrl(sourceVideoKeyOrUrl)
-  return getDownloadPresignedUrl(sourceVideoKeyOrUrl, expiresInSeconds)
-}
+import { getPlanLimit } from "@/lib/config"
 
 /**
  * Main background function that handles the video processing pipeline.
@@ -37,48 +31,63 @@ export const processVideo = inngest.createFunction(
     )
 
     // Step 1: Update status to processing and fetch user plan
-    const { userPlan, projectStyling, transcribeLanguage, translateLanguage, removeSilence } =
-      await step.run("update-status-and-fetch-plan", async () => {
-        console.log(
-          `[processVideo] Step: update-status-and-fetch-plan for project: ${projectId}`
-        )
-        const [[data], _] = await Promise.all([
-          db
-            .select({
-              project: projects,
-              userPlan: user.plan,
-            })
-            .from(projects)
-            .innerJoin(user, eq(projects.userId, user.id))
-            .where(eq(projects.id, projectId)),
-          db
-            .update(projects)
-            .set({ status: "processing" })
-            .where(eq(projects.id, projectId))
-        ])
+    const {
+      userPlan,
+      projectStyling,
+      transcribeLanguage,
+      translateLanguage,
+      removeSilence,
+      isSingleClip,
+      cropMode,
+      clipStartTime,
+      clipEndTime,
+      projectTitle,
+    } = await step.run("update-status-and-fetch-plan", async () => {
+      console.log(
+        `[processVideo] Step: update-status-and-fetch-plan for project: ${projectId}`
+      )
+      const [[data], _] = await Promise.all([
+        db
+          .select({
+            project: projects,
+            userPlan: user.plan,
+          })
+          .from(projects)
+          .innerJoin(user, eq(projects.userId, user.id))
+          .where(eq(projects.id, projectId)),
+        db
+          .update(projects)
+          .set({ status: "processing" })
+          .where(eq(projects.id, projectId))
+      ])
 
-        if (!data || !data.project) {
-          throw new Error(`Project not found: ${projectId}`);
-        }
-        const projectData = data.project;
+      if (!data || !data.project) {
+        throw new Error(`Project not found: ${projectId}`);
+      }
+      const projectData = data.project;
 
-        // Read styling preset from the project record (saved during upload)
-        const styling = {
-          preset: projectData.captionStyle || "impact",
-          word_highlight: projectData.wordHighlight ?? true,
-        }
+      // Read styling preset from the project record (saved during upload)
+      const styling = {
+        preset: projectData.captionStyle || "impact",
+        word_highlight: projectData.wordHighlight ?? true,
+      }
 
-        console.log(
-          `[processVideo] User Plan: ${data.userPlan}, Styling Loaded: ${!!styling}, Remove Silence: ${projectData.removeSilence}`
-        )
-        return {
-          userPlan: data.userPlan || "free",
-          projectStyling: styling,
-          transcribeLanguage: projectData.transcribeLanguage || "auto",
-          translateLanguage: projectData.translateLanguage || "none",
-          removeSilence: projectData.removeSilence ?? true,
-        }
-      })
+      console.log(
+        `[processVideo] User Plan: ${data.userPlan}, Styling Loaded: ${!!styling}, Remove Silence: ${projectData.removeSilence}, isSingleClip: ${projectData.isSingleClip || Boolean(event.data.isSingleClip)}`
+      )
+      return {
+        userPlan: data.userPlan || "free",
+        projectStyling: styling,
+        transcribeLanguage: projectData.transcribeLanguage || "auto",
+        translateLanguage: projectData.translateLanguage || "none",
+        removeSilence: projectData.removeSilence ?? true,
+        isSingleClip: projectData.isSingleClip || Boolean(event.data.isSingleClip),
+        cropMode: (projectData.videoFormat || event.data.cropMode || "auto") as string,
+        clipStartTime: projectData.clipStartTime ?? event.data.startTime ?? 0,
+        clipEndTime: projectData.clipEndTime ?? event.data.endTime ?? duration ?? projectData.duration ?? 0,
+        projectTitle: projectData.title || "Reframed Clip",
+      }
+    })
 
     // Step 2: Check if transcription already exists
     const existingTranscription = await step.run("check-existing-transcription", async () => {
@@ -178,8 +187,17 @@ export const processVideo = inngest.createFunction(
         return { status: "completed" as const, analysisUrl: existingAnalysis.analysisPath, callId: null }
       }
 
-      const presignedUrl = videoUrl || (await getDownloadPresignedUrl(key, 14400))
-      const videoDuration = duration || 600
+      const presignedUrl = await resolveSourceVideoUrl(videoUrl || key, 14400)
+
+      // Enforce plan limits from lib/config.ts
+      const planLimit = getPlanLimit(userPlan)
+      const clampedDuration = duration
+        ? Math.min(duration, planLimit.maxUploadDurationSeconds)
+        : planLimit.maxUploadDurationSeconds
+
+      console.log(
+        `[processVideo] Enforcing plan duration cap (${planLimit.name}): ${clampedDuration}s (requested: ${duration ?? "unknown"}s, plan max: ${planLimit.maxUploadDurationSeconds}s)`
+      )
 
       const submitEndpoint =
         process.env.MODAL_ANALYZER_SUBMIT_ENDPOINT ||
@@ -196,7 +214,7 @@ export const processVideo = inngest.createFunction(
           body: JSON.stringify({
             video_url: presignedUrl,
             project_id: projectId,
-            duration: videoDuration,
+            duration: clampedDuration,
             detect_skip: 5,
             async_mode: true,
           }),
@@ -239,7 +257,7 @@ export const processVideo = inngest.createFunction(
         viralClips: existingTranscription.viralClips,
       }
     } else {
-      const presignedUrl = videoUrl || (await getDownloadPresignedUrl(key, 14400))
+      const presignedUrl = await resolveSourceVideoUrl(videoUrl || key, 14400)
 
       // Submit transcription to AssemblyAI (asynchronous, non-blocking, takes ~1-3s)
       const submitRes = await step.run("submit-transcription", async () => {
@@ -360,7 +378,23 @@ export const processVideo = inngest.createFunction(
 
     console.log(`🎉 [processVideo] Both transcription and video analysis are COMPLETED! Proceeding to enrichment...`)
 
-    if (!existingTranscription && transcriptId) {
+    if (isSingleClip) {
+      console.log(`⚡ [processVideo] Direct Single Clip mode: skipping Gemini / Modal viral clips enrichment.`)
+      if (!existingTranscription && transcriptId) {
+        const rawResult = await step.run("fetch-raw-transcription", async () => {
+          console.log(`🎙️ [processVideo][fetch-raw-transcription] Fetching raw transcript for single clip mode (transcriptId=${transcriptId})...`)
+          const res = await getAssemblyAiTranscript(transcriptId!)
+          await db.insert(transcriptions).values({
+            projectId,
+            fullText: res.fullText,
+            words: res.words,
+            paragraphs: res.paragraphs,
+          })
+          return res
+        })
+        transcription = rawResult
+      }
+    } else if (!existingTranscription && transcriptId) {
       // Enrich transcript & viral clips with Modal + Gemini (~5-15s)
       const enrichedResult = await step.run("enrich-transcription", async () => {
         console.log(
@@ -387,12 +421,77 @@ export const processVideo = inngest.createFunction(
       transcription = enrichedResult
     }
 
-
     const aiClips = await step.run("save-clips-db", async () => {
-      console.log(`💾 [processVideo] Step: save-clips-db saving ${transcription.viralClips?.length ?? 0} clips to DB...`)
-
       const { clips } = await import("@/lib/db/schema")
       const { createId } = await import("@paralleldrive/cuid2")
+
+      if (isSingleClip) {
+        console.log(`💾 [processVideo] Step: save-clips-db creating SINGLE clip for direct reframe...`)
+        const totalWords = transcription?.words || []
+        const maxWordEnd = totalWords.length > 0 ? totalWords[totalWords.length - 1].end : 0
+        const startSec = Math.max(0, clipStartTime || 0)
+        const endSec =
+          clipEndTime && clipEndTime > startSec
+            ? clipEndTime
+            : duration && duration > startSec
+              ? duration
+              : Math.max(maxWordEnd, startSec + 10)
+
+        const clipWords = totalWords
+          .filter((w: WordTimestamp) => w.end >= startSec && w.start <= endSec)
+          .map((w: WordTimestamp) => ({
+            word: w.word.replace(/[.,!?]$/, "").toLowerCase(),
+            punctuated_word: w.word,
+            start: Math.max(0, w.start - startSec),
+            end: Math.max(0, w.end - startSec),
+            confidence: w.confidence || 0.99,
+            speaker: w.speaker?.toString() || "0",
+          }))
+
+        const captions = [
+          {
+            id: createId(),
+            transcript: clipWords.map((w) => w.punctuated_word).join(" "),
+            start: 0,
+            end: Math.max(0, endSec - startSec),
+            confidence: 0.99,
+            channel: 0,
+            words: clipWords,
+          },
+        ]
+
+        const singleClipRecord = {
+          projectId,
+          title: projectTitle || "Full Reframed Clip",
+          hookText:
+            clipWords.slice(0, 5).map((w) => w.punctuated_word).join(" ") || "Watch this",
+          startTime: startSec,
+          endTime: endSec,
+          viralScore: 95,
+          viralReason: "Direct single-clip reframe & captions.",
+          description: projectTitle || "Reframed short clip.",
+          hashtags: "#shorts #viral #reframe",
+          clipType: "highlight",
+          speakerDynamic: "Direct clip",
+          cropMode: (cropMode as any) || "auto",
+          status: "rendering" as const,
+          captions,
+          captionStyle: projectStyling?.preset || "impact",
+          wordHighlight: projectStyling?.word_highlight ?? true,
+        }
+
+        const insertedClips = await db
+          .insert(clips)
+          .values([singleClipRecord])
+          .returning()
+
+        console.log(
+          `[processVideo] Saved single direct clip to DB: id=${insertedClips[0]?.id}`
+        )
+        return insertedClips
+      }
+
+      console.log(`💾 [processVideo] Step: save-clips-db saving ${transcription?.viralClips?.length ?? 0} clips to DB...`)
 
       const rawClips: any[] = transcription.viralClips || []
       console.log(
@@ -493,6 +592,7 @@ export const processVideo = inngest.createFunction(
           projectId,
           clipIds: aiClips.map((clip) => clip.id),
           removeSilence,
+          videoUrl: videoUrl || undefined,
         },
       })
     }
@@ -506,6 +606,7 @@ export const processVideo = inngest.createFunction(
             userId: projects.userId,
             credits: user.credits,
             duration: projects.duration,
+            userPlan: user.plan,
           })
           .from(projects)
           .innerJoin(user, eq(projects.userId, user.id))
@@ -518,12 +619,14 @@ export const processVideo = inngest.createFunction(
 
       if (!projectData) return
 
-      const durationSeconds =
+      const planLimit = getPlanLimit(projectData.userPlan || userPlan)
+      const rawDurationSeconds =
         typeof duration === "number" &&
           Number.isFinite(duration) &&
           duration > 0
           ? duration
           : (projectData.duration ?? 0)
+      const durationSeconds = Math.min(rawDurationSeconds, planLimit.maxUploadDurationSeconds)
       const durationInMinutes = Math.ceil(durationSeconds / 60)
       if (durationInMinutes <= 0) return
 
@@ -625,12 +728,19 @@ export const renderClip = inngest.createFunction(
         }
       )
 
-      const sourceVideoUrl = await resolveSourceVideoUrl(
-        project.sourceVideoKey!,
+      const resolvedVideoUrl = await resolveSourceVideoUrl(
+        clip.originalVideoUrl || project.sourceVideoKey,
         3600
       )
+
+      if (!resolvedVideoUrl || !isHttpUrl(resolvedVideoUrl)) {
+        throw new Error(
+          `[renderClip] Failed to resolve a valid downloadable video URL for clip ${clipId}. Resolved: "${resolvedVideoUrl}"`
+        )
+      }
+
       console.log(
-        `[renderClip] Resolved source video as ${isHttpUrl(project.sourceVideoKey!) ? "external URL" : "R2 presigned URL"} (len=${sourceVideoUrl?.length ?? 0})`
+        `[renderClip] Validated source video URL for Modal: ${resolvedVideoUrl.substring(0, 100)}... (length: ${resolvedVideoUrl.length})`
       )
 
       const result = await step.run("render-on-modal", async () => {
@@ -668,17 +778,23 @@ export const renderClip = inngest.createFunction(
           `[renderClip] Source Video URL: ${clip.originalVideoUrl || "Presigned S3 URL"}`
         )
 
+        const planLimit = getPlanLimit(userPlan)
+        const isFree = planLimit.name === "Free"
+
         const requestBody = {
-          video_url: clip.originalVideoUrl || sourceVideoUrl,
+          video_url: resolvedVideoUrl,
           start_time: clip.startTime,
           end_time: clip.endTime,
           transcript: clip.captions,
           styling: stylingPayload,
-          show_watermark: userPlan === "free",
+          show_watermark: isFree,
           crop_mode:
             clip.cropMode && clip.cropMode !== "auto"
               ? clip.cropMode
-              : project.videoFormat || "auto",
+              : (clip.captions?.[0] as any)?.layout ||
+                (clip.captions?.[0]?.words?.[0] as any)?.layout ||
+                project.videoFormat ||
+                "auto",
           quality: "preview",
           analysis_url: project.analysisPath || null,
           remove_silence: project.removeSilence ?? true,
@@ -727,9 +843,17 @@ export const renderClip = inngest.createFunction(
         await step.run("update-status-rendered", async () => {
           const previewUrl = result.url || result.preview_video_url
           const originalUrl = clip.originalVideoUrl || result.original_video_url
-          const cropMode = clip.cropMode || result.crop_mode || clip.cropMode
+          const resolvedCropMode =
+            result.crop_mode && result.crop_mode !== "auto"
+              ? result.crop_mode
+              : clip.cropMode && clip.cropMode !== "auto"
+              ? clip.cropMode
+              : (result.transcript?.[0] as any)?.layout ||
+                (result.transcript?.[0]?.words?.[0] as any)?.layout ||
+                (clip.captions?.[0] as any)?.layout ||
+                "reframe"
           console.log(
-            `[renderClip] Updating DB status to rendered. originalUrl: ${originalUrl}, previewUrl: ${previewUrl}`
+            `[renderClip] Updating DB status to rendered. originalUrl: ${originalUrl}, previewUrl: ${previewUrl}, cropMode: ${resolvedCropMode}`
           )
           await db
             .update(clips)
@@ -739,7 +863,7 @@ export const renderClip = inngest.createFunction(
               previewVideoUrl: previewUrl,
               captionVideoUrl: null,
               thumbnailUrl: result.thumbnail_url || clip.thumbnailUrl,
-              cropMode: cropMode,
+              cropMode: resolvedCropMode,
               captions: result.transcript || clip.captions,
               lastRenderedAt: new Date(),
             })
@@ -813,12 +937,25 @@ export const batchReframeProject = inngest.createFunction(
       }
 
       // Step 3: Resolve source video URL
-      const sourceVideoUrl = await resolveSourceVideoUrl(
-        project.sourceVideoKey!,
-        3600
+      const sourceVideoUrl =
+        event.data?.videoUrl && isHttpUrl(event.data.videoUrl)
+          ? event.data.videoUrl
+          : await resolveSourceVideoUrl(project.sourceVideoKey, 3600)
+
+      if (!sourceVideoUrl || !isHttpUrl(sourceVideoUrl)) {
+        throw new Error(
+          `[batchReframeProject] Failed to resolve a valid downloadable video URL for project ${projectId} (sourceVideoKey: ${project.sourceVideoKey}). Resolved: "${sourceVideoUrl}"`
+        )
+      }
+
+      console.log(
+        `[batchReframeProject] Validated source video URL for Modal: ${sourceVideoUrl.substring(0, 100)}... (length: ${sourceVideoUrl.length})`
       )
 
       const batchResult = await step.run("call-modal-batch-reframer", async () => {
+        const planLimit = getPlanLimit(userPlan)
+        const isFree = planLimit.name === "Free"
+
         const clipsPayload = projectClips.map((clip) => {
           const stylingPayload = {
             preset: clip.captionStyle || "impact",
@@ -832,7 +969,7 @@ export const batchReframeProject = inngest.createFunction(
             crop_mode: clip.cropMode || project.videoFormat || "auto",
             transcript: clip.captions,
             styling: stylingPayload,
-            show_watermark: userPlan === "free",
+            show_watermark: isFree,
             remove_silence: project.removeSilence ?? true,
           }
         })
@@ -972,23 +1109,41 @@ export const exportClip = inngest.createFunction(
         }
       )
 
-      // Use plan from event data (set by /api/export) with DB fallback
-      const plan = eventPlan || userPlan || "free"
-      console.log(`[exportClip] Resolved plan: ${plan}`)
+      // Use plan from event data (set by /api/export) with DB fallback, resolved against PLAN_LIMITS
+      const planLimit = getPlanLimit(eventPlan || userPlan)
+      const isFree = planLimit.name === "Free"
+      const plan = isFree ? "free" : planLimit.name.toLowerCase()
+      console.log(`[exportClip] Resolved plan: ${plan} (${planLimit.name}, maxExportHeight: ${planLimit.exportMaxHeight}p)`)
 
       // Step 3: Call Modal burner with quality="export" and plan
       const exportResult = await step.run("export-on-modal", async () => {
+        const resolvedExportUrl = await resolveSourceVideoUrl(
+          clip.originalVideoUrl,
+          3600
+        )
+        if (!resolvedExportUrl || !isHttpUrl(resolvedExportUrl)) {
+          throw new Error(
+            `[exportClip] Failed to resolve a valid downloadable video URL for clip ${clipId}. Resolved: "${resolvedExportUrl}"`
+          )
+        }
+
         const stylingPayload = {
           preset: clip.captionStyle || "impact",
           word_highlight: clip.wordHighlight ?? true,
         }
 
         const requestBody = {
-          video_url: clip.originalVideoUrl,
+          video_url: resolvedExportUrl,
           transcript: clip.captions,
           styling: stylingPayload,
-          show_watermark: plan === "free",
-          crop_mode: clip.cropMode || project.videoFormat || "reframe",
+          show_watermark: isFree,
+          crop_mode:
+            clip.cropMode && clip.cropMode !== "auto"
+              ? clip.cropMode
+              : (clip.captions?.[0] as any)?.layout ||
+                (clip.captions?.[0]?.words?.[0] as any)?.layout ||
+                project.videoFormat ||
+                "reframe",
           quality: "export",
           plan,
           remove_silence: project.removeSilence ?? true,

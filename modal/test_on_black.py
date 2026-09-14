@@ -67,6 +67,31 @@ def generate_black_video(output_video):
     )
 
 
+def generate_image_video(image_path: str, output_video: str, duration: int = 3):
+    """Generate a 3-second video looping an image at 1080x1920 with silent audio."""
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-loop", "1",
+        "-i", image_path,
+        "-f", "lavfi",
+        "-i", "anullsrc=r=44100:cl=mono",
+        "-t", str(duration),
+        "-vf", "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920",
+        "-c:v", "libx264",
+        "-pix_fmt", "yuv420p",
+        "-c:a", "aac",
+        output_video,
+    ]
+    print(f"🎬 Creating image video from {image_path}...")
+    subprocess.run(
+        cmd,
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
 # ----------------------------------------------------------------------
 # Preset → Styling conversion
 # ----------------------------------------------------------------------
@@ -89,8 +114,8 @@ def preset_to_styling(name: str, preset: dict) -> dict:
         "text_transform": ("uppercase" if name in ALWAYS_UPPERCASE else "none"),
         # Use preset default for word-level active highlighting (True for Shorts/Reels, False for Cinema/Luxury)
         "word_highlight": preset.get("word_highlight_default", True),
-        # Approximate vertical position from margin
-        "position_y": 0.5,
+        # Use layout default caption position (reframe = 0.65)
+        "position_y": None,
     }
 
     if preset["backcolor"]:
@@ -112,11 +137,44 @@ def main():
     output_dir = os.path.join(os.path.dirname(__file__), "test_outputs")
     os.makedirs(output_dir, exist_ok=True)
 
-    black_video = os.path.join(output_dir, "black_canvas.mp4")
-    generate_black_video(black_video)
-    input_video = black_video
+    source_img = os.path.abspath(os.path.join(os.path.dirname(__file__), "source_image.jpg"))
+    image_video = os.path.join(output_dir, "image_canvas.mp4")
 
-    target_preset = sys.argv[1].lower() if len(sys.argv) > 1 else "all"
+    default_video = os.path.abspath(os.path.join(os.path.dirname(__file__), "../reframed_3s.mp4"))
+    if not os.path.exists(default_video):
+        default_video = os.path.abspath(os.path.join(os.path.dirname(__file__), "../reframed_stable_zoom_fixed.mp4"))
+
+    # Parse arguments
+    args = [a for a in sys.argv[1:]]
+    use_black = "--black" in args
+    args = [a for a in args if a != "--black"]
+
+    custom_video = None
+    target_preset = "all"
+
+    for a in args:
+        if a.endswith(".mp4") and os.path.exists(a):
+            custom_video = os.path.abspath(a)
+        elif a.lower() in PRESET_STYLES or a.lower() == "all":
+            target_preset = a.lower()
+
+    if use_black:
+        black_video = os.path.join(output_dir, "black_canvas.mp4")
+        generate_black_video(black_video)
+        input_video = black_video
+    elif custom_video:
+        input_video = custom_video
+    elif os.path.exists(source_img):
+        generate_image_video(source_img, image_video)
+        input_video = image_video
+    elif os.path.exists(default_video):
+        input_video = default_video
+    else:
+        black_video = os.path.join(output_dir, "black_canvas.mp4")
+        generate_black_video(black_video)
+        input_video = black_video
+
+    print(f"📹 Using input video: {input_video}")
 
     for preset_name, preset in PRESET_STYLES.items():
         if target_preset != "all" and preset_name != target_preset:
@@ -143,7 +201,7 @@ def main():
                 transcript=CUSTOM_TRANSCRIPT,
                 styling=styling,
                 show_watermark=False,
-                crop_mode="split",
+                crop_mode="reframe",
                 quality="export",
                 tmpdir=output_dir,
             )

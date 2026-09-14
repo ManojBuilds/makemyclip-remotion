@@ -1,48 +1,96 @@
 "use client"
 
+import { useState } from "react"
 import Link from "next/link"
-import { cn } from "@/lib/utils"
-import { Check, Loader2 } from "lucide-react"
+import { Video, Loader2 } from "lucide-react"
 import type { Project } from "@/lib/types"
 
-const STATUS_LABEL: Record<string, string> = {
-  ready: "Ready",
-  uploading: "Uploading",
-  processing: "Processing",
-  analyzing: "Processing",
+function getYouTubeId(url?: string | null) {
+  if (!url) return null
+  const regExp =
+    /^.*(youtu.be\/|v\/|u\/\w\/|embed\/|watch\?v=|\&v=|shorts\/)([^#\&\?]*).*/
+  const match = url.match(regExp)
+  return match && match[2].length === 11 ? match[2] : null
 }
 
 export function ProjectListItem({ project }: { project: Project }) {
+  const [imgError, setImgError] = useState(false)
+  const [videoError, setVideoError] = useState(false)
+
+  const youtubeId = getYouTubeId(project.sourceUrl)
+  const thumbnailUrl = youtubeId
+    ? `https://img.youtube.com/vi/${youtubeId}/maxresdefault.jpg`
+    : project.thumbnailUrl || null
+
+  const fallbackThumbnailUrl = youtubeId
+    ? `https://img.youtube.com/vi/${youtubeId}/hqdefault.jpg`
+    : null
+
+  const directVideoUrl = !youtubeId
+    ? project.videoUrl ||
+      (project.sourceUrl && !project.sourceUrl.includes("drive.google.com")
+        ? project.sourceUrl
+        : null)
+    : null
+
   const isReady = project.status === "ready"
-  const label = STATUS_LABEL[project.status] ?? "Processing"
 
   return (
-    <Link href={`/projects/${project.id}`} className="block">
-      <div className="group flex items-center justify-between gap-4 rounded-lg border border-hairline bg-white px-4 py-3.5 transition-colors hover:border-slate-300 sm:px-5">
-        <div className="min-w-0 space-y-0.5">
-          <h3 className="truncate text-sm font-medium text-slate-900">
-            {project.title}
-          </h3>
-          <div className="flex items-center gap-2 text-xs text-slate-400">
-            <span>{new Date(project.createdAt).toLocaleDateString()}</span>
-            {isReady && (
-              <>
-                <span className="text-slate-300">·</span>
-                <span>{project.clipCount ?? 0} clips</span>
-              </>
-            )}
+    <Link
+      href={`/projects/${project.id}`}
+      className="group block focus:outline-none"
+      title={project.title}
+    >
+      {/* Video Thumbnail */}
+      <div className="relative aspect-[16/9] w-full overflow-hidden rounded-xl bg-slate-900">
+        {thumbnailUrl && !imgError ? (
+          <img
+            src={thumbnailUrl}
+            alt={project.title}
+            className="h-full w-full object-cover transform-gpu transition-all duration-200 ease-out group-hover:scale-[1.02] group-hover:brightness-[1.03]"
+            onError={(e) => {
+              if (
+                fallbackThumbnailUrl &&
+                e.currentTarget.src !== fallbackThumbnailUrl
+              ) {
+                e.currentTarget.src = fallbackThumbnailUrl
+              } else {
+                setImgError(true)
+              }
+            }}
+          />
+        ) : directVideoUrl && !videoError ? (
+          <video
+            src={
+              directVideoUrl.includes("#")
+                ? directVideoUrl
+                : `${directVideoUrl}#t=0.001`
+            }
+            muted
+            playsInline
+            preload="metadata"
+            className="h-full w-full object-cover transform-gpu transition-all duration-200 ease-out group-hover:scale-[1.02] group-hover:brightness-[1.03]"
+            onError={() => setVideoError(true)}
+          />
+        ) : (
+          <div className="flex h-full w-full items-center justify-center bg-slate-50">
+            <Video className="size-5 text-slate-300" />
           </div>
-        </div>
+        )}
 
-        <div className="flex shrink-0 items-center gap-1.5 text-xs text-slate-500">
-          {isReady ? (
-            <Check className="size-3.5 text-emerald-500" strokeWidth={2.5} />
-          ) : (
-            <Loader2 className="size-3.5 animate-spin text-slate-400" />
-          )}
-          <span className={cn(isReady && "text-slate-400")}>{label}</span>
-        </div>
+        {/* Processing State (only when not ready) */}
+        {!isReady && (
+          <div className="absolute bottom-2 left-2 flex items-center gap-1 rounded-md bg-black/60 px-1.5 py-0.5 text-[10px] font-medium text-amber-300 backdrop-blur-sm">
+            <Loader2 className="size-2.5 animate-spin" />
+            <span className="capitalize">{project.status || "Processing"}</span>
+          </div>
+        )}
       </div>
+
+      {/* Video Title */}
+      <h4 className="mt-1.5 truncate text-xs font-medium text-slate-700 transition-colors duration-200 group-hover:text-slate-950">
+        {project.title}
+      </h4>
     </Link>
   )
 }

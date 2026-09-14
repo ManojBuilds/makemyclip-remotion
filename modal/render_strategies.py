@@ -120,25 +120,27 @@ class ReframeStrategy(RenderStrategy):
             current_cy += (current_target_cy - current_cy) * (adaptive_alpha * 0.5)
 
         # Framing calculations: Keep the full vertical shot with head and body intact
-        # Standard 16:9 to 9:16 reframe uses full vertical height (1.0x to 1.12x subtle framing)
-        zoom = 1.05
+        # For standard landscape (16:9) to vertical (9:16), use 100% full vertical height (y1=0, crop_h=img_h)
+        # to ensure 100% of headroom, hair, and posture are completely preserved without cutoff.
         img_h, img_w = img.shape[:2]
-        crop_h = float(img_h) / zoom
-        crop_w = crop_h * (float(self.target_w) / float(self.target_h))
+        target_aspect = float(self.target_w) / float(self.target_h)
+        source_aspect = float(img_w) / float(img_h)
 
-        # Ensure crop fits within source image
-        crop_h = min(crop_h, float(img_h))
-        crop_w = min(crop_w, float(img_w))
+        if source_aspect >= target_aspect:
+            crop_h = float(img_h)
+            crop_w = crop_h * target_aspect
+            y1 = 0.0
+        else:
+            crop_w = float(img_w)
+            crop_h = crop_w / target_aspect
+            src_cy = current_cy / scale if current_cy is not None else img_h * 0.35
+            y1 = max(0.0, min(src_cy - crop_h * 0.30, float(img_h) - crop_h))
 
         # Convert virtual center X back to source pixel coordinates
         src_cx = current_cx / scale
-        src_cy = current_cy / scale if current_cy is not None else img_h * 0.35
 
         # Center horizontally on active speaker with bounds clamping
         x1 = max(0.0, min(src_cx - crop_w / 2.0, float(img_w) - crop_w))
-
-        # Vertically align: anchor with 15% headroom above face center, clamp to [0, img_h - crop_h]
-        y1 = max(0.0, min(src_cy - crop_h * 0.28, float(img_h) - crop_h))
 
         crop = img[int(y1) : int(y1 + crop_h), int(x1) : int(x1 + crop_w)]
         if crop.shape[0] > 0 and crop.shape[1] > 0:
@@ -168,50 +170,45 @@ class SplitStrategy(RenderStrategy):
         faces_fidx: List[Dict[str, Any]],
         state: Dict[str, Any],
     ) -> np.ndarray:
-        sub_h, sub_w = img.shape[:2]
-        mid_x = float(sub_w) / 2.0
+        scale = self.target_h / img.shape[0]
+        face_top = None
+        face_bottom = None
 
-        if faces_fidx:
-            if len(faces_fidx) >= 2:
-                sorted_lr = sorted(faces_fidx, key=lambda f: f.get("x", 0))
-                # Ensure they are truly distinct people separated by at least 15% of frame width
-                if abs(float(sorted_lr[-1].get("x", 0)) - float(sorted_lr[0].get("x", 0))) >= (sub_w * 0.15):
-                    face_top = sorted_lr[0]
-                    face_bottom = sorted_lr[-1]
-                else:
-                    # Both detections are essentially on the same person -> assign according to side
-                    f_single = sorted_lr[0]
-                    if float(f_single.get("x", 0)) < mid_x:
-                        face_top = f_single
-                    else:
-                        face_bottom = f_single
-            elif len(faces_fidx) == 1:
-                single_face = faces_fidx[0]
-                fx = float(single_face.get("x", 0))
-                if fx < mid_x:
-                    face_top = single_face
-                else:
-                    face_bottom = single_face
+        min_face_sep = float(img.shape[1]) * 0.18
 
-        # Safety Fallback: If both faces ever resolve too close to each other, drop bottom face
-        if face_top and face_bottom and abs(float(face_top.get("x", 0)) - float(face_bottom.get("x", 0))) < (sub_w * 0.15):
-            face_bottom = None
+        if faces_fidx and len(faces_fidx) >= 2:
+            sorted_lr = sorted(faces_fidx, key=lambda f: f.get("x", 0))
+            if abs(sorted_lr[0].get("x", 0) - sorted_lr[-1].get("x", 0)) >= min_face_sep:
+                face_top = sorted_lr[0]
+                face_bottom = sorted_lr[-1]
 
-        # Safety Fallback: If only 1 person exists and no 2nd person track has ever been established
-        if (face_top is None or face_bottom is None) and (state.get("split_cx_top") is None or state.get("split_cx_bottom") is None):
+        # Look-ahead: If faces are missing on the initial transition frame into split,
+        # inspect the next 1-15 frames so we never flash a 1-frame fallback glitch.
+        if (face_top is None or face_bottom is None) and state.get("split_cx_top") is None:
+            all_faces = state.get("all_faces", [])
+            for look_ahead in range(1, 15):
+                fut_idx = fidx + look_ahead
+                if fut_idx < len(all_faces):
+                    fut_faces = all_faces[fut_idx]
+                    if fut_faces and len(fut_faces) >= 2:
+                        sorted_fut = sorted(fut_faces, key=lambda f: f.get("x", 0))
+                        if abs(sorted_fut[0].get("x", 0) - sorted_fut[-1].get("x", 0)) >= min_face_sep:
+                            face_top = sorted_fut[0]
+                            face_bottom = sorted_fut[-1]
+                            break
+
+        # Persistence: If we already have established split-screen cameras from previous frames,
+        # maintain the split layout smoothly instead of flickering to full-frame reframe.
+        has_persistent_split = (state.get("split_cx_top") is not None and state.get("split_cx_bottom") is not None)
+
+        # Fallback to ReframeStrategy ONLY if we have no current, lookahead, or persistent face positions
+        if (face_top is None or face_bottom is None) and not has_persistent_split:
             reframe_strat = ReframeStrategy(self.target_w, self.target_h)
             return reframe_strat.render_frame(img, fidx, faces_fidx, state)
 
-        # Additional Safety: If persistent top and bottom cameras have converged onto the same person (< 15% width), fallback to Reframe
-        top_cx_val = state.get("split_cx_top")
-        bot_cx_val = state.get("split_cx_bottom")
-        if top_cx_val is not None and bot_cx_val is not None:
-            if abs(float(top_cx_val) - float(bot_cx_val)) < (sub_w * 0.15):
-                reframe_strat = ReframeStrategy(self.target_w, self.target_h)
-                return reframe_strat.render_frame(img, fidx, faces_fidx, state)
-
-        # Tracking state
-        SPLIT_DEAD_ZONE = 25.0
+        # Tracking state (scale dead-zone relative to 720p baseline for resolution independence)
+        res_scale = float(img.shape[0]) / 720.0
+        SPLIT_DEAD_ZONE = 25.0 * res_scale
         SPLIT_ALPHA = 0.04
 
         for is_top, f_obj in [(True, face_top), (False, face_bottom)]:
@@ -254,19 +251,19 @@ class SplitStrategy(RenderStrategy):
 
             sub_h, sub_w = img.shape[:2]
             if cx is None:
-                cx_rel = sub_w * 0.28 if is_top else sub_w * 0.72
+                cx_rel = sub_w * 0.25 if is_top else sub_w * 0.75
                 cy_rel = sub_h * 0.25
             else:
                 cx_rel = max(0.0, min(float(cx), float(sub_w)))
                 cy_rel = max(0.0, min(float(cy) if cy is not None else sub_h * 0.25, float(sub_h)))
 
-            crop_w = float(sub_w) * 0.44
+            crop_w = float(sub_w) * 0.46
             crop_h = crop_w / 1.125
             crop_w = min(crop_w, float(sub_w))
             crop_h = min(crop_h, float(sub_h))
 
             x1 = max(0.0, min(cx_rel - crop_w / 2.0, sub_w - crop_w))
-            y1 = max(0.0, min(cy_rel - crop_h * 0.22, sub_h - crop_h))
+            y1 = max(0.0, min(cy_rel - crop_h * 0.28, sub_h - crop_h))
 
             crop = img[int(y1) : int(y1 + crop_h), int(x1) : int(x1 + crop_w)]
             if crop.shape[0] > 0 and crop.shape[1] > 0:
@@ -280,11 +277,7 @@ class SplitStrategy(RenderStrategy):
 
 
 class LetterboxStrategy(RenderStrategy):
-    """Blurred background letterbox card for B-roll, wide visual cutaways, and screen captures.
-
-    Renders an immersive, tall card (~70% of 1920 height, ~1344px) matching modern social video aesthetics
-    (OpusClip style) with subtle top and bottom blurred background, avoiding the tiny slit appearance of raw 16:9.
-    """
+    """Blurred background letterbox card."""
 
     def render_frame(
         self,
@@ -294,40 +287,24 @@ class LetterboxStrategy(RenderStrategy):
         state: Dict[str, Any],
     ) -> np.ndarray:
         bg = make_blurred_bg(img, target_w=self.target_w, target_h=self.target_h)
-        img_h, img_w = img.shape[:2]
+        CARD_W = self.target_w
+        CARD_H = int(self.target_h * 0.68)
+        scale = (CARD_H * 1.10) / img.shape[0]
 
-        CARD_W = self.target_w  # 1080
-        CARD_H = int(self.target_h * 0.70)  # 1344px (~70% of 1920 height)
-
-        scale = float(CARD_H) / float(img_h)
-        scaled_w = int(round(img_w * scale))
-        scaled_h = CARD_H
-
+        scaled_h = int(CARD_H * 1.10)
+        scaled_w = int(img.shape[1] * scale)
         res_scaled = cv2.resize(img, (scaled_w, scaled_h), interpolation=cv2.INTER_AREA)
 
-        # Center-crop or subject-aware crop horizontally
         target_cx = state.get("target_cx")
-        if target_cx is not None and img_w > 0:
-            cx_scaled = (float(target_cx) / float(img_w)) * scaled_w
-            tx = int(cx_scaled - CARD_W // 2)
-        else:
-            tx = (scaled_w - CARD_W) // 2
+        if target_cx is None:
+            target_cx = int((img.shape[1] * scale) / 2)
 
-        tx = max(0, min(tx, max(0, scaled_w - CARD_W)))
+        cx_card = (target_cx / (img.shape[1] * (self.target_h / img.shape[0]))) * scaled_w if img.shape[1] > 0 else scaled_w // 2
+        tx = max(min(int(cx_card) - CARD_W // 2, scaled_w - CARD_W), 0)
+        res = res_scaled[0:CARD_H, tx : tx + CARD_W]
 
-        if scaled_w >= CARD_W:
-            res = res_scaled[0:CARD_H, tx : tx + CARD_W]
-            start_x = 0
-            actual_w = CARD_W
-        else:
-            res = res_scaled
-            start_x = (CARD_W - scaled_w) // 2
-            actual_w = scaled_w
-
-        # Position vertically: upper-centered (40% offset), leaving generous room at bottom for captions
-        start_y = max(0, int((self.target_h - CARD_H) * 0.40))
-        bg[start_y : start_y + CARD_H, start_x : start_x + actual_w] = res
-
+        start_y = 310
+        bg[start_y : start_y + res.shape[0], 0 : res.shape[1]] = res
         return bg
 
 
@@ -609,7 +586,8 @@ class ScreencastStrategy(RenderStrategy):
         curr_cx = state.get("sc_speaker_cam_cx", cx_src)
         curr_cy = state.get("sc_speaker_cam_cy", cy_src)
 
-        DEAD_ZONE_PX = 8.0
+        res_scale = float(img_h) / 720.0
+        DEAD_ZONE_PX = 8.0 * res_scale
         if abs(cx_src - curr_cx) > DEAD_ZONE_PX:
             curr_cx += (cx_src - curr_cx) * 0.05
         if abs(cy_src - curr_cy) > DEAD_ZONE_PX:
@@ -809,7 +787,8 @@ class PanelStrategy(RenderStrategy):
         img_h, img_w = img.shape[:2]
 
         PANEL_ALPHA = 0.04  # Extra smooth camera motion
-        PANEL_DEAD_ZONE = 15.0
+        res_scale = float(img_h) / 720.0
+        PANEL_DEAD_ZONE = 15.0 * res_scale
 
         # Sort all available faces left-to-right across the studio frame
         sorted_faces = sorted(faces_fidx, key=lambda f: f.get("x", 0))

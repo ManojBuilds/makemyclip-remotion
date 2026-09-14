@@ -41,16 +41,19 @@ except ImportError:
 
 try:
     import torch
+    import torch.nn.functional as F
 except ImportError:
     torch = None
+    F = None
 
 from config import ai_secret, app, image, youtube_cookies_secret
 from errors import DownloadError, InvalidInputError, RenderError, VideoProbeError
 from models import ReframeRequest, BatchReframeRequest
 from r2_storage import assert_r2_env, upload_to_r2
-from utils import StageTimer, is_youtube_url, validate_url
+from utils import StageTimer, is_youtube_url, is_ytdlp_supported_url, validate_url
 from ytdlp_helper import (
     SEGMENT_DOWNLOAD_PAD_S,
+    download_media_video,
     download_youtube_video,
 )
 
@@ -132,29 +135,46 @@ def annotate_transcript_layout(transcript, frame_layout, crop_mode, fps):
     if not transcript:
         return transcript
 
-    for block in transcript:
-        if not isinstance(block, dict):
+    # Collect word references whether transcript is block-nested or flat word list
+    all_words = []
+    for item in transcript:
+        if not isinstance(item, dict):
             continue
-        words_list = block.get("words", [])
-        if not isinstance(words_list, list):
-            continue
-        for w in words_list:
-            if not isinstance(w, dict):
-                continue
-            w_start = w.get("start", 0.0)
-            fidx = int(w_start * fps)
-            
-            if crop_mode in ("split", "letterbox", "screencast", "presentation", "panel", "gaming", "passthrough"):
-                w["layout"] = crop_mode
-            elif crop_mode in ("reframe", "auto"):
-                if frame_layout and 0 <= fidx < len(frame_layout):
-                    val = frame_layout[fidx]
-                    w["layout"] = "reframe" if val == "single" else val
-                else:
-                    w["layout"] = "reframe"
-            else:
-                w["layout"] = "reframe"
+        words_nested = item.get("words")
+        if isinstance(words_nested, list):
+            for w in words_nested:
+                if isinstance(w, dict):
+                    all_words.append(w)
+        else:
+            all_words.append(item)
+
+    if not all_words:
+        return transcript
+
+    # Check if timestamps have an absolute video offset larger than frame_layout length
+    min_start = min((float(w.get("start", 0.0)) for w in all_words), default=0.0)
+    has_large_offset = (
+        min_start > 5.0
+        and frame_layout
+        and len(frame_layout) > 0
+        and int(min_start * fps) >= len(frame_layout)
+    )
+
+    for w in all_words:
+        w_start = float(w.get("start", 0.0))
+        norm_start = (w_start - min_start) if has_large_offset else w_start
+        fidx = int(norm_start * fps)
+
+        if frame_layout and 0 <= fidx < len(frame_layout):
+            val = frame_layout[fidx]
+            w["layout"] = "reframe" if val == "single" else val
+        elif crop_mode in ("split", "letterbox", "screencast", "presentation", "panel", "gaming", "passthrough"):
+            w["layout"] = crop_mode
+        else:
+            w["layout"] = "reframe"
+
     return transcript
+
 
 
 def get_autocast_context(device_type: str = "cuda", enabled: bool = True):
@@ -195,11 +215,8 @@ class AIReframe:
         self.ASD_MODEL.eval()
         self.ASD_MODEL.cuda()
 
-        # Initialize TalkNCE contrastive engine (94.1% mAP accuracy)
-        self.TALKNCE_MODEL = create_talknce_engine(
-            weight_path="/root/asd/weight/finetuning_TalkSet.model",
-            device="cuda" if torch.cuda.is_available() else "cpu",
-        )
+        # Use trained TalkNet ASD engine (loaded with finetuning_TalkSet.model)
+        self.TALKNCE_MODEL = None
 
         # 2. Probe NVENC once at startup — saves a try/except per render
         self.use_nvenc = self._probe_nvenc()
@@ -267,6 +284,116 @@ class AIReframe:
         """Analyze face tracks and determine the optimal layout mode globally."""
         return classify_layout(tracks, scores, width, height)
 
+    def reconstruct_tracks_for_clip(
+        self,
+        precomputed_analysis: dict,
+        start_time: float,
+        end_time: float,
+        fps: float,
+        actual_w: float,
+        actual_h: float,
+    ) -> tuple[list, list, list]:
+        """Reconstruct and slice tracks, scores, and scene_bounds from analysis.json for a specific clip."""
+        analysis_video_fps = precomputed_analysis.get("video_info", {}).get("fps", fps)
+        scale_factor = (fps / analysis_video_fps) if analysis_video_fps else 1.0
+
+        v_info = precomputed_analysis.get("video_info", {})
+        analysis_w = float(v_info.get("width") or 0)
+        analysis_h = float(v_info.get("height") or 0)
+
+        start_frame_global = int(round(start_time * fps))
+        end_frame_global = int(round(end_time * fps))
+        clip_frame_count = max(1, end_frame_global - start_frame_global)
+
+        clip_tracks = []
+        clip_scores = []
+
+        for tr in precomputed_analysis.get("tracks", []):
+            raw_frames = np.array(tr["frames"], dtype=float)
+            raw_bboxes = np.array(tr["bboxes"], dtype=float) if tr.get("bboxes") else np.array([])
+            px = np.array(tr["proc_track"]["x"], dtype=float)
+            py = np.array(tr["proc_track"]["y"], dtype=float)
+            ps = np.array(tr["proc_track"]["s"], dtype=float)
+
+            track_frames = np.round(raw_frames * scale_factor).astype(int)
+            mask = (track_frames >= start_frame_global) & (track_frames < end_frame_global)
+            if not np.any(mask):
+                continue
+
+            indices = np.where(mask)[0]
+            if len(indices) > 0:
+                sort_idx = np.argsort(track_frames[indices])
+                indices = indices[sort_idx]
+                _, uniq_idx = np.unique(track_frames[indices], return_index=True)
+                indices = indices[uniq_idx]
+
+            # Coordinate scaling
+            max_val = max(np.max(px) if len(px) > 0 else 0.0, np.max(py) if len(py) > 0 else 0.0)
+            is_normalized = (max_val > 0 and max_val <= 1.5)
+
+            if is_normalized:
+                px_scaled = px[indices] * actual_w
+                py_scaled = py[indices] * actual_h
+                ps_scaled = ps[indices] * actual_h
+                sub_bboxes = raw_bboxes[indices] if raw_bboxes.ndim == 2 and len(raw_bboxes) == len(raw_frames) else raw_bboxes
+                if sub_bboxes.ndim == 2 and sub_bboxes.shape[1] == 4:
+                    sub_bboxes[:, [0, 2]] *= actual_w
+                    sub_bboxes[:, [1, 3]] *= actual_h
+            elif analysis_w > 0 and analysis_h > 0 and (abs(analysis_w - actual_w) > 1 or abs(analysis_h - actual_h) > 1):
+                scale_x = actual_w / analysis_w
+                scale_y = actual_h / analysis_h
+                px_scaled = px[indices] * scale_x
+                py_scaled = py[indices] * scale_y
+                ps_scaled = ps[indices] * scale_y
+                sub_bboxes = raw_bboxes[indices] if raw_bboxes.ndim == 2 and len(raw_bboxes) == len(raw_frames) else raw_bboxes
+                if sub_bboxes.ndim == 2 and sub_bboxes.shape[1] == 4:
+                    sub_bboxes[:, [0, 2]] *= scale_x
+                    sub_bboxes[:, [1, 3]] *= scale_y
+            else:
+                px_scaled = px[indices]
+                py_scaled = py[indices]
+                ps_scaled = ps[indices]
+                sub_bboxes = raw_bboxes[indices] if raw_bboxes.ndim == 2 and len(raw_bboxes) == len(raw_frames) else raw_bboxes
+
+            local_frames = track_frames[indices] - start_frame_global
+            new_track = {
+                "track": {
+                    "frame": local_frames,
+                    "bbox": sub_bboxes,
+                },
+                "proc_track": {
+                    "x": px_scaled,
+                    "y": py_scaled,
+                    "s": ps_scaled,
+                },
+            }
+
+            raw_scores = np.array(tr["scores"], dtype=float)
+            if len(raw_scores) == len(raw_frames):
+                new_scores = raw_scores[indices]
+            elif len(raw_scores) >= len(indices):
+                new_scores = raw_scores[:len(indices)]
+            else:
+                new_scores = np.pad(raw_scores, (0, len(indices) - len(raw_scores)), mode="constant")
+
+            clip_tracks.append(new_track)
+            clip_scores.append(new_scores)
+
+        # Slice scene bounds
+        clip_scene_bounds = []
+        for sb in precomputed_analysis.get("scene_bounds", []):
+            sf = int(round(sb[0] * scale_factor))
+            ef = int(round(sb[1] * scale_factor))
+            adj_sf = max(0, sf - start_frame_global)
+            adj_ef = min(clip_frame_count, ef - start_frame_global)
+            if adj_ef > adj_sf:
+                clip_scene_bounds.append((adj_sf, adj_ef))
+
+        if not clip_scene_bounds:
+            clip_scene_bounds = [(0, clip_frame_count)]
+
+        return clip_tracks, clip_scores, clip_scene_bounds
+
 
     # ─────────────────────────────────────────────────────────────────
     #  Track + score (face tracking + ASD)
@@ -322,10 +449,7 @@ class AIReframe:
             self.ASD_MODEL.eval()
             if torch.cuda.is_available():
                 self.ASD_MODEL.cuda()
-            self.TALKNCE_MODEL = create_talknce_engine(
-                weight_path="/root/asd/weight/finetuning_TalkSet.model",
-                device="cuda" if torch.cuda.is_available() else "cpu",
-            )
+            self.TALKNCE_MODEL = None
 
         pyavi_path = os.path.join(work_dir, "pyavi")
         pyframes_path = os.path.join(work_dir, "pyframes")
@@ -896,7 +1020,7 @@ class AIReframe:
 
                 with torch.no_grad():
                     device = "cuda" if torch.cuda.is_available() else "cpu"
-                    use_amp = torch.cuda.is_available()
+                    use_amp = False
                     with get_autocast_context(device_type=device, enabled=use_amp):
                         inA_full = torch.FloatTensor(af).unsqueeze(0).to(device)
                         inV_full = torch.FloatTensor(vf_analysis).unsqueeze(0).to(device)
@@ -930,14 +1054,14 @@ class AIReframe:
                         eV = eV[:, :min_steps, :]
 
                         with torch.no_grad():
-                            if hasattr(self, "TALKNCE_MODEL") and self.TALKNCE_MODEL is not None:
-                                combined_prob = self.TALKNCE_MODEL.forward_contrastive_evaluation(eA, eV)
-                                scs.extend(combined_prob.cpu().numpy().tolist())
+                            out = self.ASD_MODEL.model.forward_audio_visual_backend(eA, eV)
+                            out_2d = out.squeeze(1) if out.dim() > 2 else out
+                            fc_out = self.ASD_MODEL.lossAV.FC(out_2d)
+                            if F is not None:
+                                probs = F.softmax(fc_out, dim=-1)[:, 1].detach().cpu().numpy().tolist()
                             else:
-                                out = self.ASD_MODEL.model.forward_audio_visual_backend(
-                                    eA, eV
-                                )
-                                scs.extend(self.ASD_MODEL.lossAV.forward(out, labels=None))
+                                probs = torch.nn.functional.softmax(fc_out, dim=-1)[:, 1].detach().cpu().numpy().tolist()
+                            scs.extend(probs)
 
                     if scs:
                         tr_scores.append(scs)
@@ -945,7 +1069,7 @@ class AIReframe:
                 if tr_scores:
                     min_len = min(len(s) for s in tr_scores)
                     scores_25hz = np.round(
-                        np.mean([s[:min_len] for s in tr_scores], axis=0), 1
+                        np.mean([s[:min_len] for s in tr_scores], axis=0), 2
                     ).astype(float)
                 else:
                     scores_25hz = np.zeros(0)
@@ -1345,15 +1469,38 @@ class AIReframe:
         # Define scene boundaries or fall back to single scene
         sb = scene_bounds or [(0, max_frames)]
 
-        # Pre-compute layout per frame based on scene cuts and active speaker presence.
-        # Differentiates between B-rolls / cutaways (letterbox full visual fit) and Speaker layouts (reframe / split / screencast).
+        # Pre-compute layout per frame based on OpusClip global layout consistency.
+        # This completely prevents "random" letterbox / layout whiplash mid-clip.
         frame_layout = ["single"] * max_frames
-        if crop_mode == "passthrough":
-            frame_layout = ["passthrough"] * max_frames
-        elif crop_mode == "letterbox":
-            frame_layout = ["letterbox"] * max_frames
-        else:
-            # Per-scene intelligent layout adaptation
+        if crop_mode in ("split", "letterbox", "panel", "gaming", "passthrough"):
+            mapped = crop_mode
+            frame_layout = [mapped] * max_frames
+        elif crop_mode in ("screencast", "presentation"):
+            # Adaptive Screencast Engine: Evaluate each scene cut individually.
+            # If a scene is a dominant solo talking head (e.g. host intro full-screen), use "single" (reframe).
+            # If a scene is screencast / corner webcam / slides, use "screencast".
+            for sf, ef in sb:
+                if sf >= max_frames:
+                    continue
+                ef = min(ef, max_frames)
+                if ef <= sf:
+                    continue
+                scene_tr, scene_sc = slice_tracks_and_scores(tracks, scores, sf, ef)
+                scene_layout = classify_layout(scene_tr, scene_sc, source_w, source_h)
+                if scene_layout == "reframe":
+                    mapped = "single"
+                elif scene_layout == "split":
+                    mapped = "split"
+                else:
+                    mapped = "screencast"
+                for f in range(sf, ef):
+                    frame_layout[f] = mapped
+            logger.info("Adaptive Screencast Engine: Evaluated %d scene cuts across clip", len(sb))
+        elif crop_mode == "auto":
+            # Per-scene intelligent layout adaptation (OpusClip style):
+            # Each genuine scene cut is evaluated individually. If a scene has 2 distinct simultaneous speakers,
+            # it uses split-screen; if solo/performer, it uses single vertical reframe.
+            # Never defaults to letterbox for human talking scenes.
             for sf, ef in sb:
                 if sf >= max_frames:
                     continue
@@ -1364,34 +1511,19 @@ class AIReframe:
                 scene_tr, scene_sc = slice_tracks_and_scores(tracks, scores, sf, ef)
                 scene_layout = classify_layout(scene_tr, scene_sc, source_w, source_h)
 
-                if scene_layout == "letterbox":
-                    # True B-roll / cutaway / screen capture without active speaker -> preserve full visual with clean letterbox
-                    mapped = "letterbox"
-                elif crop_mode == "split":
-                    mapped = "split" if scene_layout == "split" else "single"
-                elif crop_mode in ("screencast", "presentation"):
-                    if scene_layout == "reframe":
-                        mapped = "single"
-                    elif scene_layout == "split":
-                        mapped = "split"
-                    else:
-                        mapped = "screencast"
-                elif crop_mode == "auto":
-                    if scene_layout == "reframe":
-                        mapped = "single"
-                    elif scene_layout in ("split", "gaming", "screencast", "presentation", "panel"):
-                        mapped = scene_layout
-                    else:
-                        mapped = "single"
-                elif crop_mode == "reframe":
+                # Map layout: "reframe" -> "single", "split" -> "split", "gaming" -> "gaming", "screencast" -> "screencast"
+                if scene_layout == "reframe":
                     mapped = "single"
+                elif scene_layout in ("split", "gaming", "screencast", "presentation", "panel"):
+                    mapped = scene_layout
                 else:
-                    mapped = crop_mode if crop_mode in ("panel", "gaming") else "single"
-
+                    mapped = "single"
                 for f in range(sf, ef):
                     frame_layout[f] = mapped
-
-            logger.info("Adaptive Scene Engine: Evaluated %d scene cuts across clip for crop_mode=%s", len(sb), crop_mode)
+            logger.info("OpusClip Multi-Scene Engine: Evaluated %d scene cuts across clip", len(sb))
+        else:
+            # crop_mode is "reframe" - strictly single vertical panning layout
+            frame_layout = ["single"] * max_frames
 
         _letterbox_shadow = None
         _letterbox_mask = None
@@ -1422,7 +1554,24 @@ class AIReframe:
             "prev_target_cx": None,
             "scene_median_s": scene_median_s,
             "scene_starts": scene_starts,
+            "all_faces": faces,
         }
+
+        # Visual scene cut synchronization engine:
+        # Pre-planned scene layout transitions may have slight sub-second timestamp offsets
+        # due to GOP/keyframe seek differences. We detect actual visual cuts in real-time
+        # so layout switches snap to the exact visual boundary frame.
+        planned_transitions = []
+        for f in range(1, max_frames):
+            if frame_layout[f] != frame_layout[f - 1]:
+                planned_transitions.append((f, frame_layout[f]))
+
+        active_layout = frame_layout[0] if frame_layout else "single"
+        next_transition_idx = 0
+        prev_thumb = None
+        CUT_THRESHOLD = 20.0
+        LOOKAROUND_WINDOW = 20
+        actual_frame_layout = list(frame_layout)
 
         try:
             current_zoom = 1.10
@@ -1434,28 +1583,68 @@ class AIReframe:
                 else:
                     img = frames_mem[fidx]
 
+                # Real-time visual scene cut detection
+                is_visual_cut = False
+                if cv2 is not None and img is not None:
+                    try:
+                        thumb = cv2.cvtColor(cv2.resize(img, (80, 45)), cv2.COLOR_BGR2GRAY)
+                        if prev_thumb is not None:
+                            diff = float(np.mean(cv2.absdiff(thumb, prev_thumb)))
+                            if diff > CUT_THRESHOLD:
+                                is_visual_cut = True
+                        prev_thumb = thumb
+                    except Exception:
+                        pass
+
+                # Synchronize planned layout transitions to the exact visual cut frame
+                if next_transition_idx < len(planned_transitions):
+                    trans_f, target_layout = planned_transitions[next_transition_idx]
+                    if (is_visual_cut and trans_f - LOOKAROUND_WINDOW <= fidx <= trans_f) or (fidx >= trans_f):
+                        active_layout = target_layout
+                        next_transition_idx += 1
+                        logger.info(
+                            "Visual Cut Sync: Switched layout to %s at frame %d (planned %d, is_visual_cut=%s)",
+                            target_layout, fidx, trans_f, is_visual_cut,
+                        )
+
+                current_layout = active_layout
+                actual_frame_layout[fidx] = current_layout
+
                 # Telemetry: track face coverage, ASD scores, layout switches
                 if fidx < len(faces) and faces[fidx]:
                     frames_with_faces_count += 1
                     best_f = max(faces[fidx], key=lambda x: x.get("score", 0))
                     asd_scores_list.append(best_f.get("score", 0))
 
-                if fidx > 0 and frame_layout[fidx] != frame_layout[fidx - 1]:
-                    layout_switches_count += 1
-                    # Clean hard cut: reset camera holding state on layout structural change
-                    held_cx = None
+                is_scene_transition = (
+                    fidx > 0 and (
+                        fidx in scene_starts
+                        or is_visual_cut
+                        or actual_frame_layout[fidx] != actual_frame_layout[fidx - 1]
+                    )
+                )
+                if is_scene_transition:
+                    if actual_frame_layout[fidx] != actual_frame_layout[fidx - 1]:
+                        layout_switches_count += 1
+                    # Clean hard cut: reset camera holding state on scene transition or layout change
+                    current_track_id = None
                     held_speaker_x = None
                     held_speaker_y = None
+                    held_speaker_s = None
+                    frames_since_active = 0
+                    render_state["current_cx"] = None
+                    render_state["current_target_cx"] = None
+                    render_state["current_cy_reframe"] = None
+                    render_state["current_target_cy_reframe"] = None
 
                 scale = 1920 / img.shape[0]
 
-                # Dynamic layout dispatch from pre-computed per-scene classification
-                current_layout = frame_layout[fidx]
+                # Dynamic layout dispatch from real-time visual cut synchronization
                 use_multi_face_letterbox = current_layout == "letterbox"
                 use_split_screen = current_layout == "split"
 
                 # Reset split-screen tracking state on layout transitions to prevent stale camera positions
-                if use_split_screen and fidx > 0 and frame_layout[fidx - 1] != "split":
+                if use_split_screen and fidx > 0 and actual_frame_layout[fidx - 1] != "split":
                     render_state.pop("split_cx_top", None)
                     render_state.pop("split_cy_top", None)
                     render_state.pop("split_s_top", None)
@@ -1542,6 +1731,13 @@ class AIReframe:
                     held_speaker_zoom = 0.106
                     frames_since_active = 0
                     target_cx = int(held_speaker_x * scale)
+                elif best is not None:
+                    # In-scene face exists; lock framing onto candidate speaker
+                    held_speaker_x = best["x"]
+                    held_speaker_y = best["y"]
+                    held_speaker_s = best["s"]
+                    frames_since_active = 0
+                    target_cx = int(held_speaker_x * scale)
                 elif held_speaker_x is not None:
                     frames_since_active += 1
                     frames_on_current_speaker += 1
@@ -1592,7 +1788,7 @@ class AIReframe:
             "speaker_switches": speaker_switches_count,
             "camera_stability_score": round(max(0.0, 1.0 - min(1.0, float(np.mean(camera_displacements)) / 50.0)), 3) if camera_displacements else 1.0,
         }
-        return frame_layout, quality_metrics
+        return actual_frame_layout, quality_metrics
 
     # ─────────────────────────────────────────────────────────────────
     #  Public endpoint
@@ -1624,17 +1820,19 @@ class AIReframe:
             # starting from (start_time - padding). We compute the offset so all
             # downstream ffmpeg -ss values are relative to the downloaded file.
             segment_offset = 0.0  # seconds trimmed from the front of the source
-            if is_youtube_url(vurl):
+            if is_ytdlp_supported_url(vurl):
                 logger.info(
-                    "Detected YouTube URL, downloading via yt-dlp (quality=%s)...",
+                    "Detected supported video platform URL, downloading via yt-dlp (quality=%s)...",
                     req.quality,
                 )
-                vurl, segment_offset = download_youtube_video(
+                is_export = req.quality in ("export", "hd", "1080p", "full", "high")
+                max_height = None if is_export else 720
+                vurl, segment_offset = download_media_video(
                     vurl,
                     tmpdir,
                     start_time=req.start_time,
                     end_time=req.end_time,
-                    max_height=1080,
+                    max_height=max_height,
                     skip_probe=is_preview,  # Still skip format probe for preview to save ~4s
                 )
             elif vurl.startswith("http://") or vurl.startswith("https://"):
@@ -1690,8 +1888,42 @@ class AIReframe:
                 pass
 
             # 3. Track + score
-            logger.info("Extracting local audio segment for tracking and sync...")
             duration_secs = req.end_time - req.start_time
+
+            # If downloaded video starts earlier than clip (e.g. yt-dlp padded segment),
+            # pre-trim with FFmpeg so frame 0 is EXACTLY the clip start time.
+            # This guarantees 100% frame-level sync between video reader, face tracking, and audio.
+            if effective_start > 0.0:
+                clip_pretrim = os.path.join(tmpdir, "clip_pretrim.mp4")
+                pretrim_codec = (
+                    ["h264_nvenc", "-preset", "p1"]
+                    if self.use_nvenc
+                    else ["libx264", "-preset", "ultrafast", "-crf", "18"]
+                )
+                logger.info(
+                    "Pre-trimming video segment at %.2fs (duration %.2fs) -> %s",
+                    effective_start, duration_secs, clip_pretrim,
+                )
+                subprocess.run(
+                    [
+                        "ffmpeg", "-y",
+                        "-i", vurl,
+                        "-ss", str(effective_start),
+                        "-t", str(duration_secs),
+                        "-c:v", *pretrim_codec,
+                        "-c:a", "aac",
+                        "-b:a", "192k",
+                        "-avoid_negative_ts", "make_zero",
+                        clip_pretrim,
+                        "-loglevel", "warning",
+                    ],
+                    check=True,
+                    timeout=_FFMPEG_LONG_TIMEOUT_S,
+                )
+                vurl = clip_pretrim
+                effective_start = 0.0
+
+            logger.info("Extracting local audio segment for tracking and sync...")
             segment_audio = os.path.join(tmpdir, "segment_audio.aac")
             # Extract high-quality audio once
             subprocess.run(
@@ -1717,6 +1949,20 @@ class AIReframe:
                 timeout=_FFMPEG_LONG_TIMEOUT_S,
             )
 
+            # 2.5 Download pre-computed analysis.json if provided (Fast Path)
+            precomputed_analysis = None
+            if getattr(req, "analysis_url", None):
+                try:
+                    import requests
+                    logger.info("Fetching pre-computed analysis.json from %s...", req.analysis_url)
+                    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+                    resp = requests.get(req.analysis_url, headers=headers, timeout=30)
+                    if resp.status_code == 200:
+                        precomputed_analysis = resp.json()
+                        logger.info("Loaded pre-computed analysis with %d tracks", len(precomputed_analysis.get("tracks", [])))
+                except Exception as err:
+                    logger.warning("Failed to fetch pre-computed analysis.json: %s", err)
+
             # Normalization / auto-detection of crop_mode
             requested_crop_mode = req.crop_mode or "auto"
             if requested_crop_mode == "course":
@@ -1725,34 +1971,82 @@ class AIReframe:
             crop_mode = requested_crop_mode
             skip_tracking = False
             if crop_mode == "auto":
-                classification = classify_content(
-                    video_path=vurl,
-                    width=video_info.get("width", 1920) or 1920,
-                    height=video_info.get("height", 1080) or 1080,
-                    fps=fps,
-                    duration=duration_secs,
-                    start_time=effective_start,
+                global_recommended_mode = (
+                    precomputed_analysis.get("content_classification", {}).get("recommended_crop_mode")
+                    if precomputed_analysis else None
                 )
-                logger.info(
-                    "Content classification: type=%s, confidence=%.2f, recommended_mode=%s",
-                    classification.content_type,
-                    classification.confidence,
-                    classification.recommended_crop_mode,
-                )
-                if classification.recommended_crop_mode != "auto":
-                    crop_mode = classification.recommended_crop_mode
-                skip_tracking = classification.skip_face_tracking
+                if not global_recommended_mode:
+                    classification = classify_content(
+                        video_path=vurl,
+                        width=video_info.get("width", 1920) or 1920,
+                        height=video_info.get("height", 1080) or 1080,
+                        fps=fps,
+                        duration=duration_secs,
+                        start_time=effective_start,
+                    )
+                    logger.info(
+                        "Content classification: type=%s, confidence=%.2f, recommended_mode=%s",
+                        classification.content_type,
+                        classification.confidence,
+                        classification.recommended_crop_mode,
+                    )
+                    global_recommended_mode = classification.recommended_crop_mode
+                    if classification.skip_face_tracking and not precomputed_analysis:
+                        skip_tracking = True
+
+                # IMPORTANT: Screencast, presentation, and gaming are video-wide formats.
+                # Talking-head formats (reframe vs split) MUST NOT be locked globally;
+                # they MUST be evaluated shot-by-shot per scene cut in render_vertical()!
+                if global_recommended_mode in ("screencast", "presentation", "gaming"):
+                    crop_mode = global_recommended_mode
 
             logger.info(
                 "Running tracking/extraction with crop_mode=%s (skip_tracking=%s)...",
                 crop_mode,
                 skip_tracking,
             )
+            pya = os.path.join(tmpdir, "pyavi")
+            os.makedirs(pya, exist_ok=True)
+            pyf = None
+            audio = None
+            t1 = time.time()
+
             try:
-                if skip_tracking:
+                if precomputed_analysis and "tracks" in precomputed_analysis:
+                    logger.info("Reconstructing tracks from precomputed analysis.json (Fast Path)...")
+                    actual_w = float(video_info.get("width", 1920) or 1920)
+                    actual_h = float(video_info.get("height", 1080) or 1080)
+                    tracks, scores, scene_bounds = self.reconstruct_tracks_for_clip(
+                        precomputed_analysis=precomputed_analysis,
+                        start_time=req.start_time,
+                        end_time=req.end_time,
+                        fps=fps,
+                        actual_w=actual_w,
+                        actual_h=actual_h,
+                    )
+                    logger.info(
+                        "Reconstructed %d tracks and %d scene cuts from analysis.json in %.2fs",
+                        len(tracks), len(scene_bounds), time.time() - t0,
+                    )
+                    # Extract lightweight WAV for zoom punch analysis
+                    clip_wav_for_punch = os.path.join(tmpdir, "punch_audio.wav")
+                    try:
+                        subprocess.run(
+                            [
+                                "ffmpeg", "-y",
+                                "-i", vurl,
+                                "-vn", "-ac", "1", "-ar", "16000",
+                                "-acodec", "pcm_s16le",
+                                clip_wav_for_punch,
+                                "-loglevel", "panic",
+                            ],
+                            check=True, timeout=_FFMPEG_SHORT_TIMEOUT_S,
+                        )
+                        audio = clip_wav_for_punch
+                    except Exception:
+                        audio = None
+                elif skip_tracking:
                     tracks, scores = [], []
-                    audio, pyf, pya = None, None, os.path.join(tmpdir, "pyavi")
-                    os.makedirs(pya, exist_ok=True)
                     scene_bounds = [(0, max(1, int(round(duration_secs * fps))))]
                 else:
                     tracks, scores, audio, pyf, pya, scene_bounds = self.get_tracks_and_scores(
@@ -1795,13 +2089,23 @@ class AIReframe:
                     fps=fps,
                     crop_mode=crop_mode,
                     scene_bounds=scene_bounds,
-                    video_path=vurl,
-                    start_time_in_video=effective_start,
-                    audio_wav_path=audio,
                 )
-
                 if not os.path.exists(local_orig) or os.path.getsize(local_orig) == 0:
                     raise RenderError(f"Render failed: output video file not found or empty at {local_orig}")
+
+
+
+                # If crop_mode was "auto", resolve reported layout from what was actually rendered
+                if crop_mode == "auto" and frame_layout:
+                    from collections import Counter
+                    counts = Counter(frame_layout)
+                    dominant = counts.most_common(1)[0][0]
+                    reported_crop_mode = "reframe" if dominant == "single" else dominant
+                    logger.info(
+                        "Auto-detected layout resolved from rendered frames: %s (distribution: %s)",
+                        reported_crop_mode,
+                        dict(counts),
+                    )
             except Exception as reframer_err:
                 logger.warning(
                     "reframe_video AI tracking/rendering failed (%s). Falling back to letterbox mode...",
@@ -1932,7 +2236,7 @@ class AIReframe:
                         styling=req.styling,
                         show_watermark=req.show_watermark,
                         watermark=getattr(req, "watermark", None),
-                        crop_mode=crop_mode,
+                        crop_mode=reported_crop_mode,
                         quality=req.quality or "preview",
                         tmpdir=tmpdir,
                     )
@@ -2013,20 +2317,22 @@ class AIReframe:
             global_start = min(c.start_time for c in req.clips)
             global_end = max(c.end_time for c in req.clips)
 
-            if is_youtube_url(vurl):
+            if is_ytdlp_supported_url(vurl):
                 logger.info(
-                    "Downloading YouTube video ONCE for %d clips...", len(req.clips)
+                    "Downloading video via yt-dlp ONCE for %d clips...", len(req.clips)
                 )
-                vurl, segment_offset = download_youtube_video(
+                is_export = req.quality in ("export", "hd", "1080p", "full", "high")
+                max_height = None if is_export else 720
+                vurl, segment_offset = download_media_video(
                     vurl,
                     tmpdir,
                     start_time=global_start,
                     end_time=global_end,
-                    max_height=1080,
+                    max_height=max_height,
                     skip_probe=is_preview,
                 )
                 logger.info(
-                    "YouTube download complete (segment_offset=%.1fs)", segment_offset
+                    "Video download complete (segment_offset=%.1fs)", segment_offset
                 )
             elif vurl.startswith("http://") or vurl.startswith("https://"):
                 logger.info("Downloading remote video from %s...", vurl[:100])
@@ -2056,7 +2362,8 @@ class AIReframe:
                 try:
                     import requests
                     logger.info("Fetching pre-computed analysis.json from %s...", req.analysis_url)
-                    resp = requests.get(req.analysis_url, timeout=30)
+                    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+                    resp = requests.get(req.analysis_url, headers=headers, timeout=30)
                     if resp.status_code == 200:
                         precomputed_analysis = resp.json()
                         logger.info("Loaded pre-computed analysis with %d tracks", len(precomputed_analysis.get("tracks", [])))
@@ -2121,12 +2428,12 @@ class AIReframe:
                     [
                         "ffmpeg",
                         "-y",
+                        "-i",
+                        vurl,
                         "-ss",
                         str(effective_cluster_start),
                         "-t",
                         str(cluster_duration),
-                        "-i",
-                        vurl,
                         "-vn",
                         "-c:a",
                         "aac",
@@ -2378,8 +2685,11 @@ class AIReframe:
                                 precomputed_analysis.get("content_classification", {}).get("recommended_crop_mode")
                                 if precomputed_analysis else None
                             )
-                            if global_recommended_mode and global_recommended_mode not in ("auto", "reframe"):
+                            # Screencast and gaming are video-wide formats (e.g. coding tutorials, gameplay).
+                            # Talking-head formats (reframe, split, panel) MUST be classified per-clip from actual faces in that clip.
+                            if global_recommended_mode in ("screencast", "presentation", "gaming"):
                                 reported_crop_mode = global_recommended_mode
+                                crop_mode = global_recommended_mode
                             else:
                                 reported_crop_mode = self.classify_layout(
                                     clip_tracks,
@@ -2399,18 +2709,6 @@ class AIReframe:
                         if not clip_scene_bounds:
                             clip_scene_bounds = [(0, clip_frame_count)]
 
-                        # Pre-trim source to a clip-specific file using ffmpeg's
-                        # precise input seeking.  Both video frames and audio are
-                        # then extracted from THIS file at position 0, guaranteeing
-                        # perfect A/V sync.  The previous approach sought into the
-                        # full source independently for video (via ffmpegcv two-pass
-                        # seek) and audio (via ffmpeg single-pass seek), and the
-                        # two-pass seek landed later due to B-frame reordering and
-                        # keyframe alignment, causing video to lag audio.
-                        # Pre-trim source to a clip-specific file using ffmpeg's
-                        # precise input seeking. Both video frames and audio are
-                        # then extracted from THIS file at position 0, guaranteeing
-                        # perfect A/V sync.
                         clip_pretrim = os.path.join(
                             cluster_workdir, f"pretrim_{clip_id}.mp4"
                         )
@@ -2424,10 +2722,10 @@ class AIReframe:
                             [
                                 "ffmpeg",
                                 "-y",
-                                "-ss",
-                                str(abs_clip_start),
                                 "-i",
                                 vurl,
+                                "-ss",
+                                str(abs_clip_start),
                                 "-t",
                                 str(clip_duration),
                                 "-c:v",
@@ -2478,7 +2776,7 @@ class AIReframe:
                             local_orig,
                             duration=clip_duration,
                             fps=fps,
-                            crop_mode=reported_crop_mode,
+                            crop_mode=crop_mode,
                             scene_bounds=clip_scene_bounds,
                             video_path=clip_pretrim,
                             start_time_in_video=0.0,
@@ -2487,6 +2785,19 @@ class AIReframe:
 
                         if not os.path.exists(local_orig) or os.path.getsize(local_orig) == 0:
                             raise RenderError(f"Render failed: output video file not found or empty at {local_orig}")
+
+                        # If crop_mode was "auto", resolve reported layout from what was actually rendered
+                        if crop_mode == "auto" and frame_layout:
+                            from collections import Counter
+                            counts = Counter(frame_layout)
+                            dominant = counts.most_common(1)[0][0]
+                            reported_crop_mode = "reframe" if dominant == "single" else dominant
+                            logger.info(
+                                "Clip %s layout resolved from rendered frames: %s (distribution: %s)",
+                                clip_id,
+                                reported_crop_mode,
+                                dict(counts),
+                            )
 
                         if clip_req.transcript:
                             clip_req.transcript = annotate_transcript_layout(
@@ -2592,10 +2903,10 @@ class AIReframe:
                                     [
                                         "ffmpeg",
                                         "-y",
-                                        "-ss",
-                                        str(abs_clip_start),
                                         "-i",
                                         vurl,
+                                        "-ss",
+                                        str(abs_clip_start),
                                         "-t",
                                         str(clip_duration),
                                         "-c:v",
@@ -2787,7 +3098,7 @@ class AIReframe:
                                     styling=clip_req.styling,
                                     show_watermark=clip_req.show_watermark,
                                     watermark=getattr(clip_req, "watermark", None),
-                                    crop_mode=crop_mode,
+                                    crop_mode=reported_crop_mode,
                                     quality=req.quality or "preview",
                                     tmpdir=tmpdir,
                                 )

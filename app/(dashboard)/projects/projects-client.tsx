@@ -6,6 +6,7 @@ import { toast } from "sonner"
 import { useUpload } from "@/hooks/use-upload"
 import { UnifiedInput } from "@/components/video/unified-input"
 import { CaptionTemplate } from "@/components/video/caption_templates"
+import type { SingleClipOptions } from "@/components/video/confirm-dialog"
 import { Sparkles, Search, Video } from "lucide-react"
 import { ProjectListItem } from "@/components/dashboard/project-list-item"
 import { CookingOverlay } from "@/components/dashboard/cooking-overlay"
@@ -93,7 +94,8 @@ export function ProjectsClient({
     translateLanguage?: string,
     duration?: number | null,
     title?: string | null,
-    removeSilence?: boolean
+    removeSilence?: boolean,
+    singleClipOptions?: SingleClipOptions
   ): Promise<boolean> => {
     const normalizedUrl = normalizeVideoUrl(url)
     if (!normalizedUrl) return false
@@ -116,6 +118,10 @@ export function ProjectsClient({
           duration,
           title,
           removeSilence: removeSilence ?? true,
+          isSingleClip: singleClipOptions?.isSingleClip,
+          cropMode: singleClipOptions?.cropMode,
+          startTime: singleClipOptions?.startTime,
+          endTime: singleClipOptions?.endTime,
         }),
       })
       const data = await res.json()
@@ -147,7 +153,8 @@ export function ProjectsClient({
     styling?: CaptionTemplate,
     transcribeLanguage?: string,
     translateLanguage?: string,
-    removeSilence?: boolean
+    removeSilence?: boolean,
+    singleClipOptions?: SingleClipOptions
   ) => {
     // Pre-check credits on the frontend before starting the upload
     try {
@@ -176,7 +183,8 @@ export function ProjectsClient({
         undefined,
         transcribeLanguage,
         translateLanguage,
-        removeSilence ?? true
+        removeSilence ?? true,
+        singleClipOptions
       )
       if (projectId) router.push(`/projects/${projectId}`)
     } catch (err) {
@@ -193,11 +201,11 @@ export function ProjectsClient({
     project.title?.toLowerCase().includes(searchQuery.toLowerCase())
   )
   return (
-    <div className="mx-auto w-full max-w-4xl space-y-6 px-4 py-4 sm:space-y-8 sm:px-6 sm:py-8 md:space-y-10 md:py-12">
+    <div className="mx-auto w-full max-w-5xl space-y-8 px-4 py-4 sm:space-y-10 sm:px-6 sm:py-8 md:py-10">
 
       {/* 2. UPLOAD FLOW */}
       {!selectedFile && !isUploading && (
-        <div className="w-full animate-in duration-300 fade-in">
+        <div className="mx-auto w-full max-w-3xl animate-in duration-300 fade-in">
           <UnifiedInput
             onUrlSubmit={handleUrlSubmit}
             onFileSelect={handleFileSelect}
@@ -280,7 +288,7 @@ export function ProjectsClient({
                   </CardContent>
                 </Card>
               ) : (
-                <div className="space-y-3">
+                <div className="grid grid-cols-1 gap-3.5 sm:grid-cols-2 sm:gap-4 md:grid-cols-3 lg:grid-cols-4">
                   {filteredProjects.map((project) => (
                     <ProjectListItem key={project.id} project={project} />
                   ))}

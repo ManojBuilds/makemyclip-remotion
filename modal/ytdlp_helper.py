@@ -58,12 +58,116 @@ def remove_bgutil_pot_provider() -> None:
         logger.warning("Could not remove bgutil plugin: %s", e)
 
 
-def download_youtube_audio(vurl: str, tmpdir: str) -> str:
-    """Download YouTube audio as MP3 with multi-strategy fallback.
+def sanitize_source_url(vurl: str) -> tuple[str, str]:
+    """Normalize video URL and return (cleaned_url, platform_name)."""
+    import re
+    from utils import detect_video_source
+    cleaned = (vurl or "").strip()
+    platform = detect_video_source(cleaned)
+    if platform == "google_drive":
+        match = re.search(r"/file/d/([a-zA-Z0-9_-]+)", cleaned) or re.search(r"[?&]id=([a-zA-Z0-9_-]+)", cleaned)
+        if match:
+            file_id = match.group(1)
+            cleaned = f"https://drive.google.com/file/d/{file_id}/view"
+    return cleaned, platform
+
+
+def _check_and_raise_specific_error(error_msg: str, platform: str) -> None:
+    """Check stderr or exception messages for common user-actionable error states."""
+    err_lower = (error_msg or "").lower()
+    if "quotaexceeded" in err_lower or "download quota" in err_lower:
+        raise RuntimeError(
+            "Google Drive download quota exceeded for this file. Please make a copy to your own Google Drive or upload the video directly."
+        )
+    if (
+        "private video" in err_lower
+        or "requires authentication" in err_lower
+        or "this video is private" in err_lower
+        or "sign in" in err_lower
+        or "login" in err_lower
+    ):
+        if platform == "loom":
+            raise RuntimeError(
+                "This Loom video is private or restricted to a workspace. Please set sharing to 'Anyone with the link can view'."
+            )
+        elif platform == "vimeo":
+            raise RuntimeError(
+                "This Vimeo video is private, password-protected, or restricted from external downloads."
+            )
+        elif platform == "google_drive":
+            raise RuntimeError(
+                "This Google Drive file is private. Please set sharing permissions to 'Anyone with the link can view'."
+            )
+        elif platform == "twitch":
+            raise RuntimeError(
+                "This Twitch VOD/clip is subscriber-only or requires authentication."
+            )
+        raise RuntimeError(f"The {platform} video is private or requires authentication.")
+
+
+def download_media_audio(vurl: str, tmpdir: str) -> str:
+    """Download audio as MP3 for YouTube (multi-strategy) or other platforms (clean yt-dlp).
 
     Returns the absolute path to the downloaded audio file.
     Raises ``RuntimeError`` if every strategy fails.
     """
+    cleaned_url, platform = sanitize_source_url(vurl)
+
+    if platform != "youtube":
+        logger.info("Downloading audio via native yt-dlp extractor for '%s'...", platform)
+        for old_file in Path(tmpdir).glob("audio.*"):
+            try:
+                old_file.unlink()
+            except Exception:
+                pass
+
+        cmd = [
+            "yt-dlp",
+            "-f",
+            "bestaudio/best",
+            "-x",
+            "--audio-format",
+            "mp3",
+            "--audio-quality",
+            "0",
+            "-o",
+            f"{tmpdir}/audio.%(ext)s",
+            "--socket-timeout",
+            "60",
+            "--retries",
+            "3",
+            "--no-warnings",
+            cleaned_url,
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+        if result.returncode != 0:
+            stderr = result.stderr or ""
+            _check_and_raise_specific_error(stderr, platform)
+            raise RuntimeError(f"yt-dlp audio download failed for {platform}: {stderr[-500:]}")
+
+        mp3_files = list(Path(tmpdir).glob("audio*.mp3"))
+        if not mp3_files:
+            mp3_files = list(Path(tmpdir).glob("*.mp3"))
+        if not mp3_files:
+            mp3_files = [f for f in Path(tmpdir).glob("audio*") if f.is_file()]
+
+        if not mp3_files:
+            raise FileNotFoundError(f"No audio file found in {tmpdir} after {platform} download")
+
+        local_media = str(mp3_files[0])
+        file_size = os.path.getsize(local_media)
+        if file_size < 1000:
+            raise RuntimeError(f"Downloaded file too small ({file_size} bytes) — likely corrupted")
+
+        logger.info(
+            "✅ Native %s audio download succeeded: %s (%s bytes)",
+            platform,
+            local_media,
+            f"{file_size:,}",
+        )
+        return local_media
+
+    # --- YouTube download with multi-strategy fallback ---
     cookies_path = write_cookies_file(tmpdir)
     if cookies_path is None:
         logger.warning("No COOKIES_TXT env var — YouTube may block downloads")
@@ -95,6 +199,16 @@ def download_youtube_audio(vurl: str, tmpdir: str) -> str:
         base_args += ["--cookies", cookies_path]
 
     strategies = [
+        {
+            "name": "tv + web_safari + web client",
+            "extra_args": ["--extractor-args", "youtube:player_client=tv,web_safari,mweb,web"],
+            "timeout": 120,
+        },
+        {
+            "name": "android_vr + mweb + web client",
+            "extra_args": ["--extractor-args", "youtube:player_client=android_vr,mweb,web"],
+            "timeout": 120,
+        },
         {
             "name": "mweb client (no PO Token needed)",
             "extra_args": ["--extractor-args", "youtube:player_client=mweb"],
@@ -210,34 +324,37 @@ def download_youtube_audio(vurl: str, tmpdir: str) -> str:
     )
 
 
+download_youtube_audio = download_media_audio
+
+
 def download_youtube_video(
     vurl: str,
     tmpdir: str,
     start_time: float | None = None,
     end_time: float | None = None,
-    max_height: int = 1080,
+    max_height: int | None = 720,
     skip_probe: bool = False,
-) -> str:
-    """Download a YouTube video (with audio) as a remuxed MP4.
-
-    Uses the Python yt-dlp API because we need ``extract_info`` to surface format
-    diagnostics for debugging.  When *start_time* and *end_time* are supplied the
-    download is limited to that segment via ``--download-sections``, which uses
-    YouTube's HTTP-range support to fetch only the bytes needed (dramatically
-    cutting download time and bandwidth for short clips from long videos).
-
-    A 10-second padding is added on each side of the requested range so that
-    keyframe-accurate cuts never lose frames at the boundaries.
+) -> tuple[str, float]:
+    """Download a YouTube video (with audio) as a remuxed MP4 with multi-strategy fallback.
 
     Parameters
     ----------
-    max_height : int
-        Maximum video height to download (e.g. 720 for preview, 1080 for export).
+    max_height : int | None
+        Maximum video height to download (e.g. 720 for preview/default, 1080
+        for HD export). Pass ``None`` to fetch the highest resolution
+        actually available for this video — no height ceiling is applied to
+        format selection. In this mode a strategy that already reaches 1080p+
+        is accepted immediately (diminishing returns beyond that for most
+        content), but if the first strategy that succeeds tops out below
+        1080p, the remaining strategies are still tried in case a different
+        client exposes a higher-resolution stream (HLS-serving clients in
+        particular can structurally cap lower than DASH-serving ones).
     skip_probe : bool
         If True, skip the Phase 1 format probe to save ~4s.
 
-    Returns the absolute path to the downloaded file.
+    Returns (local_file_path, actual_segment_offset_seconds).
     """
+    import shutil
     import time as _t
 
     import yt_dlp
@@ -249,44 +366,50 @@ def download_youtube_video(
             "No COOKIES_TXT env var found — YouTube may throttle or block the download"
         )
 
-    # For high quality (720p/1080p), always download the full video natively using fast parallel DASH streams
-    # (Modal has multi-gigabit bandwidth so downloading the 1080p stream takes ~3s and avoids YouTube 360p range downgrade).
-    if max_height >= 720:
-        start_time = None
-        end_time = None
+    # NOTE: we used to force a full-video download whenever max_height >= 720,
+    # on the theory that Modal's bandwidth made a full download "free" (~3s)
+    # and that range-limited requests got silently downgraded to 360p. Neither
+    # holds up right now: under YouTube's current PO-Token/SABR restrictions,
+    # the client combo that actually reaches 720p+ (see strategies below) does
+    # so over HLS via a JS-challenge-solved web_safari session, not a raw DASH
+    # byte-range request — so segment-limited downloads don't trigger that old
+    # downgrade behavior. Forcing a full download here means fetching an
+    # entire 60-90 minute source video just to cut a 10s clip out of it, which
+    # is where most of the wall-clock time was going. We keep honoring
+    # start_time/end_time at every quality tier now; the existing
+    # resolution-check loop below still falls back to the next strategy (or
+    # the best available candidate) if a given client can't hit the target
+    # height, so quality is still protected.
 
-    # mweb client provides 1080p / 720p HD formats without requiring PO Tokens or falling back to format 18 (360p)
-    ydl_opts = {
-        "outtmpl": f"{tmpdir}/%(title)s.%(ext)s",
-        "cookiefile": cookies_path,
-        "quiet": False,
-        "no_warnings": False,
-        "verbose": True,
-        "socket_timeout": 30,
-        "retries": 3,
-        "fragment_retries": 3,
-        "concurrent_fragment_downloads": 8,
-        "js_runtimes": {"deno": {"path": "/usr/local/bin/deno"}},
-        "remote_components": ["ejs:github"],
-        "extractor_args": {
-            "youtube": {
-                "player_client": ["mweb", "web"],
-            }
-        },
-        "format": "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=1080]+bestaudio/bestvideo+bestaudio/best[height<=1080]/best",
-        "merge_output_format": "mp4",
-        "format_sort": ["res:1080", "res:720", "vcodec:h264", "ext:mp4:m4a"],
-        "postprocessors": [{"key": "FFmpegVideoRemuxer", "preferedformat": "mp4"}],
-    }
+    if max_height is None:
+        # "Highest available" mode: 4320 (8K) is just a sanity ceiling for the
+        # format filter below — no real YouTube upload exceeds it, so this is
+        # effectively "no cap" without needing a second code path for the
+        # format string. We do, however, want a higher bar than the normal
+        # 720p floor before we're willing to stop trying more strategies (see
+        # quality_floor below).
+        target_res = 4320
+        quality_floor = 1080
+    else:
+        target_res = (
+            max_height
+            if max_height in (360, 480, 720, 1080, 1440, 2160)
+            else max(144, min(max_height, 4320))
+        )
+        quality_floor = 720
+    quality_label = "highest available" if max_height is None else f"{target_res}p"
+    # Nudge yt-dlp toward HLS (m3u8) formats when resolutions tie: that's the
+    # protocol that's actually working under current YouTube restrictions, and
+    # unlike raw DASH byte-range formats it downloads discrete fragments, so
+    # it plays nicely with time-ranged (--download-sections style) downloads.
+    format_sort = [f"res:{target_res}", "res:720", "proto:m3u8_native", "vcodec:h264", "quality"]
 
     actual_segment_offset = 0.0
-
+    seg_start = 0.0
+    seg_end = 0.0
     if start_time is not None and end_time is not None:
         seg_start = max(0.0, start_time - SEGMENT_DOWNLOAD_PAD_S)
         seg_end = end_time + SEGMENT_DOWNLOAD_PAD_S
-        ydl_opts["download_ranges"] = download_range_func(
-            None, [(seg_start, seg_end)]
-        )
         actual_segment_offset = seg_start
         logger.info(
             "Segment download enabled: %.1f–%.1f (padded from %.1f–%.1f)",
@@ -296,56 +419,211 @@ def download_youtube_video(
             end_time,
         )
 
+    cleaned_url, platform = sanitize_source_url(vurl)
+
+    if platform == "youtube":
+        strategies = [
+            {
+                "name": "tv + web_safari + web",
+                "use_cookies": True,
+                "player_client": ["tv", "web_safari", "mweb", "web"],
+            },
+            {
+                "name": "android_vr + mweb + web (cookies)",
+                "use_cookies": True,
+                "player_client": ["android_vr", "mweb", "web"],
+            },
+            {
+                "name": "android_vr + android + ios + web (no cookies)",
+                "use_cookies": False,
+                "player_client": ["android_vr", "android", "ios", "web"],
+            },
+            {
+                "name": "default yt-dlp client",
+                "use_cookies": True,
+                "player_client": None,
+            },
+        ]
+    else:
+        strategies = [
+            {
+                "name": f"native {platform} extractor",
+                "use_cookies": False,
+                "player_client": None,
+            },
+        ]
+        skip_probe = True
+
+    last_error: Exception | None = None
+    fallback_candidate: tuple[str, int] | None = None  # (local_path, height)
+
     try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            # Phase 1: probe formats for diagnostics (non-fatal on failure)
-            # Skipped in preview mode — saves ~4s by avoiding a redundant API call.
-            if not skip_probe:
+        for strat_idx, strategy in enumerate(strategies):
+            sname = strategy["name"]
+            logger.info(
+                "Attempting video download strategy [%d/%d]: %s (target=%s)...",
+                strat_idx + 1,
+                len(strategies),
+                sname,
+                quality_label,
+            )
+
+            # Clean up leftover files from previous failed/low-res attempts
+            for old_file in Path(tmpdir).glob("*.mp4"):
                 try:
-                    probe_info = ydl.extract_info(vurl, download=False)
-                    _log_format_diagnostics(probe_info)
-                except Exception as probe_err:  # noqa: BLE001
-                    logger.warning(
-                        "Phase 1 probe failed (non-fatal, continuing): %s",
-                        probe_err,
+                    old_file.unlink()
+                except Exception:
+                    pass
+
+            use_cookie = cookies_path if (strategy["use_cookies"] and cookies_path) else None
+            ydl_opts = {
+                "outtmpl": f"{tmpdir}/%(title)s.%(ext)s",
+                "cookiefile": use_cookie,
+                "quiet": False,
+                "no_warnings": False,
+                "verbose": True,
+                "socket_timeout": 60,
+                "retries": 3,
+                "fragment_retries": 3,
+                "concurrent_fragment_downloads": 8,
+                "js_runtimes": {"deno": {"path": "/usr/local/bin/deno"}},
+                "remote_components": ["ejs:github"],
+                "format": f"bestvideo[height<={target_res}]+bestaudio/best[height<={target_res}]/bestvideo+bestaudio/best",
+                "merge_output_format": "mp4",
+                "format_sort": format_sort,
+                "postprocessors": [{"key": "FFmpegVideoRemuxer", "preferedformat": "mp4"}],
+            }
+
+            if strategy["player_client"]:
+                ydl_opts["extractor_args"] = {
+                    "youtube": {
+                        "player_client": strategy["player_client"],
+                    }
+                }
+
+            if start_time is not None and end_time is not None:
+                ydl_opts["download_ranges"] = download_range_func(
+                    None, [(seg_start, seg_end)]
+                )
+
+            try:
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    # Phase 1: probe formats for diagnostics (YouTube only)
+                    if not skip_probe and platform == "youtube":
+                        try:
+                            probe_info = ydl.extract_info(cleaned_url, download=False)
+                            _log_format_diagnostics(probe_info)
+                        except Exception as probe_err:  # noqa: BLE001
+                            logger.warning(
+                                "Phase 1 probe failed (non-fatal, continuing): %s",
+                                probe_err,
+                            )
+
+                    # Phase 2: actual download
+                    logger.info("── Phase 2: Downloading video with '%s' ──", sname)
+                    try:
+                        info = ydl.extract_info(cleaned_url, download=True)
+                    except Exception as dl_err:
+                        # For progressive downloads (e.g. Google Drive), if download_ranges fails, retry full download
+                        if "download_ranges" in ydl_opts:
+                            logger.warning(
+                                "Segment download failed for %s (%s). Retrying full download...",
+                                platform,
+                                dl_err,
+                            )
+                            ydl_opts_full = dict(ydl_opts)
+                            ydl_opts_full.pop("download_ranges", None)
+                            with yt_dlp.YoutubeDL(ydl_opts_full) as ydl_retry:
+                                info = ydl_retry.extract_info(cleaned_url, download=True)
+                                actual_segment_offset = 0.0
+                        else:
+                            raise dl_err
+
+                    local_path = ydl.prepare_filename(info)
+
+                    _log_download_result(info, local_path)
+
+                    # If the prepared filename is wrong, scan for the largest .mp4 in tmpdir
+                    if not os.path.exists(local_path):
+                        base_path = os.path.splitext(local_path)[0]
+                        if os.path.exists(base_path + ".mp4"):
+                            local_path = base_path + ".mp4"
+                        else:
+                            files = []
+                            for _attempt in range(3):
+                                files = [
+                                    f
+                                    for f in Path(tmpdir).glob("*.mp4")
+                                    if f.stat().st_size > 0
+                                ]
+                                if files:
+                                    break
+                                logger.info(
+                                    "yt-dlp fallback: no mp4 yet, retrying (%d/3)...",
+                                    _attempt + 1,
+                                )
+                                _t.sleep(1)
+                            if not files:
+                                raise RuntimeError(
+                                    f"[ytdlp] yt-dlp download failed with '{sname}': no usable mp4 found"
+                                )
+                            local_path = str(max(files, key=lambda f: f.stat().st_size))
+
+                    file_size = os.path.getsize(local_path)
+                    if file_size < 1000:
+                        raise RuntimeError(
+                            f"Downloaded file too small ({file_size} bytes) — likely corrupted"
+                        )
+
+                    dl_height = info.get("height") or 0
+                    logger.info(
+                        "✅ Strategy '%s' succeeded: %s (%s bytes, %sp)",
+                        sname,
+                        local_path,
+                        f"{file_size:,}",
+                        dl_height,
                     )
 
-            # Phase 2: actual download
-            logger.info("── Phase 2: Downloading video ──")
-            info = ydl.extract_info(vurl, download=True)
-            local_path = ydl.prepare_filename(info)
-
-            _log_download_result(info, local_path)
-
-            # If the prepared filename is wrong (e.g. remuxed extension changed),
-            # fall back to scanning for the largest .mp4 file in tmpdir.
-            if not os.path.exists(local_path):
-                base_path = os.path.splitext(local_path)[0]
-                if os.path.exists(base_path + ".mp4"):
-                    local_path = base_path + ".mp4"
-                else:
-                    files = []
-                    for _attempt in range(3):
-                        files = [
-                            f
-                            for f in Path(tmpdir).glob("*.mp4")
-                            if f.stat().st_size > 0
-                        ]
-                        if files:
-                            break
-                        logger.info(
-                            "yt-dlp fallback: no mp4 yet, retrying (%d/3)...",
-                            _attempt + 1,
+                    # Check if resolution meets requirement
+                    min_acceptable = min(target_res, quality_floor)
+                    if dl_height >= min_acceptable or strat_idx == len(strategies) - 1:
+                        return local_path, actual_segment_offset
+                    else:
+                        logger.warning(
+                            "Strategy '%s' downloaded %sp which is below target (%s, min %sp). Retrying with next strategy...",
+                            sname,
+                            dl_height,
+                            quality_label,
+                            min_acceptable,
                         )
-                        _t.sleep(1)
-                    if not files:
-                        raise RuntimeError(
-                            "[ytdlp] yt-dlp download failed: no usable mp4 found "
-                            "in tmpdir after retries"
-                        )
-                    local_path = str(max(files, key=lambda f: f.stat().st_size))
+                        # Save fallback candidate in tmpdir
+                        fallback_path = os.path.join(tmpdir, f"fallback_{strat_idx}_{dl_height}p.mp4")
+                        try:
+                            shutil.copy2(local_path, fallback_path)
+                            if fallback_candidate is None or dl_height > fallback_candidate[1]:
+                                fallback_candidate = (fallback_path, dl_height)
+                        except Exception:
+                            pass
+                        continue
 
-        return local_path, actual_segment_offset
+            except Exception as e:  # noqa: BLE001
+                _check_and_raise_specific_error(str(e), platform)
+                last_error = e
+                logger.warning("❌ Strategy '%s' failed: %s: %s", sname, type(e).__name__, e)
+                continue
+
+        if fallback_candidate is not None:
+            logger.warning(
+                "All strategies completed. Returning best available resolution %sp: %s",
+                fallback_candidate[1],
+                fallback_candidate[0],
+            )
+            return fallback_candidate[0], actual_segment_offset
+
+        raise RuntimeError(
+            f"All video download strategies failed for {platform}. Last error: {last_error}"
+        )
+
     finally:
         if cookies_path and os.path.exists(cookies_path):
             try:
@@ -421,10 +699,15 @@ def _log_download_result(info: dict, local_path: str) -> None:
     )
 
 
-def get_youtube_info(vurl: str) -> dict:
-    """Extract metadata (duration, fps, width, height) without downloading the video."""
+download_media_video = download_youtube_video
+
+
+def get_media_info(vurl: str) -> dict:
+    """Extract metadata (duration, fps, width, height, title) without downloading the video."""
     import tempfile
     import yt_dlp
+
+    cleaned_url, platform = sanitize_source_url(vurl)
 
     with tempfile.TemporaryDirectory() as tmpdir:
         cookies_path = write_cookies_file(tmpdir)
@@ -433,19 +716,30 @@ def get_youtube_info(vurl: str) -> dict:
             "no_warnings": True,
             "skip_download": True,
         }
-        if cookies_path:
-            ydl_opts["cookiefile"] = cookies_path
+        if platform == "youtube":
+            ydl_opts["extractor_args"] = {
+                "youtube": {
+                    "player_client": ["android_vr", "mweb", "web"],
+                }
+            }
+            if cookies_path:
+                ydl_opts["cookiefile"] = cookies_path
 
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(vurl, download=False)
+                info = ydl.extract_info(cleaned_url, download=False)
                 return {
                     "duration": info.get("duration"),
                     "fps": info.get("fps") or 25.0,
                     "width": info.get("width") or 1280,
                     "height": info.get("height") or 720,
-                    "title": info.get("title"),
+                    "title": info.get("title") or f"{platform.replace('_', ' ').title()} Video",
+                    "platform": platform,
                 }
         except Exception as e:
-            logger.warning("Failed to extract YouTube info via yt_dlp: %s", e)
-            return {"fps": 25.0, "width": 1280, "height": 720}
+            logger.warning("Failed to extract media info via yt_dlp for %s: %s", platform, e)
+            _check_and_raise_specific_error(str(e), platform)
+            return {"fps": 25.0, "width": 1280, "height": 720, "platform": platform}
+
+
+get_youtube_info = get_media_info

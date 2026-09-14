@@ -165,26 +165,57 @@ export const LANGUAGES = [
   { name: "Yoruba", code: "yo" },
 ]
 
-// Preview asset paths from R2 (3s loops on black background)
+// Cloudflare R2 public assets base URL
+const R2_PUBLIC_URL =
+  process.env.NEXT_PUBLIC_R2_PUBLIC_URL ||
+  "https://pub-dab84dec13074258806f788a00943c46.r2.dev"
+
+// Preview asset paths (rendered on demo portrait image at position 75%, hosted on Cloudflare R2)
 export const PREVIEW_IMAGES: Record<string, string> = {
-  podcast: "https://pub-dab84dec13074258806f788a00943c46.r2.dev/previews/black_template_podcast.webp",
-  cinema: "https://pub-dab84dec13074258806f788a00943c46.r2.dev/previews/black_template_cinema.webp",
-  creator: "https://pub-dab84dec13074258806f788a00943c46.r2.dev/previews/black_template_creator.webp",
-  focus: "https://pub-dab84dec13074258806f788a00943c46.r2.dev/previews/black_template_focus.webp",
-  badge: "https://pub-dab84dec13074258806f788a00943c46.r2.dev/previews/black_template_badge.webp",
-  impact: "https://pub-dab84dec13074258806f788a00943c46.r2.dev/previews/black_template_impact.webp",
-  neon: "https://pub-dab84dec13074258806f788a00943c46.r2.dev/previews/black_template_neon.webp",
-  luxury: "https://pub-dab84dec13074258806f788a00943c46.r2.dev/previews/black_template_luxury.webp",
+  aliabdlal: `${R2_PUBLIC_URL}/previews/caption_aliabdlal_v2.jpg`,
+  unbox: `${R2_PUBLIC_URL}/previews/caption_unbox_v2.jpg`,
+  billy: `${R2_PUBLIC_URL}/previews/caption_billy_v2.jpg`,
+  sara: `${R2_PUBLIC_URL}/previews/caption_sara_v2.jpg`,
+  fred: `${R2_PUBLIC_URL}/previews/caption_fred_v2.jpg`,
+  casey: `${R2_PUBLIC_URL}/previews/caption_casey_v2.jpg`,
+  tom: `${R2_PUBLIC_URL}/previews/caption_tom_v2.jpg`,
+  bobby: `${R2_PUBLIC_URL}/previews/caption_bobby_v2.jpg`,
+  podcast: `${R2_PUBLIC_URL}/previews/caption_podcast_v2.jpg`,
+  badge: `${R2_PUBLIC_URL}/previews/caption_badge_v2.jpg`,
+  luxury: `${R2_PUBLIC_URL}/previews/caption_luxury_v2.jpg`,
+  neon: `${R2_PUBLIC_URL}/previews/caption_neon_v2.jpg`,
+  focus: `${R2_PUBLIC_URL}/previews/caption_focus_v2.jpg`,
+  cinema: `${R2_PUBLIC_URL}/previews/caption_cinema_v2.jpg`,
+  creator: `${R2_PUBLIC_URL}/previews/caption_creator_v2.jpg`,
+  minimal: `${R2_PUBLIC_URL}/previews/caption_minimal_v2.jpg`,
+  sticker: `${R2_PUBLIC_URL}/previews/caption_sticker_v2.jpg`,
+  coral: `${R2_PUBLIC_URL}/previews/caption_coral_v2.jpg`,
+  growth: `${R2_PUBLIC_URL}/previews/caption_growth_v2.jpg`,
+  hormozi: `${R2_PUBLIC_URL}/previews/caption_hormozi_v2.jpg`,
+  impact: `${R2_PUBLIC_URL}/previews/caption_impact_v2.jpg`,
 }
 
-// Ultra-lightweight optimized MP4 preview paths from R2 (~8KB per clip)
+// Hover video preview paths (~100-120KB WebM loops hosted on Cloudflare R2)
 export const PREVIEW_VIDEOS: Record<string, string> = {
-  podcast: "https://pub-dab84dec13074258806f788a00943c46.r2.dev/previews/black_template_podcast.mp4",
-  cinema: "https://pub-dab84dec13074258806f788a00943c46.r2.dev/previews/black_template_cinema.mp4",
-  creator: "https://pub-dab84dec13074258806f788a00943c46.r2.dev/previews/black_template_creator.mp4",
-  focus: "https://pub-dab84dec13074258806f788a00943c46.r2.dev/previews/black_template_focus.mp4",
-  badge: "https://pub-dab84dec13074258806f788a00943c46.r2.dev/previews/black_template_badge.mp4",
-  impact: "https://pub-dab84dec13074258806f788a00943c46.r2.dev/previews/black_template_impact.mp4",
-  neon: "https://pub-dab84dec13074258806f788a00943c46.r2.dev/previews/black_template_neon.mp4",
-  luxury: "https://pub-dab84dec13074258806f788a00943c46.r2.dev/previews/black_template_luxury.mp4",
+  aliabdlal: `${R2_PUBLIC_URL}/previews/caption_aliabdlal_v2.webm`,
+  unbox: `${R2_PUBLIC_URL}/previews/caption_unbox_v2.webm`,
+  billy: `${R2_PUBLIC_URL}/previews/caption_billy_v2.webm`,
+  sara: `${R2_PUBLIC_URL}/previews/caption_sara_v2.webm`,
+  fred: `${R2_PUBLIC_URL}/previews/caption_fred_v2.webm`,
+  casey: `${R2_PUBLIC_URL}/previews/caption_casey_v2.webm`,
+  tom: `${R2_PUBLIC_URL}/previews/caption_tom_v2.webm`,
+  bobby: `${R2_PUBLIC_URL}/previews/caption_bobby_v2.webm`,
+  podcast: `${R2_PUBLIC_URL}/previews/caption_podcast_v2.webm`,
+  badge: `${R2_PUBLIC_URL}/previews/caption_badge_v2.webm`,
+  luxury: `${R2_PUBLIC_URL}/previews/caption_luxury_v2.webm`,
+  neon: `${R2_PUBLIC_URL}/previews/caption_neon_v2.webm`,
+  focus: `${R2_PUBLIC_URL}/previews/caption_focus_v2.webm`,
+  cinema: `${R2_PUBLIC_URL}/previews/caption_cinema_v2.webm`,
+  creator: `${R2_PUBLIC_URL}/previews/caption_creator_v2.webm`,
+  minimal: `${R2_PUBLIC_URL}/previews/caption_minimal_v2.webm`,
+  sticker: `${R2_PUBLIC_URL}/previews/caption_sticker_v2.webm`,
+  coral: `${R2_PUBLIC_URL}/previews/caption_coral_v2.webm`,
+  growth: `${R2_PUBLIC_URL}/previews/caption_growth_v2.webm`,
+  hormozi: `${R2_PUBLIC_URL}/previews/caption_hormozi_v2.webm`,
+  impact: `${R2_PUBLIC_URL}/previews/caption_impact_v2.webm`,
 }

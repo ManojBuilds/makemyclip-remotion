@@ -15,7 +15,9 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass
-from typing import Callable, Iterable
+from typing import Callable, Iterable, Optional
+
+import pysubs2
 
 from colors import ass_color_override, hex_to_ass_color
 from fonts import resolve_font_name
@@ -32,17 +34,35 @@ logger = logging.getLogger("makemyclip.ass_builder")
 # Curated multi-speaker highlight palettes (Speaker 1, Speaker 2, Speaker 3, Speaker 4)
 SPEAKER_HIGHLIGHT_PALETTES: dict[str, list[str]] = {
     "impact": ["#FFE500", "#00F0FF", "#FF007A", "#34D399"],
+    "hormozi": ["#FFE600", "#00FF66", "#FF1E56", "#00F0FF"],
+    "growth": ["#00FF66", "#FFE600", "#00F0FF", "#FF1E56"],
+    "coral": ["#FF1E56", "#FFE600", "#00FF66", "#00F0FF"],
+    "sticker": ["#FFE600", "#00FF66", "#FF1E56", "#00F0FF"],
+    "minimal": ["#FFFFFF", "#00F0FF", "#FFE600", "#38BDF8"],
     "creator": ["#00F0FF", "#FFE500", "#FF007A", "#A855F7"],
     "cinema": ["#FFB800", "#00F0FF", "#F43F5E", "#38BDF8"],
     "focus": ["#0A0A0A", "#0A0A0A", "#0A0A0A", "#0A0A0A"],
     "badge": ["#0A0A0A", "#1E3A8A", "#831843", "#064E3B"],
     "neon": ["#FF007A", "#00F0FF", "#FFE500", "#A855F7"],
     "luxury": ["#FFD700", "#00F0FF", "#F43F5E", "#38BDF8"],
+    "podcast": ["#38BDF8", "#FBBF24", "#34D399", "#F472B6"],
+    "bobby": ["#fcbb42", "#00FF66", "#FF1E56", "#00F0FF"],
+
+    "tom": ["#FFFFFF", "#FFFFFF", "#FFFFFF", "#FFFFFF"],
+    "casey": ["#FFFFFF", "#FFFFFF", "#FFFFFF", "#FFFFFF"],
+    "fred": ["#28ae67", "#FFE600", "#FF1E56", "#00F0FF"],
+    "sara": ["#FFFFFF", "#FFFFFF", "#FFFFFF", "#FFFFFF"],
+    "billy": ["#FFFFFF", "#FFFFFF", "#FFFFFF", "#FFFFFF"],
+    "unbox": ["#FFFFFF", "#FFFFFF", "#FFFFFF", "#FFFFFF"],
+    "aliabdlal": ["#f06c3f", "#3B82F6", "#10B981", "#8B5CF6"],
 }
 
 SPEAKER_PILL_PALETTES: dict[str, list[str]] = {
     "focus": ["#FFE600", "#00F0FF", "#FF007A", "#34D399"],
     "badge": ["#FFFFFF", "#F3F4F6", "#EFF6FF", "#FDF2F8"],
+    "tom": ["#DC2626", "#2563EB", "#7C3AED", "#059669"],
+    "sara": ["#FF5722", "#0284C7", "#7C3AED", "#10B981"],
+    "unbox": ["#D946EF", "#06B6D4", "#F59E0B", "#10B981"],
 }
 
 # ── Canvas geometry ──────────────────────────────────────────────────────────
@@ -51,10 +71,10 @@ SCALE_FACTOR = V_HEIGHT / 1920.0
 CX, CY = V_WIDTH // 2, V_HEIGHT // 2
 _MAX_SAFE_WIDTH = 840.0
 
-# ── Shadow tags ──────────────────────────────────────────────────────────────
-_SHADOW_TAG = r"\xshad3\yshad3\blur0\4a&H20&"
+# ── Shadow tags (Studio diffused ambient shadows) ───────────────────────────
+_SHADOW_TAG = r"\xshad0\yshad3.5\blur6\4a&H35&"
 _NO_SHADOW_TAG = r"\xshad0\yshad0\blur0"
-_NEON_SHADOW_TAG = r"\xshad0\yshad0\blur10\4a&H10&"
+_NEON_SHADOW_TAG = r"\xshad0\yshad0\blur4\4a&H00&"
 
 # ── Default word-effect timing (milliseconds) ────────────────────────────────
 _WORD_ANIM_MS = 130
@@ -79,64 +99,35 @@ class WordCtx:
     default_fsp: float = 0.0
 
 
-# ── Sentence entrance animations (one per preset) ────────────────────────────
-def impact_animation(fs: int, duration: int = 150) -> str:
-    """Whole sentence squashes in: 90% → 106% → 100%."""
-    mid = int(duration * 0.6)
-    return (
-        rf"\fscx90\fscy90"
-        rf"\t(0,{mid},\fscx106\fscy106)"
-        rf"\t({mid},{duration},\fscx100\fscy100)"
-    )
-
-
-def creator_animation(fs: int, duration: int = 150) -> str:
-    """No sentence-level pop — motion lives on the active word."""
+# ── Sentence entrance animations (all static & stable for zero flicker) ──────
+def stable_animation(fs: int, duration: int = 0) -> str:
+    """Zero jitter / zero squash / zero alpha fade — text is immediately solid & crisp."""
     return ""
-
-
-def cinema_animation(fs: int, duration: int = 200) -> str:
-    """Opacity-only fade in (FF → 00). No scaling."""
-    return rf"\alpha&HFF&\t(0,{duration},\alpha&H00&)"
-
-
-def focus_animation(fs: int, duration: int = 150) -> str:
-    """No sentence-level motion — the pill animates per active word."""
-    return ""
-
-
-def neon_animation(fs: int, duration: int = 150) -> str:
-    """No sentence-level motion — the glow pulses per active word."""
-    return ""
-
-
-def luxury_animation(fs: int, duration: int = 220) -> str:
-    """Luxury Shimmer & Rise entrance: Opacity fade + subtle letter tracking expand + upward drift."""
-    return (
-        rf"\alpha&HFF&\fsp6.0"
-        rf"\t(0,{duration},\alpha&H00&\fsp1.5)"
-    )
-
-
-def badge_animation(fs: int, duration: int = 150) -> str:
-    """Clean badge fade-in."""
-    return rf"\alpha&HFF&\t(0,{duration},\alpha&H00&)"
-
-
-def podcast_animation(fs: int, duration: int = 140) -> str:
-    """Smooth, clean fade entrance for conversational podcast captions."""
-    return rf"\alpha&HFF&\t(0,{duration},\alpha&H00&)"
 
 
 ANIMATION_BUILDERS: dict[str, Callable[..., str]] = {
-    "impact": impact_animation,
-    "creator": creator_animation,
-    "cinema": cinema_animation,
-    "focus": focus_animation,
-    "badge": badge_animation,
-    "neon": neon_animation,
-    "luxury": luxury_animation,
-    "podcast": podcast_animation,
+    "impact": stable_animation,
+    "hormozi": stable_animation,
+    "growth": stable_animation,
+    "coral": stable_animation,
+    "sticker": stable_animation,
+    "minimal": stable_animation,
+    "creator": stable_animation,
+    "cinema": stable_animation,
+    "focus": stable_animation,
+    "badge": stable_animation,
+    "neon": stable_animation,
+    "luxury": stable_animation,
+    "podcast": stable_animation,
+    # Klap presets
+    "bobby": stable_animation,
+    "tom": stable_animation,
+    "casey": stable_animation,
+    "fred": stable_animation,
+    "sara": stable_animation,
+    "billy": stable_animation,
+    "unbox": stable_animation,
+    "aliabdlal": stable_animation,
 }
 
 
@@ -151,148 +142,97 @@ def _wrap(active_prefix: str, ctx: WordCtx, active_suffix: str) -> str:
 
 
 def impact_word_effect(ctx: WordCtx) -> str:
-    """Punchy squash/stretch overshoot to 122% then settle to 112%."""
-    mid = int(_WORD_ANIM_MS * 0.55)
-    prefix = (
-        rf"\fscx100\fscy100"
-        rf"\t(0,{mid},\fscx122\fscy122)"
-        rf"\t({mid},{_WORD_ANIM_MS},\fscx112\fscy112)"
+    """Snappy micro-pop for high-energy short-form video hooks."""
+    return (
+        rf"{{\fscx92\fscy92\t(0,65,\fscx112\fscy112)\t(65,130,\fscx100\fscy100){ctx.highlight_tag}}}"
+        rf"{ctx.word}"
+        rf"{{\fscx100\fscy100{ctx.normal_tag}}}"
     )
-    suffix = r"\fscx100\fscy100"
-    return _wrap(prefix, ctx, suffix)
+
+
+def clean_impact_word_effect(ctx: WordCtx) -> str:
+    """Clean canary-yellow active word emphasis without bounce or jitter."""
+    return rf"{{{ctx.highlight_tag}}}{ctx.word}{{{ctx.normal_tag}}}"
 
 
 def creator_word_effect(ctx: WordCtx) -> str:
-    """Smooth cyan highlight reveal with scale pop (108% -> 104%)."""
-    mid = int(140 * 0.5)
-    prefix = (
-        rf"\fscx100\fscy100\alpha&H60&"
-        rf"\t(0,{mid},\fscx108\fscy108\alpha&H00&)"
-        rf"\t({mid},140,\fscx104\fscy104)"
-    )
-    suffix = r"\fscx100\fscy100\alpha&H00&"
-    return _wrap(prefix, ctx, suffix)
+    """Smooth cyan highlight reveal with zero jitter and clean locked baseline."""
+    return rf"{{{ctx.highlight_tag}}}{ctx.word}{{{ctx.normal_tag}}}"
 
 
 def cinema_word_effect(ctx: WordCtx) -> str:
-    """Opacity-only reveal of the soft highlight color. No scaling."""
-    prefix = rf"\alpha&H50&\t(0,120,\alpha&H00&)"
-    suffix = r"\alpha&H00&"
-    return _wrap(prefix, ctx, suffix)
+    """Clean reveal of the soft highlight color with zero flashing."""
+    return rf"{{{ctx.highlight_tag}}}{ctx.word}{{{ctx.normal_tag}}}"
 
 
 def focus_word_effect(ctx: WordCtx) -> str:
-    """Draw a growing rounded pill behind the active word (Apple-keynote feel).
-
-    Implemented with separate ``\\xbord`` (horizontal padding) and ``\\ybord`` (vertical padding)
-    along with ``\\blur`` to soften corners, animating the scale 94% -> 106% -> 100%.
-    """
-    pill = hex_to_ass_color(ctx.pill_color_hex)
-    active = hex_to_ass_color(ctx.highlight_color_hex)
-    normal = hex_to_ass_color(ctx.normal_color_hex)
-    pill_xbord = max(1, int(24 * SCALE_FACTOR))
-    pill_ybord = max(1, int(14 * SCALE_FACTOR))
-    mid = int(140 * 0.55)
-    prefix = (
-        rf"\c&H{active.b:02X}{active.g:02X}{active.r:02X}&"
-        rf"\3c&H{pill.b:02X}{pill.g:02X}{pill.r:02X}&\xbord{pill_xbord}\ybord{pill_ybord}\blur3\shad0"
-        rf"\fscx94\fscy94"
-        rf"\t(0,{mid},\fscx106\fscy106)"
-        rf"\t({mid},140,\fscx100\fscy100)"
-    )
-    suffix = (
-        rf"\c&H{normal.b:02X}{normal.g:02X}{normal.r:02X}&"
-        rf"\3c&H{ctx.stroke_c.b:02X}{ctx.stroke_c.g:02X}{ctx.stroke_c.r:02X}&"
-        rf"\xbord{ctx.stroke_bord}\ybord{ctx.stroke_bord}\blur0\fscx100\fscy100"
-    )
-    return rf"{{{prefix}}}{ctx.word}{{{suffix}}}"
+    """High-contrast Keynote active word highlight with clean contrast and zero horizontal displacement."""
+    return rf"{{{ctx.highlight_tag}}}{ctx.word}{{{ctx.normal_tag}}}"
 
 
 def neon_word_effect(ctx: WordCtx) -> str:
-    """Pulsing pink neon glow with a white text core, vibrant thick border/shadow glow, and scale pop."""
+    """Synthwave dual-tone neon: active word surges with white core and intense hot-magenta bloom."""
     glow = hex_to_ass_color(ctx.highlight_color_hex)
-    mid = int(150 * 0.5)
-    
-    xbord_init = max(2.0, 4.0 * SCALE_FACTOR)
-    ybord_init = max(2.0, 4.0 * SCALE_FACTOR)
-    blur_init = int(10 * SCALE_FACTOR)
-    
-    xbord_mid = max(3.0, 6.0 * SCALE_FACTOR)
-    ybord_mid = max(3.0, 6.0 * SCALE_FACTOR)
-    blur_mid = int(14 * SCALE_FACTOR)
-    
-    xbord_settle = max(2.0, 4.5 * SCALE_FACTOR)
-    ybord_settle = max(2.0, 4.5 * SCALE_FACTOR)
-    blur_settle = int(10 * SCALE_FACTOR)
-
+    normal_c = hex_to_ass_color(ctx.normal_color_hex)
     prefix = (
         rf"\c&HFFFFFF&"
         rf"\3c&H{glow.b:02X}{glow.g:02X}{glow.r:02X}&"
         rf"\4c&H{glow.b:02X}{glow.g:02X}{glow.r:02X}&"
-        rf"\4a&H00&"
-        rf"\xbord{xbord_init:.1f}\ybord{ybord_init:.1f}\blur{blur_init}"
-        rf"\fscx100\fscy100"
-        rf"\t(0,{mid},\xbord{xbord_mid:.1f}\ybord{ybord_mid:.1f}\blur{blur_mid}\fscx112\fscy112)"
-        rf"\t({mid},150,\xbord{xbord_settle:.1f}\ybord{ybord_settle:.1f}\blur{blur_settle}\fscx106\fscy106)"
+        rf"\bord6\xshad0\yshad0\fscx114\fscy114\blur16\t(0,120,\fscx106\fscy106\blur10)"
     )
-    
-    normal_c = hex_to_ass_color(ctx.normal_color_hex)
     suffix = (
         rf"\c&H{normal_c.b:02X}{normal_c.g:02X}{normal_c.r:02X}&"
         rf"\3c&H{ctx.stroke_c.b:02X}{ctx.stroke_c.g:02X}{ctx.stroke_c.r:02X}&"
-        rf"\4c&H{ctx.stroke_c.b:02X}{ctx.stroke_c.g:02X}{ctx.stroke_c.r:02X}&"
-        rf"\4a&H20&"
-        rf"\xbord{ctx.stroke_bord}\ybord{ctx.stroke_bord}\blur3\fscx100\fscy100"
+        rf"\4c&H{normal_c.b:02X}{normal_c.g:02X}{normal_c.r:02X}&"
+        rf"\bord3\xshad0\yshad0\blur4\fscx100\fscy100"
     )
     return rf"{{{prefix}}}{ctx.word}{{{suffix}}}"
 
 
+def depth_tilt_word_effect(ctx: WordCtx) -> str:
+    """3D depth tilt along X-axis complementing 3D extrusion text."""
+    return (
+        rf"{{\frx55\fscy40\t(0,130,\frx0\fscy100){ctx.highlight_tag}}}"
+        rf"{ctx.word}"
+        rf"{{\frx0\fscy100{ctx.normal_tag}}}"
+    )
+
+
 def luxury_word_effect(ctx: WordCtx) -> str:
-    """Luxury Shimmer & Rise active word effect: sharp metallic gold, tracking expansion, crisp dark border, scale pop (106% -> 102%)."""
-    dur = 160
-    mid = int(dur * 0.5)
+    """Luxury metallic gold highlight with zero jitter."""
     gold = hex_to_ass_color(ctx.highlight_color_hex)
-    
-    prefix = (
-        rf"\c&H{gold.b:02X}{gold.g:02X}{gold.r:02X}&"
-        rf"\3c&H{ctx.stroke_c.b:02X}{ctx.stroke_c.g:02X}{ctx.stroke_c.r:02X}&"
-        rf"\blur0\fscx100\fscy100\fsp{ctx.default_fsp:.1f}"
-        rf"\t(0,{mid},\fscx106\fscy106\fsp{ctx.default_fsp + 3.0:.1f})"
-        rf"\t({mid},{dur},\fscx102\fscy102\fsp{ctx.default_fsp + 1.5:.1f})"
-    )
-    
+    prefix = rf"\c&H{gold.b:02X}{gold.g:02X}{gold.r:02X}&"
     normal_c = hex_to_ass_color(ctx.normal_color_hex)
-    suffix = (
-        rf"\c&H{normal_c.b:02X}{normal_c.g:02X}{normal_c.r:02X}&"
-        rf"\3c&H{ctx.stroke_c.b:02X}{ctx.stroke_c.g:02X}{ctx.stroke_c.r:02X}&"
-        rf"\blur0\fscx100\fscy100\fsp{ctx.default_fsp:.1f}"
-    )
+    suffix = rf"\c&H{normal_c.b:02X}{normal_c.g:02X}{normal_c.r:02X}&"
     return rf"{{{prefix}}}{ctx.word}{{{suffix}}}"
 
 
 def badge_word_effect(ctx: WordCtx) -> str:
-    """Clean badge active word: high-contrast bold black against dimmed muted gray inactive words."""
+    """Clean badge active word: high-contrast bold white against dimmed muted gray inactive words."""
     active = hex_to_ass_color(ctx.highlight_color_hex)
     normal = hex_to_ass_color(ctx.normal_color_hex)
-    prefix = rf"\c&H{active.b:02X}{active.g:02X}{active.r:02X}&\alpha&H00&"
-    suffix = rf"\c&H{normal.b:02X}{normal.g:02X}{normal.r:02X}&\alpha&H00&"
-    return _wrap(prefix, ctx, suffix)
+    prefix = rf"\c&H{active.b:02X}{active.g:02X}{active.r:02X}&"
+    suffix = rf"\c&H{normal.b:02X}{normal.g:02X}{normal.r:02X}&"
+    return rf"{{{prefix}}}{ctx.word}{{{suffix}}}"
 
 
 def podcast_word_effect(ctx: WordCtx) -> str:
-    """Subtle punchy pop on active word (108% -> 100%) with crisp solid black border."""
-    mid = int(140 * 0.5)
-    prefix = (
-        rf"\fscx100\fscy100"
-        rf"\t(0,{mid},\fscx108\fscy108)"
-        rf"\t({mid},140,\fscx100\fscy100)"
-    )
-    suffix = r"\fscx100\fscy100"
-    return _wrap(prefix, ctx, suffix)
+    """Conversational podcast word highlight with clean highlight transition and zero horizontal jitter."""
+    return rf"{{{ctx.highlight_tag}}}{ctx.word}{{{ctx.normal_tag}}}"
+
+
+def aliabdlal_word_effect(ctx: WordCtx) -> str:
+    """Ali Abdaal signature: Highlighter sweep (Dynamic Karaoke Wipe)."""
+    return rf"{{\kf{max(1, int(len(ctx.word) * 8))}}}{ctx.word}"
 
 
 WORD_EFFECTS: dict[str, Callable[[WordCtx], str]] = {
-    "impact": impact_word_effect,
+    "impact": clean_impact_word_effect,
+    "hormozi": impact_word_effect,
+    "growth": impact_word_effect,
+    "coral": impact_word_effect,
+    "sticker": impact_word_effect,
+    "minimal": badge_word_effect,
     "creator": creator_word_effect,
     "cinema": cinema_word_effect,
     "focus": focus_word_effect,
@@ -300,10 +240,20 @@ WORD_EFFECTS: dict[str, Callable[[WordCtx], str]] = {
     "neon": neon_word_effect,
     "luxury": luxury_word_effect,
     "podcast": podcast_word_effect,
+    # Klap presets
+    "bobby": impact_word_effect,
+    "tom": impact_word_effect,
+    "casey": depth_tilt_word_effect,
+    "fred": impact_word_effect,
+    "sara": focus_word_effect,
+    "billy": cinema_word_effect,
+    "unbox": depth_tilt_word_effect,
+    "aliabdlal": aliabdlal_word_effect,
 }
 
-# Presets that anchor to a bottom baseline (all five use bottom-center).
+# Presets that anchor to a bottom baseline (all use bottom-center).
 _BOTTOM_ANCHOR = frozenset(ANIMATION_BUILDERS.keys())
+
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -333,12 +283,20 @@ def _flatten_transcript(transcript) -> list[dict]:
         else:
             item_dict = item
         nested = item_dict.get("words")
-        (
-            raw_items.extend(nested)
-            if isinstance(nested, list)
-            else raw_items.append(item_dict)
-        )
+        if isinstance(nested, list):
+            block_layout = item_dict.get("layout")
+            for w in nested:
+                if isinstance(w, dict):
+                    w_copy = dict(w)
+                    if block_layout and not w_copy.get("layout"):
+                        w_copy["layout"] = block_layout
+                    raw_items.append(w_copy)
+                else:
+                    raw_items.append(w)
+        else:
+            raw_items.append(item_dict)
     return raw_items
+
 
 
 def _tpl(template: dict, snake: str, camel: str):
@@ -365,7 +323,7 @@ def _resolve_overrides(template: dict) -> dict:
     }
 
 
-def _build_style(base: dict, overrides: dict, template: dict):
+def _build_style(base: dict, overrides: dict, template: dict, preset: str = ""):
     import pysubs2
 
     fontname, fontsize = base["fontname"], base["fontsize"]
@@ -404,7 +362,7 @@ def _build_style(base: dict, overrides: dict, template: dict):
     style.fontname = resolve_font_name(fontname)
     style.fontsize = int(fontsize * SCALE_FACTOR)
     style.bold = bool(base.get("bold", True))
-    style.italic = overrides.get("italic") or False
+    style.italic = overrides.get("italic") if overrides.get("italic") is not None else bool(base.get("italic", False))
     style.primarycolor = primarycolor
     style.outlinecolor = hex_to_ass_color(base["outlinecolor"]) if base.get("borderstyle") == 3 else outlinecolor
     style.outline = 0.0 if base.get("borderstyle") == 3 else (outline * SCALE_FACTOR)
@@ -419,6 +377,16 @@ def _build_style(base: dict, overrides: dict, template: dict):
     style.marginl = style.marginr = int(140 * SCALE_FACTOR)
     style.marginv = int(marginv * SCALE_FACTOR)
     style.spacing = template.get("letter_spacing", 0.0) or 0.0
+    if preset == "aliabdlal":
+        # In ASS karaoke: SecondaryColour is unsung base color, PrimaryColour is sung highlight color
+        h_color = (
+            overrides.get("highlight_color")
+            or template.get("highlight_color")
+            or template.get("highlightcolor")
+            or base.get("highlightcolor", "#f06c3f")
+        )
+        style.primarycolor = hex_to_ass_color(h_color)
+        style.secondarycolor = primarycolor
     return style
 
 
@@ -447,27 +415,18 @@ def _resolve_y_anchor(preset: str, position_y: float | None, fs: int) -> int | N
 # Event emission
 # ─────────────────────────────────────────────────────────────────────────────
 def build_animation(
-    preset: str, fs: int, shadow_tag: str, *, animate: bool, y: int | None = None, word_idx: int = 0
+    preset: str, fs: int, shadow_tag: str, *, animate: bool = False, y: int | None = None, word_idx: int = 0
 ) -> str:
-    """Build the sentence-level tag block: position, shadow, entrance, fontsize."""
+    """Build the sentence-level tag block: position, shadow, fontsize."""
     tags: list[str] = []
     if y is not None:
-        if preset == "creator":
-            tags.append(rf"\pos({CX},{y})\t(0,120,\pos({CX},{y-12}))")
-        else:
-            tags.append(rf"\pos({CX},{y})")
+        tags.append(rf"\pos({CX},{y})")
+    if preset == "impact":
+        tags.append(r"\frz-3.5")
     tags.append(shadow_tag)
-    if preset == "badge":
-        xbord = max(1, int(28 * SCALE_FACTOR))
-        ybord = max(1, int(14 * SCALE_FACTOR))
-        tags.append(rf"\xbord{xbord}\ybord{ybord}\blur2\3c&H141418&\3a&H35&")
-    if animate:
-        builder = ANIMATION_BUILDERS.get(preset, ANIMATION_BUILDERS[DEFAULT_PRESET])
-        entrance = builder(fs)
-        if entrance:
-            tags.append(entrance)
     tags.append(rf"\fs{fs}")
     return "{" + "".join(tags) + "}"
+
 
 
 def build_word_line(
@@ -478,6 +437,28 @@ def build_word_line(
 ) -> str:
     """Render a phrase line where ``active_idx`` is styled via the preset's
     active-word effect and every other word uses the inactive style."""
+    if preset in ("badge", "hormozi"):
+        default_active = "#FFB800" if preset == "hormozi" else "#111111"
+        default_normal = "#FFFFFF" if preset == "hormozi" else "#A0A0A8"
+        active_col = hex_to_ass_color(ctx_base.highlight_color_hex or default_active)
+        normal_col = hex_to_ass_color(ctx_base.normal_color_hex or default_normal)
+        active_tag = rf"\c&H{active_col.b:02X}{active_col.g:02X}{active_col.r:02X}&"
+        normal_tag = rf"\c&H{normal_col.b:02X}{normal_col.g:02X}{normal_col.r:02X}&"
+        spoken = " ".join(phrase_group[i]["word"] for i in range(active_idx + 1))
+        upcoming = " ".join(phrase_group[i]["word"] for i in range(active_idx + 1, len(phrase_group)))
+        if upcoming:
+            return rf"{{{active_tag}}}{spoken} {{{normal_tag}}}{upcoming}"
+        return rf"{{{active_tag}}}{spoken}"
+
+    has_pill = bool(ctx_base.pill_color_hex and preset in ("unbox", "sara", "focus"))
+    has_highlight = has_pill or bool(
+        ctx_base.highlight_color_hex
+        and ctx_base.normal_color_hex
+        and ctx_base.highlight_color_hex.upper() != ctx_base.normal_color_hex.upper()
+    )
+    if not has_highlight:
+        return " ".join(w["word"] for w in phrase_group)
+
     effect = WORD_EFFECTS.get(preset, WORD_EFFECTS[DEFAULT_PRESET])
     parts: list[str] = []
     for w_idx, w in enumerate(phrase_group):
@@ -497,9 +478,10 @@ def build_word_line(
             default_fsp=ctx_base.default_fsp,
         )
         parts.append(effect(ctx))
-    extra_space = max(1, int(ctx_base.fs * 0.04))
-    sep = f"{{\\fsp{ctx_base.default_fsp + extra_space}}} {{\\fsp{ctx_base.default_fsp}}}"
-    return sep.join(parts)
+    res = " ".join(parts)
+    if active_idx > 0 and ctx_base.normal_tag:
+        res = f"{{{ctx_base.normal_tag}}}{res}"
+    return res
 
 
 def _chunk_into_phrases(
@@ -514,7 +496,7 @@ def _chunk_into_phrases(
       3. Minimum phrase speech duration target so phrases aren't micro-fragmented.
       4. Speaker / layout boundaries.
     """
-    max_words = max(2, min(4, max_words))
+    max_words = max(2, min(5, max_words))
     groups: list[list[dict]] = []
     current_group: list[dict] = []
 
@@ -591,13 +573,14 @@ LAYOUT_DEFAULT_POS_Y: dict[str, float] = {
     "gaming": 0.84,
     "game": 0.84,
     "action": 0.84,
-    "letterbox": 0.72,
-    "reframe": 0.72,
-    "single": 0.72,
-    "auto": 0.72,
-    "passthrough": 0.72,
-    "vertical_native": 0.72,
+    "letterbox": 0.76,
+    "reframe": 0.65,
+    "single": 0.65,
+    "auto": 0.65,
+    "passthrough": 0.65,
+    "vertical_native": 0.65,
 }
+
 
 
 def resolve_layout_pos_y(layout_mode: str | None, user_override: float | None = None) -> float:
@@ -605,7 +588,7 @@ def resolve_layout_pos_y(layout_mode: str | None, user_override: float | None = 
     if user_override is not None:
         return max(0.10, min(float(user_override), 0.92))
     mode = (layout_mode or "reframe").lower().strip()
-    return LAYOUT_DEFAULT_POS_Y.get(mode, 0.72)
+    return LAYOUT_DEFAULT_POS_Y.get(mode, 0.65)
 
 
 def _emit_events(
@@ -625,23 +608,80 @@ def _emit_events(
 ) -> None:
     import pysubs2
 
+    is_3d = bool(base.get("extrusion_3d") or template.get("extrusion_3d"))
+    stroke_c = hex_to_ass_color(
+        base["outlinecolor"]
+        if overrides["stroke_color"] in (None, "transparent")
+        else overrides["stroke_color"]
+    )
+    depth_fill_tag = rf"\c&H{stroke_c.b:02X}{stroke_c.g:02X}{stroke_c.r:02X}&"
+
     def add(start: float, end: float, text: str) -> None:
-        subs.events.append(
-            pysubs2.SSAEvent(
-                start=pysubs2.make_time(s=start),
-                end=pysubs2.make_time(s=end),
-                text=text,
-                style="Default",
+        if is_3d:
+            pos_match = re.search(r"\\pos\((\d+),(\d+)\)", text)
+            if pos_match:
+                px, py = int(pos_match.group(1)), int(pos_match.group(2))
+                clean_text_for_depth = re.sub(r"\\c&H[0-9A-Fa-f]+&", lambda m: depth_fill_tag, text)
+                clean_text_for_depth = re.sub(
+                    r"\\xshad\d+(\.\d+)?\\yshad\d+(\.\d+)?\\blur\d+(\.\d+)?",
+                    lambda m: r"\xshad0\yshad0\blur0",
+                    clean_text_for_depth,
+                )
+                for offset_y in [8, 6, 4, 2]:
+                    layer_text = clean_text_for_depth.replace(f"\\pos({px},{py})", f"\\pos({px},{py + offset_y})")
+                    subs.events.append(
+                        pysubs2.SSAEvent(
+                            start=pysubs2.make_time(s=start),
+                            end=pysubs2.make_time(s=end),
+                            text=layer_text,
+                            style="Default",
+                            layer=0,
+                        )
+                    )
+            top_text = re.sub(
+                r"\\xshad\d+(\.\d+)?\\yshad\d+(\.\d+)?\\blur\d+(\.\d+)?",
+                lambda m: r"\xshad0\yshad0\blur0",
+                text,
             )
-        )
+            subs.events.append(
+                pysubs2.SSAEvent(
+                    start=pysubs2.make_time(s=start),
+                    end=pysubs2.make_time(s=end),
+                    text=top_text,
+                    style="Default",
+                    layer=1,
+                )
+            )
+        else:
+            subs.events.append(
+                pysubs2.SSAEvent(
+                    start=pysubs2.make_time(s=start),
+                    end=pysubs2.make_time(s=end),
+                    text=text,
+                    style="Default",
+                    layer=0,
+                )
+            )
 
     phrase_layout = global_crop_mode
     layouts_in_group = [w.get("layout") for w in phrase_group if w.get("layout")]
     if layouts_in_group:
         phrase_layout = layouts_in_group[0]
 
-    pos_y = resolve_layout_pos_y(phrase_layout, overrides.get("position_y"))
+    user_pos_y = overrides.get("position_y")
+    if user_pos_y is None and preset == "billy":
+        pos_y = 0.18
+    else:
+        pos_y = resolve_layout_pos_y(phrase_layout, user_pos_y)
     y = _resolve_y_anchor(preset, pos_y, fs)
+
+    normal_color = template.get("font_color") or base["primary"]
+    has_pill = bool(base.get("pillcolor") or pill_color_hex)
+    has_highlight = has_pill or bool(
+        h_color_hex
+        and normal_color
+        and h_color_hex.upper() != normal_color.upper()
+    )
 
     wh_val = template.get("word_highlight")
     if wh_val is None:
@@ -651,8 +691,8 @@ def _emit_events(
     else:
         word_highlight = bool(wh_val)
 
-    if not word_highlight:
-        # Emit a single, clean subtitle block for the phrase group
+    if not word_highlight or not has_highlight:
+        # Emit a single, clean subtitle block for the phrase group (no word-level flicker or scaling)
         phrase_text = " ".join(w["word"] for w in phrase_group)
         prefix = build_animation(
             preset,
@@ -665,7 +705,50 @@ def _emit_events(
         add(p_start, p_end, prefix + phrase_text)
         return
 
-    normal_color = template.get("font_color") or base["primary"]
+    if preset == "aliabdlal":
+        # Highlighter sweep (Dynamic Karaoke Wipe): single continuous phrase event with \kf sweeps
+        karaoke_parts: list[str] = []
+        for idx, w in enumerate(phrase_group):
+            if idx == 0 and w["start"] > p_start:
+                lead_cs = max(0, int((w["start"] - p_start) * 100))
+                if lead_cs > 0:
+                    karaoke_parts.append(rf"{{\k{lead_cs}}}")
+
+            w_end = w["end"]
+            if idx < len(phrase_group) - 1:
+                next_start = phrase_group[idx + 1]["start"]
+                if next_start > w["start"]:
+                    w_end = min(w_end, next_start)
+
+            dur_cs = max(1, int((w_end - w["start"]) * 100))
+            karaoke_parts.append(rf"{{\kf{dur_cs}}}{w['word']}")
+
+            if idx < len(phrase_group) - 1:
+                next_start = phrase_group[idx + 1]["start"]
+                gap_cs = int((next_start - w_end) * 100)
+                if gap_cs > 0:
+                    karaoke_parts.append(rf"{{\k{gap_cs}}} ")
+                else:
+                    karaoke_parts.append(" ")
+
+        k_line = "".join(karaoke_parts)
+        h_col = hex_to_ass_color(h_color_hex)
+        norm_col = hex_to_ass_color(normal_color)
+        color_tags = rf"\1c&H{h_col.b:02X}{h_col.g:02X}{h_col.r:02X}&\2c&H{norm_col.b:02X}{norm_col.g:02X}{norm_col.r:02X}&"
+        prefix = build_animation(
+            preset,
+            fs,
+            shadow_tag,
+            animate=True,
+            y=y,
+            word_idx=0,
+        )
+        if prefix.endswith("}"):
+            prefix = prefix[:-1] + color_tags + "}"
+        else:
+            prefix = prefix + "{" + color_tags + "}"
+        add(p_start, p_end, prefix + k_line)
+        return
     stroke_c = hex_to_ass_color(
         base["outlinecolor"]
         if overrides["stroke_color"] in (None, "transparent")
@@ -693,22 +776,132 @@ def _emit_events(
     MIN_WORD_DURATION_S = 0.05  # Minimum 50ms highlight step to stay tight with fast speech without artificial lag
     MAX_WORD_HIGHLIGHT_S = 0.45  # Maximum 450ms active highlight per word to prevent silence bleed during pauses
 
+    if preset == "badge":
+        pill_c = hex_to_ass_color(pill_color_hex or base.get("pillcolor", "#FFFFFF"))
+        pill_bgr = f"{pill_c.b:02X}{pill_c.g:02X}{pill_c.r:02X}"
+        phrase_plain = " ".join(w["word"] for w in phrase_group)
+        xbord = max(1, int(30 * SCALE_FACTOR))
+        ybord = max(1, int(14 * SCALE_FACTOR))
+
+        # Layer 0: Background box for the whole phrase (like unbox, but for the entire phrase with roundedness and no shadow)
+        subs.events.append(
+            pysubs2.SSAEvent(
+                start=pysubs2.make_time(s=p_start),
+                end=pysubs2.make_time(s=p_end),
+                text=rf"{{\pos({CX},{y})\an2\blur2\1a&HFF&\3a&H00&\3c&H{pill_bgr}&\xbord{xbord}\ybord{ybord}\shad0}}{phrase_plain}",
+                style="BoxStyle",
+                layer=0,
+            )
+        )
+
+        # Layer 1: Top crisp text with cumulative progressive highlight (no shadow)
+        for idx in range(len(phrase_group)):
+            word = phrase_group[idx]
+            start = p_start if idx == 0 else word["start"]
+            if idx < len(phrase_group) - 1:
+                end = phrase_group[idx + 1]["start"]
+            else:
+                end = p_end
+
+            if end <= start:
+                end = start + 0.05
+
+            line = build_word_line(phrase_group, idx, preset, ctx_base)
+            subs.events.append(
+                pysubs2.SSAEvent(
+                    start=pysubs2.make_time(s=start),
+                    end=pysubs2.make_time(s=end),
+                    text=rf"{{\pos({CX},{y})\an2\blur0\shad0}}{line}",
+                    style="Default",
+                    layer=1,
+                )
+            )
+        return
+
+    if preset in ("unbox", "sara"):
+        pill_default = "#e13a06" if preset == "sara" else "#e004fe"
+        pill_c = hex_to_ass_color(pill_color_hex or base.get("pillcolor", pill_default))
+        pill_bgr = f"{pill_c.b:02X}{pill_c.g:02X}{pill_c.r:02X}"
+        phrase_plain = " ".join(w["word"] for w in phrase_group)
+
+        for idx in range(len(phrase_group)):
+            word = phrase_group[idx]
+            start = word["start"]
+            raw_word_end = word.get("end", start + 0.3)
+
+            if idx < len(phrase_group) - 1:
+                next_start = phrase_group[idx + 1]["start"]
+                end = min(next_start, max(start + MIN_WORD_DURATION_S, min(raw_word_end, start + MAX_WORD_HIGHLIGHT_S)))
+                if end <= start:
+                    end = min(next_start, start + 0.1)
+            else:
+                end = min(p_end, max(start + MIN_WORD_DURATION_S, min(raw_word_end, start + MAX_WORD_HIGHLIGHT_S)))
+
+            if end <= start:
+                end = start + 0.1
+
+            # Build box layers (inactive words alpha=FF, active word alpha=00)
+            box_words = []
+            for w_idx, w in enumerate(phrase_group):
+                if w_idx == idx:
+                    box_words.append(rf"{{\alpha&H00&}}{w['word']}{{\alpha&HFF&}}")
+                else:
+                    box_words.append(rf"{{\alpha&HFF&}}{w['word']}")
+            box_line = " ".join(box_words)
+
+            # Layer 0: Box shadow (subtle black drop/edge for the box)
+            subs.events.append(
+                pysubs2.SSAEvent(
+                    start=pysubs2.make_time(s=start),
+                    end=pysubs2.make_time(s=end),
+                    text=rf"{{\pos(540,{y-1})\an2\blur1\alpha&HFF&\3c&H000000&\c&H000000&\fscy88\xbord12\ybord1}}{box_line}",
+                    style="BoxStyle",
+                    layer=0,
+                )
+            )
+            # Layer 1: Box fill with pill color
+            subs.events.append(
+                pysubs2.SSAEvent(
+                    start=pysubs2.make_time(s=start),
+                    end=pysubs2.make_time(s=end),
+                    text=rf"{{\pos(540,{y-3})\an2\blur1\alpha&HFF&\3c&H{pill_bgr}&\c&H{pill_bgr}&\fscy88\xbord10\ybord0}}{box_line}",
+                    style="BoxStyle",
+                    layer=1,
+                )
+            )
+            # Layer 2: 3D text extrusion (offsets 8, 6, 4, 2)
+            for dy in [8, 6, 4, 2]:
+                subs.events.append(
+                    pysubs2.SSAEvent(
+                        start=pysubs2.make_time(s=start),
+                        end=pysubs2.make_time(s=end),
+                        text=rf"{{\pos(540,{y+dy})\an2\xshad0\yshad0\blur0\c&H000000&\3c&H000000&\bord{stroke_bord}}}{phrase_plain}",
+                        style="Default",
+                        layer=2,
+                    )
+                )
+            # Layer 3: Top text layer
+            subs.events.append(
+                pysubs2.SSAEvent(
+                    start=pysubs2.make_time(s=start),
+                    end=pysubs2.make_time(s=end),
+                    text=rf"{{\pos(540,{y})\an2\xshad0\yshad0\blur0\c&HFFFFFF&\3c&H000000&\bord{stroke_bord}}}{phrase_plain}",
+                    style="Default",
+                    layer=3,
+                )
+            )
+        return
+
     for idx in range(len(phrase_group)):
         word = phrase_group[idx]
-        start = word["start"]
-        raw_word_end = word.get("end", start + 0.3)
-
+        start = p_start if idx == 0 else word["start"]
         if idx < len(phrase_group) - 1:
-            next_start = phrase_group[idx + 1]["start"]
-            # Active word highlight ends when next word begins or after MAX_WORD_HIGHLIGHT_S
-            end = min(next_start, max(start + MIN_WORD_DURATION_S, min(raw_word_end, start + MAX_WORD_HIGHLIGHT_S)))
-            if end <= start:
-                end = min(next_start, start + 0.1)
+            end = phrase_group[idx + 1]["start"]
         else:
-            end = min(p_end, max(start + MIN_WORD_DURATION_S, min(raw_word_end, start + MAX_WORD_HIGHLIGHT_S)))
+            end = p_end
 
         if end <= start:
-            end = start + 0.1
+            end = start + 0.05
 
         line = build_word_line(phrase_group, idx, preset, ctx_base)
         prefix = build_animation(
@@ -722,13 +915,28 @@ def _emit_events(
         add(start, end, prefix + line)
 
 
+
 def _select_shadow_tag(preset: str, no_shadow: bool) -> str:
     if no_shadow or preset == "badge":
         return _NO_SHADOW_TAG
     if preset == "neon":
         return _NEON_SHADOW_TAG
+    if preset == "impact":
+        return r"\xshad1.8\yshad2.2\blur3\4a&H35&"
+    if preset == "hormozi":
+        return r"\xshad1.2\yshad2.2\blur2.5\4a&H35&"
     if preset == "cinema":
         return r"\xshad1.5\yshad1.5\blur5\4a&H30&"
+    if preset == "sticker":
+        return r"\xshad0\yshad0\blur5\4c&HFFFFFF&\4a&H00&"
+    if preset == "minimal":
+        return r"\xshad0\yshad2.5\blur4\4a&H40&"
+    if preset == "casey":
+        return r"\xshad0\yshad3.5\blur5\4a&H25&"
+    if preset == "billy":
+        return r"\xshad0\yshad2.5\blur4\4a&H30&"
+    if preset == "aliabdlal":
+        return r"\xshad0\yshad3.5\blur6\4c&H000000&\4a&H35&"
     return _SHADOW_TAG
 
 
@@ -739,8 +947,17 @@ def generate_ass(
     import pysubs2
 
     template = _styling_to_dict(styling)
+    preset = normalize_preset(
+        template.get("preset")
+        or template.get("presetName")
+        or template.get("animation")
+        or "none"
+    )
+
     user_pos_y = _tpl(template, "position_y", "positionY")
-    template["position_y"] = resolve_layout_pos_y(crop_mode, user_pos_y)
+    if user_pos_y is None and preset == "billy":
+        template["position_y"] = 0.18
+
 
     if crop_mode == "letterbox":
         for snake, camel in (
@@ -753,12 +970,6 @@ def generate_ass(
                 template[snake] = template[camel] = float(val)
 
     overrides = _resolve_overrides(template)
-    preset = normalize_preset(
-        template.get("preset")
-        or template.get("presetName")
-        or template.get("animation")
-        or "none"
-    )
 
     subs = pysubs2.SSAFile()
     subs.info.update(
@@ -780,10 +991,32 @@ def generate_ass(
             "presentation": 0.88,
             "letterbox": 0.92,
         }
-        scale_mod = layout_scale_map.get((crop_mode or "").lower(), 1.0)
+        dominant_crop = crop_mode
+        if transcript:
+            layouts = [
+                w.get("layout")
+                for b in transcript
+                if isinstance(b, dict)
+                for w in b.get("words", [])
+                if isinstance(w, dict) and w.get("layout")
+            ]
+            if layouts:
+                from collections import Counter
+                dominant_crop = Counter(layouts).most_common(1)[0][0]
+        scale_mod = layout_scale_map.get((dominant_crop or "").lower(), 1.0)
         base["fontsize"] = int(base["fontsize"] * scale_mod)
 
-    subs.styles["Default"] = _build_style(base, overrides, template)
+    subs.styles["Default"] = _build_style(base, overrides, template, preset=preset)
+    if preset in ("unbox", "sara") or base.get("pillcolor"):
+        box_style = _build_style(base, overrides, template, preset=preset)
+        box_style.borderstyle = 3 if preset == "badge" else 1
+        pill_c = hex_to_ass_color(base.get("pillcolor", "#e13a06"))
+        box_style.outlinecolor = pill_c
+        box_style.primarycolor = pill_c
+        box_style.backcolor = pill_c
+        box_style.outline = 0.0
+        box_style.shadow = 0.0
+        subs.styles["BoxStyle"] = box_style
 
     raw_items = _flatten_transcript(transcript)
     do_upper = template.get("uppercase") or preset in ALWAYS_UPPERCASE
@@ -821,7 +1054,7 @@ def generate_ass(
             w["end"] = max(0.0, w["end"] - first_start)
 
     words_per_phrase = template.get("max_words") or base.get("preferred_words") or 3
-    words_per_phrase = max(2, min(4, int(words_per_phrase)))
+    words_per_phrase = max(2, min(5, int(words_per_phrase)))
     max_chars = template.get("max_chars") or base.get("max_chars_per_line") or 28
 
     # Highlight color: user override wins, otherwise the preset's own base color.
@@ -835,10 +1068,11 @@ def generate_ass(
     multi_speaker_val = template.get("multi_speaker_colors")
     if multi_speaker_val is None:
         multi_speaker_val = template.get("speaker_colors")
-    enable_multi_speaker = bool(multi_speaker_val)
+    enable_multi_speaker = True if multi_speaker_val is None else bool(multi_speaker_val)
 
     unique_speakers = list(dict.fromkeys(w.get("speaker", "speaker_1") for w in words))
     multi_speaker = enable_multi_speaker and len(unique_speakers) > 1
+
 
     for g_idx, group in enumerate(groups):
         if not group:

@@ -186,6 +186,7 @@ def burn_captions_local(
     quality: str = "export",
     plan: str = "free",
     tmpdir: str = None,
+    custom_ass_path: str = None,
 ) -> tuple[str, str | None]:
     """Burns captions locally onto an existing video file, uploads to R2,
     and generates a thumbnail if quality is "preview".
@@ -200,8 +201,13 @@ def burn_captions_local(
     local_ass = os.path.join(tmpdir, f"subs_{uuid.uuid4()}.ass")
 
     # 2. Generate ASS subtitles
-    with StageTimer("generate_ass"):
-        generate_ass(transcript, styling, local_ass, crop_mode=crop_mode)
+    if custom_ass_path and os.path.exists(custom_ass_path):
+        import shutil
+        shutil.copyfile(custom_ass_path, local_ass)
+        logger.info("Using provided custom ASS from %s", custom_ass_path)
+    else:
+        with StageTimer("generate_ass"):
+            generate_ass(transcript, styling, local_ass, crop_mode=crop_mode)
 
     # 3. Burn with FFmpeg — quality-dependent settings
     with StageTimer("ffmpeg_burn"):

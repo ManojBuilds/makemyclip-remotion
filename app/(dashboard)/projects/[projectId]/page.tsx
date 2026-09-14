@@ -75,6 +75,8 @@ export default function ProjectDetailPage() {
           videoUrl: projectData.project.videoUrl ?? "",
           sourceUrl: sourceIsExternal ? sourceKey : null,
           isYouTube: !!youtubeVideoId,
+          isSingleClip: Boolean(projectData.project.isSingleClip),
+          thumbnailUrl: (projectData.project.thumbnailUrl as string) ?? null,
         })
         setClips(projectData.clips)
       } catch (loadError) {

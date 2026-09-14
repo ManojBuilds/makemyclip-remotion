@@ -8,7 +8,7 @@ import { toast } from "sonner"
 
 import { EditableTitle } from "@/components/dashboard/editable-title"
 import { ClipCard } from "@/components/video/clip-card"
-import { TrimDialog } from "@/components/video/trim-dialog"
+import { EditClipDialog } from "@/components/video/trim-dialog"
 import { ProcessingSteps } from "@/components/dashboard/processing-steps"
 import type { Project, Clip } from "@/lib/types"
 import { triggerHDExport } from "@/lib/actions/export"
@@ -50,6 +50,30 @@ export function ProjectDetailClient({
   // Refs to avoid stale closures in the polling interval
   const clipsRef = useRef<Clip[]>(clips)
   const autoDownloadRef = useRef<Record<string, boolean>>(autoDownloadClipIds)
+  const singleClipDownloadedRef = useRef<boolean>(false)
+
+  // Auto-download when single-clip mode finishes rendering
+  useEffect(() => {
+    const isSingle = project.isSingleClip || initialProject.isSingleClip
+    if (!isSingle || singleClipDownloadedRef.current) return
+
+    const readyClip = clips.find(
+      (c) => c.status === "rendered" && (c.previewVideoUrl || c.captionVideoUrl)
+    )
+
+    if (readyClip) {
+      const downloadUrl =
+        readyClip.captionVideoUrl ||
+        readyClip.previewVideoUrl ||
+        readyClip.originalVideoUrl
+      if (downloadUrl) {
+        singleClipDownloadedRef.current = true
+        toast.success("Reframed clip ready! Downloading automatically...")
+        triggerDirectDownload(downloadUrl, readyClip.title || project.title)
+      }
+    }
+  }, [clips, project.isSingleClip, initialProject.isSingleClip, project.title])
+
   useEffect(() => {
     clipsRef.current = clips
   }, [clips])
@@ -418,23 +442,39 @@ export function ProjectDetailClient({
             })}
         </div>
 
-        {/* Trim Dialog Modal */}
-        <TrimDialog
+        {/* Edit Clip Studio Modal (Trim & Subtitles) */}
+        <EditClipDialog
           clip={activeEditClip}
           open={Boolean(activeEditClip)}
           onOpenChange={(openState) => {
             if (!openState) setActiveEditClip(null)
           }}
-          onSaveTrim={async (clipId, newStartTime, newEndTime) => {
-            const toastId = toast.loading("Saving trim and re-rendering clip...")
+          onSaveEdit={async (clipId, options) => {
+            const hasTime = options.newStartTime !== undefined && options.newEndTime !== undefined
+            const hasCaptions = options.newCaptions !== undefined
+
+            const toastMessage =
+              hasTime && hasCaptions
+                ? "Saving trim & updated subtitles..."
+                : hasCaptions
+                ? "Saving updated subtitles..."
+                : "Saving trim & re-rendering..."
+
+            const toastId = toast.loading(toastMessage)
             try {
+              const body: Record<string, any> = {}
+              if (hasTime) {
+                body.startTime = options.newStartTime
+                body.endTime = options.newEndTime
+              }
+              if (hasCaptions) {
+                body.captions = options.newCaptions
+              }
+
               const res = await fetch(`/api/clips/${clipId}`, {
                 method: "PATCH",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                  startTime: newStartTime,
-                  endTime: newEndTime,
-                }),
+                body: JSON.stringify(body),
               })
 
               if (!res.ok) {
@@ -449,12 +489,16 @@ export function ProjectDetailClient({
                 )
               }
               toast.dismiss(toastId)
-              toast.success("Clip trimmed! Re-rendering with new timestamps...")
+              toast.success(
+                hasCaptions && !hasTime
+                  ? "Subtitles updated! Re-rendering video in background."
+                  : "Clip updated! Re-rendering video in background."
+              )
               setActiveEditClip(null)
             } catch (err: any) {
               toast.dismiss(toastId)
-              console.error("Failed to save trim:", err)
-              toast.error(err?.message || "Failed to trim clip.")
+              console.error("Failed to save clip edit:", err)
+              toast.error(err?.message || "Failed to save clip updates.")
               throw err
             }
           }}

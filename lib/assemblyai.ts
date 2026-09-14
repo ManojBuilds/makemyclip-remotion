@@ -103,6 +103,70 @@ export async function getAssemblyAiStatus(
 }
 
 /**
+ * Fetch the raw AssemblyAI transcript words, text, and paragraphs directly
+ * without invoking Modal or Gemini (for direct single-clip reframe).
+ */
+export async function getAssemblyAiTranscript(
+  transcriptId: string
+): Promise<{
+  fullText: string
+  words: WordTimestamp[]
+  paragraphs: string[]
+}> {
+  const apiKey = process.env.ASSEMBLYAI_API_KEY
+  if (!apiKey) {
+    throw new Error("⚠️ ASSEMBLYAI_API_KEY is not configured.")
+  }
+
+  const response = await fetch(
+    `https://api.assemblyai.com/v2/transcript/${transcriptId}`,
+    {
+      method: "GET",
+      headers: {
+        authorization: apiKey,
+      },
+    }
+  )
+
+  if (!response.ok) {
+    const errorText = await response.text()
+    throw new Error(
+      `AssemblyAI get transcript failed with status ${response.status}: ${errorText}`
+    )
+  }
+
+  const data = await response.json()
+  const rawWords: any[] = data.words || []
+  const speakerMap: Record<string, number> = {}
+  let nextSpeakerId = 0
+
+  const words: WordTimestamp[] = rawWords.map((w: any) => {
+    let speakerId: number | undefined = undefined
+    if (w.speaker !== undefined && w.speaker !== null) {
+      const spkKey = String(w.speaker)
+      if (!(spkKey in speakerMap)) {
+        speakerMap[spkKey] = nextSpeakerId++
+      }
+      speakerId = speakerMap[spkKey]
+    }
+    return {
+      word: w.text || w.word || "",
+      start: (w.start || 0) / 1000.0,
+      end: (w.end || 0) / 1000.0,
+      confidence: typeof w.confidence === "number" ? w.confidence : 0.99,
+      speaker: speakerId,
+    }
+  })
+
+  const fullText = data.text || words.map((w) => w.word).join(" ")
+  const paragraphs: string[] = data.utterances
+    ? data.utterances.map((u: any) => u.text).filter(Boolean)
+    : [fullText]
+
+  return { fullText, words, paragraphs }
+}
+
+/**
  * Once AssemblyAI is completed, enrich the transcript with speech velocity,
  * acoustic events, viral scoring, and Gemini metadata via Modal.
  * Takes ~5-15 seconds.

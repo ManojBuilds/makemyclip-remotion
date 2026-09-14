@@ -61,7 +61,6 @@ def run_tests():
         "preset": "simple",
         "font_color": "#FFFFFF",
         "font_size": 24,
-        "position_y": 0.8, # default bottom
     }
     
     # Generate ASS file using the annotated transcript
@@ -78,17 +77,18 @@ def run_tests():
         if line.startswith("Dialogue:"):
             print(line)
             # Verify that \pos is injected with the correct layout-specific coordinates
-            # split/course -> position_y = 0.50 -> 0.50 * 1920 = 960 -> 960 + 38/2.0 = 979
-            # letterbox -> position_y = 0.66 -> 0.66 * 1920 = 1267 -> 1267 + 38/2.0 = 1286
-            # reframe/default -> position_y = 0.75 -> 0.75 * 1920 = 1440 -> 1440 + 38/2.0 = 1459
+            # split -> position_y = 0.50 -> 0.50 * 1920 = 960 -> 960 + 24/2.0 = 972
+            # letterbox -> position_y = 0.76 -> 0.76 * 1920 = 1459 -> 1459 + 24/2.0 = 1471
+            # reframe/default -> position_y = 0.74 -> 0.74 * 1920 = 1420 -> 1420 + 24/2.0 = 1432
             if "hello" in line.lower():
-                assert "\\pos(540,1459)" in line
+                assert "\\pos(540,1432)" in line
             elif "world" in line.lower():
-                assert "\\pos(540,979)" in line
+                assert "\\pos(540,972)" in line
             elif "test" in line.lower():
-                assert "\\pos(540,1286)" in line
+                assert "\\pos(540,1471)" in line
                 
     print("\n✅ generate_ass dynamically resolved Y-positions correctly!")
+
 
     # Clean up
     if os.path.exists(output_ass):

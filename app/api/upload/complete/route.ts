@@ -19,6 +19,10 @@ export async function POST(request: Request) {
       transcribeLanguage,
       translateLanguage,
       removeSilence,
+      isSingleClip,
+      cropMode,
+      startTime,
+      endTime,
     } = await request.json()
 
     if (!key || !title) {
@@ -42,10 +46,13 @@ export async function POST(request: Request) {
         sourceVideoKey: key,
         status: "uploading",
         duration: duration || null,
-        videoFormat: videoFormat || "reframe",
+        videoFormat: cropMode || videoFormat || "reframe",
         transcribeLanguage: transcribeLanguage || "auto",
         translateLanguage: translateLanguage || "none",
         removeSilence: removeSilence !== undefined ? removeSilence : true,
+        isSingleClip: Boolean(isSingleClip),
+        clipStartTime: typeof startTime === "number" ? startTime : null,
+        clipEndTime: typeof endTime === "number" ? endTime : null,
         // Persist caption styling preset name at the project level.
         captionStyle: styling ? (styling.preset || styling.name || "impact") : "impact",
         wordHighlight: styling?.word_highlight !== undefined ? Boolean(styling.word_highlight) : true,
@@ -60,6 +67,10 @@ export async function POST(request: Request) {
         projectId: project.id,
         key,
         duration,
+        isSingleClip: Boolean(isSingleClip),
+        cropMode: cropMode || videoFormat || "auto",
+        startTime: typeof startTime === "number" ? startTime : undefined,
+        endTime: typeof endTime === "number" ? endTime : undefined,
       },
     })
 

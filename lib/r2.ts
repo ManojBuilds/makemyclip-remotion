@@ -6,6 +6,7 @@ import {
 } from "@aws-sdk/client-s3"
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner"
 import { unstable_cache } from "next/cache"
+import { isHttpUrl, normalizeVideoUrl } from "./youtube"
 
 const R2_ACCOUNT_ID = process.env.R2_ACCOUNT_ID!
 const R2_ACCESS_KEY_ID = process.env.R2_ACCESS_KEY_ID!
@@ -130,5 +131,27 @@ export async function uploadFileToR2(
   } catch {
     return getDownloadPresignedUrl(key, 86400 * 365) // 1 year fallback URL
   }
+}
+
+/**
+ * Central resolver for source video URLs across the entire application.
+ * - If given a full http(s) URL (YouTube, external video, or already-presigned URL), returns it normalized.
+ * - If given an internal R2 storage key (e.g. users/{id}/videos/{fileId}/source.mp4), generates a presigned download URL.
+ */
+export async function resolveSourceVideoUrl(
+  sourceVideoKeyOrUrl: string | null | undefined,
+  expiresIn = 3600
+): Promise<string> {
+  if (!sourceVideoKeyOrUrl || typeof sourceVideoKeyOrUrl !== "string") {
+    return ""
+  }
+  const trimmed = sourceVideoKeyOrUrl.trim()
+  if (!trimmed) {
+    return ""
+  }
+  if (isHttpUrl(trimmed)) {
+    return normalizeVideoUrl(trimmed)
+  }
+  return getDownloadPresignedUrl(trimmed, expiresIn)
 }
 

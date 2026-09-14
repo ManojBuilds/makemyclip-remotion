@@ -48,61 +48,65 @@ def is_valid_face_track(tr, sc, frame_height: float = 2160.0) -> tuple[bool, flo
 
 
 def classify_layout(tracks: list, scores: list, width: int, height: int) -> str:
-    """Analyze face tracks and determine the optimal layout mode for a scene or video.
-    
-    Returns:
-    - "letterbox": B-roll footage, screen cutaway, landscape, or scene with no active speaking faces.
-    - "split": Multi-speaker dialogue scene (>=2 active talking speakers).
-    - "screencast": Screencast / gaming / presentation with corner facecam overlay.
-    - "reframe": Solo active talking speaker.
-    """
+    """Analyze face tracks and determine the optimal layout mode for a scene or video."""
     if not tracks:
         return "letterbox"
 
     valid_tracks = []
+    prominent_tracks = []
     total_max_frame = 0
+
     for tidx, tr in enumerate(tracks):
         sc = scores[tidx] if tidx < len(scores) else []
         is_valid, mean_sc, max_sc, mean_s, dur = is_valid_face_track(tr, sc, frame_height=float(height))
         if is_valid:
-            valid_tracks.append((tidx, tr, mean_sc, max_sc, mean_s, dur))
+            valid_tracks.append((tidx, tr))
             frames = tr.get("track", {}).get("frame", []) if isinstance(tr.get("track"), dict) else tr.get("proc_track", {}).get("frame", [])
-            if len(frames) > 0:
-                total_max_frame = max(total_max_frame, int(np.max(frames)))
+            xs = tr.get("proc_track", {}).get("x", [])
+            mean_x = float(np.mean(xs)) if len(xs) > 0 else 0.5 * width
+            norm_x = mean_x / float(width) if mean_x > 1.0 else mean_x
+            norm_s = mean_s / float(height) if mean_s > 1.0 else mean_s
+
+            # Genuine speaker must be sufficiently prominent (>=5% height) and within active frame area
+            if norm_s >= 0.05 and 0.05 <= norm_x <= 0.95:
+                prominent_tracks.append((tidx, tr))
+                if len(frames) > 0:
+                    dur_frames = int(np.max(frames) - np.min(frames) + 1)
+                    total_max_frame = max(total_max_frame, dur_frames)
 
     if not valid_tracks:
         return "letterbox"
 
-    # Distinguish B-roll / cutaway vs Speaker:
-    # A true B-roll scene either has NO faces, or only tiny/transient incidental background faces (<8% height, <10 frames).
-    # A speaker scene has a prominent talking head (>=8% height or central with duration >=15 frames)
-    # OR an active ASD speaking score (max_sc >= 0.15 or mean_sc >= 0.05).
-    candidate_speakers = []
-    for vt in valid_tracks:
-        tidx, tr, mean_sc, max_sc, mean_s, dur = vt
-        norm_s = mean_s / float(height) if mean_s > 1.0 else mean_s
-        mean_x = float(np.mean(tr["proc_track"]["x"]))
-        norm_x = mean_x / float(width) if mean_x > 1.0 else mean_x
+    eval_tracks = prominent_tracks if prominent_tracks else valid_tracks
 
-        is_prominent_speaker = (
-            (norm_s >= 0.08 and dur >= 8)
-            or (0.18 <= norm_x <= 0.82 and dur >= 15)
-            or (max_sc >= 0.15 or mean_sc >= 0.05)
+    # Filter out secondary tracks that are mirror reflections or background passersby
+    # A track is a reflection/background if its face size is tiny compared to the primary speaker (<42%)
+    # and it does not have strong independent speech activity (max_sc < 0.15).
+    if len(eval_tracks) >= 2:
+        max_size = max(
+            is_valid_face_track(tr, scores[tidx] if tidx < len(scores) else [], frame_height=float(height))[3]
+            for tidx, tr in eval_tracks
         )
-        if is_prominent_speaker:
-            candidate_speakers.append(vt)
-
-    if not candidate_speakers:
-        logger.info("Classified layout as LETTERBOX (B-roll / cutaway: no prominent human face in scene)")
-        return "letterbox"
-
-    # Use candidate_speakers (or speaking_tracks if high-confidence ASD exists)
-    speaking_tracks = [vt for vt in candidate_speakers if vt[3] >= 0.15 or vt[2] >= 0.05]
-    active_eval_tracks = speaking_tracks if speaking_tracks else candidate_speakers
+        filtered_eval_tracks = []
+        for tidx, tr in eval_tracks:
+            sc = scores[tidx] if tidx < len(scores) else []
+            _, mean_sc, max_sc, mean_s, dur = is_valid_face_track(tr, sc, frame_height=float(height))
+            size_ratio = mean_s / max_size if max_size > 0 else 1.0
+            if size_ratio < 0.42 and max_sc < 0.15:
+                logger.info(
+                    "Rejected track %d as mirror reflection or background face (size_ratio=%.2f, max_sc=%.2f)",
+                    tidx, size_ratio, max_sc,
+                )
+                continue
+            filtered_eval_tracks.append((tidx, tr))
+        if filtered_eval_tracks:
+            eval_tracks = filtered_eval_tracks
 
     # Check for dominant primary speaker first (e.g. standard talking head, podcast host, presentation)
     has_dominant_speaker = False
-    for tidx, tr, mean_sc, max_sc, mean_s, dur in active_eval_tracks:
+    for tidx, tr in eval_tracks:
+        sc = scores[tidx] if tidx < len(scores) else []
+        _, mean_sc, max_sc, mean_s, dur = is_valid_face_track(tr, sc, frame_height=float(height))
         mean_x = float(np.mean(tr["proc_track"]["x"]))
         mean_y = float(np.mean(tr["proc_track"]["y"]))
         norm_x = mean_x / float(width) if mean_x > 1.0 else mean_x
@@ -111,34 +115,22 @@ def classify_layout(tracks: list, scores: list, width: int, height: int) -> str:
 
         # A dominant center speaker is positioned towards the center region (not tucked into an outer corner)
         is_corner = (norm_x < 0.25 or norm_x > 0.75) and (norm_y < 0.30 or norm_y > 0.70) and norm_s <= 0.28
-        if not is_corner and (norm_s >= 0.14 or (0.22 <= norm_x <= 0.78 and norm_s >= 0.08)):
+        if not is_corner and (norm_s >= 0.18 or (0.22 <= norm_x <= 0.78 and norm_s >= 0.12)) and (max_sc > 0.10 or dur > 30):
             has_dominant_speaker = True
             break
 
-    # Check for Corner Facecam (Screencast / Gaming with streamer/presenter overlay)
-    if not has_dominant_speaker:
-        for tidx, tr, mean_sc, max_sc, mean_s, dur in active_eval_tracks:
-            mean_x = float(np.mean(tr["proc_track"]["x"]))
-            mean_y = float(np.mean(tr["proc_track"]["y"]))
-            norm_x = mean_x / float(width) if mean_x > 1.0 else mean_x
-            norm_y = mean_y / float(height) if mean_y > 1.0 else mean_y
-            norm_s = mean_s / float(height) if mean_s > 1.0 else mean_s
-
-            if (
-                norm_s <= 0.28
-                and (norm_x < 0.30 or norm_x > 0.70)
-                and (norm_y < 0.35 or norm_y > 0.65)
-                and dur >= max(15, int(total_max_frame * 0.15))
-            ):
-                logger.info(
-                    "Classified layout as SCREENCAST (detected active corner facecam overlay at x=%.2f, y=%.2f, s=%.2f, max_sc=%.2f)",
-                    norm_x, norm_y, norm_s, max_sc,
-                )
-                return "screencast"
+    # Identify tracks with active speech activity in this segment/scene
+    speaking_tracks = []
+    for tidx, tr in eval_tracks:
+        sc = scores[tidx] if tidx < len(scores) else []
+        _, mean_sc, max_sc, _, _ = is_valid_face_track(tr, sc, frame_height=float(height))
+        # An active speaking track must have genuine speech confidence from TalkNet ASD
+        if max_sc >= 0.60 or mean_sc >= 0.40:
+            speaking_tracks.append((tidx, tr))
 
     # Build a per-frame mapping of simultaneous face X positions
     frame_faces: dict[int, list[float]] = {}
-    for tidx, tr, _, _, _, _ in candidate_speakers:
+    for tidx, tr in eval_tracks:
         frames = tr.get("track", {}).get("frame", []) if isinstance(tr.get("track"), dict) else tr.get("proc_track", {}).get("frame", [])
         xs = tr.get("proc_track", {}).get("x", [])
         f_list = frames.tolist() if hasattr(frames, "tolist") else list(frames)
@@ -149,8 +141,11 @@ def classify_layout(tracks: list, scores: list, width: int, height: int) -> str:
             frame_faces.setdefault(f_int, []).append(norm_x)
 
     simultaneous_distant_frames = 0
+    simultaneous_panel_frames = 0
+
     for f_int, x_coords in frame_faces.items():
         if len(x_coords) >= 2:
+            # Check if any pair is separated by at least 25% of the screen width
             has_distant_pair = False
             for i in range(len(x_coords)):
                 for j in range(i + 1, len(x_coords)):
@@ -162,20 +157,35 @@ def classify_layout(tracks: list, scores: list, width: int, height: int) -> str:
             if has_distant_pair:
                 simultaneous_distant_frames += 1
 
-    active_tracks_count = len(speaking_tracks) if speaking_tracks else len(candidate_speakers)
-    min_required_split_frames = max(45, int(total_max_frame * 0.40)) if total_max_frame > 0 else 45
+        if len(x_coords) >= 3:
+            distinct = []
+            for x in x_coords:
+                if not any(abs(x - dx) < 0.18 for dx in distinct):
+                    distinct.append(x)
+            if len(distinct) >= 3:
+                simultaneous_panel_frames += 1
+
+    min_required_split_frames = min(45, max(15, int(total_max_frame * 0.35))) if total_max_frame > 0 else 15
+
     logger.info(
-        "Layout evaluation: %d frames with >=2 distant simultaneous faces (required=%d, active_speaking_tracks=%d)",
+        "Layout evaluation: %d distant 2-face frames, %d 3-face frames (required=%d, prominent_tracks=%d, speaking_tracks=%d)",
         simultaneous_distant_frames,
+        simultaneous_panel_frames,
         min_required_split_frames,
-        active_tracks_count,
+        len(eval_tracks),
+        len(speaking_tracks),
     )
 
-    # Only choose SPLIT if we have >= 2 active speaking people who co-occur across the screen
-    if simultaneous_distant_frames >= min_required_split_frames and len(speaking_tracks) >= 2:
-        logger.info("Classified layout as SPLIT (two simultaneous active speakers)")
+    # 3+ person panel: requires 3+ simultaneous speakers across screen
+    if simultaneous_panel_frames >= min_required_split_frames and len(eval_tracks) >= 3 and len(speaking_tracks) >= 2:
+        logger.info("Classified layout as PANEL (3+ simultaneous speakers across screen)")
+        return "panel"
+
+    # 2-person split screen: ONLY if both people are actively speaking/conversing in this segment.
+    # If only 1 speaker is talking, reframe to that active speaker!
+    if simultaneous_distant_frames >= min_required_split_frames and len(eval_tracks) >= 2 and len(speaking_tracks) >= 2:
+        logger.info("Classified layout as SPLIT (two simultaneous active dialogue speakers)")
         return "split"
 
-    logger.info("Classified layout as REFRAME (single solo speaker / stage performer)")
+    logger.info("Classified layout as REFRAME (single active speaker / solo crop)")
     return "reframe"
-

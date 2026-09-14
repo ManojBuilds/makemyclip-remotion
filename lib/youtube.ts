@@ -20,13 +20,17 @@ export function normalizeVideoUrl(value: string | null | undefined): string {
 }
 
 /**
- * Returns true if the value parses as an http(s) URL.
+ * Returns true if the value starts with http:// or https:// and parses as a valid URL.
+ * Internal storage keys (e.g. 'users/...', 'renders/...') return false.
  */
-export function isHttpUrl(value: string): boolean {
+export function isHttpUrl(value: string | null | undefined): boolean {
+  if (!value || typeof value !== "string") return false
+  const trimmed = value.trim()
+  if (!/^https?:\/\//i.test(trimmed)) {
+    return false
+  }
   try {
-    const normalized = normalizeVideoUrl(value)
-    if (!normalized) return false
-    const u = new URL(normalized)
+    const u = new URL(trimmed)
     return u.protocol === "http:" || u.protocol === "https:"
   } catch {
     return false

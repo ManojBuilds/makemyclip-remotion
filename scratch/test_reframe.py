@@ -8,8 +8,8 @@ load_dotenv()
 
 MODAL_ENDPOINT = "https://ms8460149--makemyclip-ai-rendering-aireframe-reframe.modal.run"
 
-video_name = "input_5s"
-public_url = "https://www.youtube.com/watch?v=M-ZH3psUbfU"
+video_name = "klap_clip"
+public_url = "https://assets.klap.app/web-assets/360_16_9_emma_compressed.mp4"
 
 downloads_dir = os.path.join(os.path.dirname(__file__), "..", "downloads")
 os.makedirs(downloads_dir, exist_ok=True)
@@ -21,13 +21,14 @@ print(f"URL: {public_url}")
 
 payload = {
     "video_url": public_url,
-    "start_time": 335.47,
-    "end_time": 387.241,
-    "fps": 25,
+    "start_time": 0.0,
+    "end_time": 10.0,
+    "fps": 30,
     "styling": None,
     "transcript": None,
     "show_watermark": False,
-    "crop_mode": "reframe",
+    "crop_mode": "auto",
+    # "analysis_url": "https://pub-dab84dec13074258806f788a00943c46.r2.dev/analysis/test_clip_2588_2598.json",
 }
 
 start_time = time.time()

@@ -71,3 +71,4 @@ def upload_to_r2(local_path: str, key: str, *, bucket: str | None = None) -> str
     public_url = f"{os.environ['R2_PUBLIC_URL']}/{key}"
     logger.info("Upload complete: %s", public_url)
     return public_url
+

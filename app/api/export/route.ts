@@ -3,6 +3,7 @@ import { inngest } from "@/lib/inngest/client"
 import { db } from "@/lib/db"
 import { clips, projects, user } from "@/lib/db/schema"
 import { eq } from "drizzle-orm"
+import { getPlanLimit } from "@/lib/config"
 
 /**
  * POST /api/export
@@ -33,7 +34,8 @@ export async function POST(req: Request) {
     }
 
     const clip = data.clip
-    const plan = data.userPlan || "free"
+    const planConfig = getPlanLimit(data.userPlan)
+    const plan = planConfig.name === "Free" ? "free" : planConfig.name.toLowerCase()
 
     if (!clip.originalVideoUrl) {
       return NextResponse.json(

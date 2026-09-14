@@ -65,36 +65,54 @@ export function ProcessingSteps({ project }: { project: Project }) {
     }
   }
 
+  const [videoError, setVideoError] = useState(false)
+  const [imgError, setImgError] = useState(false)
+
   const youtubeId = getYouTubeId(project.sourceUrl)
   const thumbnailUrl = youtubeId
     ? `https://img.youtube.com/vi/${youtubeId}/maxresdefault.jpg`
-    : null
+    : project.thumbnailUrl || null
 
   const fallbackThumbnailUrl = youtubeId
     ? `https://img.youtube.com/vi/${youtubeId}/hqdefault.jpg`
     : null
 
+  const directVideoUrl = !youtubeId
+    ? project.videoUrl || (project.sourceUrl && !project.sourceUrl.includes("drive.google.com") ? project.sourceUrl : null)
+    : null
+
   return (
     <div className="mx-auto flex w-full max-w-[340px] flex-col items-stretch px-4 py-8 animate-in fade-in duration-300">
       
-      {/* Featured Video Thumbnail */}
-      <div className="relative aspect-[16/9] w-full overflow-hidden rounded-2xl border border-slate-100 bg-slate-50 shadow-md shadow-slate-100/50">
-        {thumbnailUrl ? (
+      {/* Featured Video Thumbnail / Preview */}
+      <div className="relative aspect-[16/9] w-full overflow-hidden rounded-2xl border border-slate-100 bg-slate-900 shadow-md shadow-slate-100/50">
+        {thumbnailUrl && !imgError ? (
           <img 
             src={thumbnailUrl} 
             alt={project.title} 
             className="h-full w-full object-cover"
             onError={(e) => {
-              e.currentTarget.src = fallbackThumbnailUrl || ""
+              if (fallbackThumbnailUrl && e.currentTarget.src !== fallbackThumbnailUrl) {
+                e.currentTarget.src = fallbackThumbnailUrl
+              } else {
+                setImgError(true)
+              }
             }}
+          />
+        ) : directVideoUrl && !videoError ? (
+          <video
+            src={directVideoUrl.includes("#") ? directVideoUrl : `${directVideoUrl}#t=0.001`}
+            muted
+            playsInline
+            preload="metadata"
+            className="h-full w-full object-cover"
+            onError={() => setVideoError(true)}
           />
         ) : (
           <div className="flex h-full w-full items-center justify-center bg-slate-50">
             <Video className="size-6 text-slate-300" />
           </div>
         )}
-        
-
       </div>
 
       {/* Video Title & Notify Action Block */}

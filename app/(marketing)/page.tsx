@@ -3,7 +3,10 @@
 import { motion } from "framer-motion"
 import { PricingSection } from "@/components/pricing-section"
 import { UnifiedInput } from "@/components/video/unified-input"
-import { Marquee } from "@/components/shadcn-space/animations/marquee"
+import { HeroHeadline } from "@/components/marketing/hero-headline"
+import { VideoShowcaseMarquee } from "@/components/marketing/video-showcase-marquee"
+import { HowItWorks } from "@/components/marketing/how-it-works"
+import { MARKETING_ASSETS } from "@/lib/marketing-assets"
 
 const fadeIn = {
   initial: { opacity: 0, y: 20 },
@@ -20,117 +23,74 @@ const staggerContainer = {
 }
 
 export default function LandingPage() {
+  const { hero } = MARKETING_ASSETS
+
   return (
-    <div className="overflow-hidden">
+    <div className="overflow-hidden bg-[#FAFAFA]">
       <main className="relative z-10">
-        {/* 2. HERO SECTION */}
+
+        {/* ── 1. HERO SECTION ──────────────────────────────────────────────── */}
         <section className="relative mx-auto max-w-[1200px] px-6 pt-32 pb-16">
-
-
           <motion.div
             variants={staggerContainer}
             initial="initial"
             animate="whileInView"
             className="mx-auto flex max-w-4xl flex-col items-center text-center"
           >
-            <motion.h1
-              variants={fadeIn}
-              className="mb-6 text-2xl leading-[1.05] font-black tracking-tight text-slate-900 md:text-4xl lg:text-[3.2rem]"
-            >
-              Turn long videos into short clips <br className="hidden md:block" />{" "}
-              <span className="text-[#0075de]">ready for social media.</span>
-            </motion.h1>
+            <motion.div variants={fadeIn}>
+              <HeroHeadline />
+            </motion.div>
 
             <motion.p
               variants={fadeIn}
-              className="md:text-lg mx-auto mb-4 max-w-3xl text-sm leading-relaxed text-muted-foreground"
+              className="md:text-lg mx-auto mb-6 max-w-2xl text-sm leading-relaxed text-slate-600 font-medium"
             >
-              Paste a YouTube link or upload a file. The app finds the best parts, crops them to vertical, and generates styled captions. Ready for TikTok, Reels, and Shorts.
+              {hero.tagline}
             </motion.p>
 
-            <motion.div variants={fadeIn} className="mt-4 w-full max-w-2xl">
+            <motion.div variants={fadeIn} className="mt-2 w-full max-w-2xl">
               <UnifiedInput />
             </motion.div>
-          </motion.div>
 
-          {/* Hero Video Demo */}
-          <motion.div
-            initial={{ opacity: 0, y: 40 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.8, delay: 0.2, ease: [0.22, 1, 0.36, 1] }}
-            className="mx-auto mt-8 w-full max-w-3xl px-4"
-          >
-            <div className="relative rounded-[24px] border border-slate-200/80 bg-white/50 p-2">
-
-              <div className="overflow-hidden rounded-[18px]">
-                <video
-                  src="https://res.cloudinary.com/dc6yzmwrq/video/upload/v1784086787/hero-demo_mlmvlg.mp4"
-                  autoPlay
-                  loop
-                  muted
-                  playsInline
-                  className="w-full object-cover shadow-inner"
-                />
-              </div>
-            </div>
+            <motion.div
+              variants={fadeIn}
+              className="mt-4 flex flex-wrap items-center justify-center gap-x-5 gap-y-2 text-xs text-slate-500 font-medium"
+            >
+              <span>{hero.freeTierNotice}</span>
+            </motion.div>
           </motion.div>
         </section>
 
-        {/* 3. SHOWCASE / VIDEO SCROLL SECTION */}
-        <section className="relative w-full bg-slate-50/50 py-20">
-          <div className="mx-auto max-w-[1200px] px-6 mb-16 text-center">
-            <h2 className="text-[36px] md:text-[44px] leading-tight font-extrabold tracking-tight text-slate-900 mb-4">
-              Cut long videos into shorts
-            </h2>
-            <p className="mx-auto max-w-[640px] text-[16px] md:text-[17px] font-medium text-slate-500 leading-relaxed">
-              Extract clips, generate captions, and export in 9:16. No manual editing needed.
-            </p>
-          </div>
 
-          <div className="relative flex flex-col gap-6 w-screen overflow-hidden select-none left-1/2 right-1/2 -ml-[50vw] -mr-[50vw]">
-            {/* Top Video Track (Moving Left) */}
-            <Marquee className="[--duration:100s] [--gap:10px] p-0" pauseOnHover>
-              {Array(6).fill("https://res.cloudinary.com/dc6yzmwrq/video/upload/v1785748265/top_web_mtve5g.webm").map((src, i) => (
-                <video
-                  key={`top-${i}`}
-                  src={src}
-                  autoPlay
-                  loop
-                  muted
-                  playsInline
-                  className="h-[400px] md:h-[575px] w-auto object-cover shrink-0 rounded-none"
-                />
-              ))}
-            </Marquee>
+        {/* ── 3. SHOWCASE VIDEO MARQUEE ────────────────────────────────────── */}
+        <VideoShowcaseMarquee />
 
-            {/* Bottom Video Track (Moving Right) */}
-            <Marquee className="[--duration:100s] [--gap:10px] p-0" reverse pauseOnHover>
-              {Array(6).fill("https://res.cloudinary.com/dc6yzmwrq/video/upload/v1785748247/bottom_web_ta2ulm.webm").map((src, i) => (
-                <video
-                  key={`bottom-${i}`}
-                  src={src}
-                  autoPlay
-                  loop
-                  muted
-                  playsInline
-                  className="h-[400px] md:h-[575px] w-auto object-cover shrink-0 rounded-none"
-                />
-              ))}
-            </Marquee>
-          </div>
-        </section>
-        <UnifiedInput className="max-w-2xl mx-auto" />
+        {/* ── 4. HOW IT WORKS (3 STEPS) ────────────────────────────────────── */}
+        <HowItWorks />
 
-        {/* 8. FAQ */}
-        <section id="faq" className="mx-auto max-w-4xl px-6 py-24">
+        {/* ── 5. PRICING & FAQ ─────────────────────────────────────────────── */}
+        <section id="pricing" className="mx-auto max-w-6xl px-6 py-20">
           <PricingSection
             showFAQ={true}
             showPacks={false}
-            showPlans={false}
-            showExplanation={false}
+            showPlans={true}
+            showExplanation={true}
           />
+        </section>
+
+        {/* ── 8. BOTTOM CALL TO ACTION ─────────────────────────────────────── */}
+        <section className="relative mx-auto max-w-[1200px] px-6 py-20 text-center">
+          <div className="mx-auto max-w-2xl mb-8">
+            <h2 className="text-2xl md:text-3xl font-extrabold text-slate-900 tracking-tight mb-3">
+              Ready to turn your videos into viral clips?
+            </h2>
+            <p className="text-sm md:text-base font-medium text-slate-600 leading-relaxed">
+              Paste a link below or drop your file to get started.
+            </p>
+          </div>
           <UnifiedInput className="max-w-2xl mx-auto" />
         </section>
+
       </main>
     </div>
   )

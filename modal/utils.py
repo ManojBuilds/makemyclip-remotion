@@ -26,10 +26,63 @@ def normalize_url(url: str | None) -> str:
     return u
 
 
+SUPPORTED_PLATFORMS = {
+    "youtube": ("youtube.com", "youtu.be"),
+    "google_drive": ("drive.google.com",),
+    "vimeo": ("vimeo.com",),
+    "loom": ("loom.com",),
+    "twitch": ("twitch.tv", "clips.twitch.tv"),
+}
+
+DIRECT_MEDIA_EXTENSIONS = (
+    ".mp4",
+    ".webm",
+    ".mov",
+    ".mkv",
+    ".mp3",
+    ".wav",
+    ".m4a",
+    ".aac",
+    ".ogg",
+    ".flac",
+)
+
+
+def detect_video_source(url: str | None) -> str:
+    """Return platform key ('youtube', 'google_drive', 'vimeo', 'loom', 'twitch', 'direct', 'unknown')."""
+    if not url or not isinstance(url, str):
+        return "unknown"
+    normalized = normalize_url(url).lower()
+    for platform, domains in SUPPORTED_PLATFORMS.items():
+        if any(d in normalized for d in domains):
+            return platform
+    clean_path = normalized.split("?")[0].split("#")[0]
+    if any(clean_path.endswith(ext) for ext in DIRECT_MEDIA_EXTENSIONS):
+        return "direct"
+    if "r2.cloudflarestorage.com" in normalized or "s3.amazonaws.com" in normalized:
+        return "direct"
+    return "unknown"
+
+
+def is_ytdlp_supported_url(url: str) -> bool:
+    """Return True if ``url`` can be processed by yt-dlp."""
+    return detect_video_source(url) in (
+        "youtube",
+        "google_drive",
+        "vimeo",
+        "loom",
+        "twitch",
+    )
+
+
+def is_direct_media_url(url: str) -> bool:
+    """Return True if ``url`` points directly to a raw media file/stream."""
+    return detect_video_source(url) == "direct"
+
+
 def is_youtube_url(url: str) -> bool:
-    """Return True if ``url`` points to a YouTube video."""
-    normalized = normalize_url(url)
-    return "youtube.com" in normalized or "youtu.be" in normalized
+    """Return True if ``url`` points to a YouTube video (retained for backward compatibility)."""
+    return detect_video_source(url) == "youtube"
 
 
 def validate_url(url: str, *, label: str = "url") -> str:

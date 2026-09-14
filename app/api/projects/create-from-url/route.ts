@@ -4,7 +4,9 @@ import { db } from "@/lib/db"
 import { projects, user } from "@/lib/db/schema"
 import { inngest } from "@/lib/inngest/client"
 import { getServerSession } from "@/lib/auth-server"
-import { fetchYouTubeMetadata, normalizeVideoUrl } from "@/lib/youtube"
+import { normalizeVideoUrl } from "@/lib/youtube"
+import { isSupportedVideoUrl } from "@/lib/video-sources"
+import { fetchUniversalVideoMetadata } from "@/lib/video-sources-server"
 import { getPlanLimit } from "@/lib/config"
 
 export async function POST(req: Request) {
@@ -23,6 +25,10 @@ export async function POST(req: Request) {
       transcribeLanguage,
       translateLanguage,
       removeSilence,
+      isSingleClip,
+      cropMode,
+      startTime,
+      endTime,
     } = await req.json()
 
     if (!url || typeof url !== "string") {
@@ -30,8 +36,18 @@ export async function POST(req: Request) {
     }
 
     const normalizedUrl = normalizeVideoUrl(url)
+    if (!isSupportedVideoUrl(normalizedUrl)) {
+      return NextResponse.json(
+        {
+          error: "Invalid video URL",
+          message:
+            "Unsupported platform. Please provide a valid YouTube, Google Drive, Vimeo, Loom, Twitch, or direct video link.",
+        },
+        { status: 400 }
+      )
+    }
 
-    // 1. Fetch YouTube metadata (title + duration) only if it wasn't pre-fetched by the client
+    // 1. Fetch metadata (title + duration) only if it wasn't pre-fetched by the client
     //    so we can validate credits and persist the real values on the project record.
     let duration: number
     let finalTitle: string
@@ -39,12 +55,12 @@ export async function POST(req: Request) {
     if (typeof providedDuration === "number" && providedDuration > 0) {
       duration = providedDuration
       finalTitle =
-        (providedTitle && String(providedTitle).trim()) || "YouTube Video"
+        (providedTitle && String(providedTitle).trim()) || "Video Project"
       console.log("Reusing client-provided metadata:", { duration, finalTitle })
     } else {
       let metadata
       try {
-        metadata = await fetchYouTubeMetadata(normalizedUrl)
+        metadata = await fetchUniversalVideoMetadata(normalizedUrl)
       } catch (err) {
         const message =
           err instanceof Error ? err.message : "Failed to fetch video info."
@@ -54,7 +70,7 @@ export async function POST(req: Request) {
         )
       }
       duration = metadata.duration
-      console.log("Fetched YouTube metadata:", metadata)
+      console.log("Fetched video metadata:", metadata)
       finalTitle =
         (providedTitle && String(providedTitle).trim()) || metadata.title
     }
@@ -104,10 +120,13 @@ export async function POST(req: Request) {
         status: "uploading", // Will transition to processing in Inngest
         sourceVideoKey: normalizedUrl, // Store URL as key (Inngest detects http(s) and skips R2 presigning)
         duration,
-        videoFormat: videoFormat || "reframe",
+        videoFormat: cropMode || videoFormat || "reframe",
         transcribeLanguage: transcribeLanguage || "auto",
         translateLanguage: translateLanguage || "none",
         removeSilence: removeSilence !== undefined ? removeSilence : true,
+        isSingleClip: Boolean(isSingleClip),
+        clipStartTime: typeof startTime === "number" ? startTime : null,
+        clipEndTime: typeof endTime === "number" ? endTime : null,
         ...(styling
           ? {
               captionStyle: styling.preset || styling.name || "impact",
@@ -126,6 +145,10 @@ export async function POST(req: Request) {
         videoUrl: normalizedUrl,
         title: project.title,
         duration,
+        isSingleClip: Boolean(isSingleClip),
+        cropMode: cropMode || videoFormat || "auto",
+        startTime: typeof startTime === "number" ? startTime : undefined,
+        endTime: typeof endTime === "number" ? endTime : undefined,
       },
     })
 

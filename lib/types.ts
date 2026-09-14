@@ -10,6 +10,8 @@ export type Project = {
   isYouTube?: boolean
   duration?: number | null
   clipCount?: number
+  isSingleClip?: boolean
+  thumbnailUrl?: string | null
 }
 
 export type Clip = {

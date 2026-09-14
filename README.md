@@ -1,3 +1,5 @@
+but aftter this it has reintroduce the new problem again please analyze it i had fixed it before but after i upgrade it to download better quality it giving me like this
+$3.03 (modal) -> 3.87 49.54 $ for assemblyai 
 # Next.js template
 
 This is a Next.js template with shadcn/ui.

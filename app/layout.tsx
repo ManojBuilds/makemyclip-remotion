@@ -1,4 +1,4 @@
-import { Geist_Mono, TikTok_Sans } from "next/font/google"
+import { Geist_Mono, TikTok_Sans, Google_Sans, Poppins } from "next/font/google"
 import type { Metadata } from "next"
 import { ClerkProvider } from "@clerk/nextjs"
 
@@ -63,9 +63,9 @@ export const metadata: Metadata = {
   isReadOnly: true, // not a standard Next metadata property, just keeping user changes if any
 } as any
 
-const inter = TikTok_Sans({
+const inter = Poppins({
   subsets: ["latin"],
-  weight: ["300", "400", "500", "600", "700", "800", "900"],
+  weight: ["300", "400", "500"],
   variable: "--font-sans",
 })
 
@@ -93,7 +93,7 @@ export default function RootLayout({
       >
         <body>
           <PostHogProvider>
-            <ThemeProvider>
+            <ThemeProvider defaultTheme="light">
               <DashboardProvider>{children}</DashboardProvider>
             </ThemeProvider>
             <Toaster position="top-right" richColors closeButton />

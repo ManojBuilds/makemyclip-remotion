@@ -173,7 +173,7 @@ def classify_content(
 
     # 3. Screencast / Presentation checks
     # Screen recordings (browser, code editors, slides, spreadsheets, app UIs)
-    # have sharp UI/text edge density (typically 0.18 - 0.40) or a corner facecam overlay.
+    # have sharp UI/text edge density with a corner facecam overlay, or pure text/UI with no faces.
     has_corner_face = False
     if face_positions:
         for f in face_positions:
@@ -185,7 +185,7 @@ def classify_content(
                 has_corner_face = True
                 break
 
-    if edge_score > 0.18 or (has_corner_face and edge_score > 0.10):
+    if (has_corner_face and edge_score > 0.12) or (known_face_count == 0 and edge_score > 0.35):
         return ContentClassification(
             content_type=ContentType.SCREENCAST,
             confidence=0.92,

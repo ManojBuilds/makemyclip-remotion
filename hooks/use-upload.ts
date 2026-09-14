@@ -39,7 +39,13 @@ export function useUpload() {
       videoFormat?: string,
       transcribeLanguage?: string,
       translateLanguage?: string,
-      removeSilence?: boolean
+      removeSilence?: boolean,
+      options?: {
+        isSingleClip?: boolean
+        cropMode?: string
+        startTime?: number
+        endTime?: number
+      }
     ) => {
       try {
         setState({
@@ -145,10 +151,14 @@ export function useUpload() {
             title,
             duration,
             styling,
-            videoFormat,
+            videoFormat: options?.cropMode || videoFormat,
             transcribeLanguage,
             translateLanguage,
             removeSilence: removeSilence ?? true,
+            isSingleClip: options?.isSingleClip,
+            cropMode: options?.cropMode,
+            startTime: options?.startTime,
+            endTime: options?.endTime,
           }),
         })
 

@@ -44,7 +44,12 @@ _LOCAL_SOURCES = (
     "content_classifier",
     "render_strategies",
     "silence_remover",
+    "viral_constants",
+    "sentence_utils",
+    "viral_discovery",
+    "viral_heuristics",
 )
+
 
 # --- Image ---
 image = (

@@ -24,8 +24,8 @@ import numpy as np
 from config import RECOMMENDED_GPU, ai_secret, app, image, youtube_cookies_secret
 from models import AnalyzeVideoRequest, AnalyzeVideoResponse
 from r2_storage import upload_to_r2
-from utils import StageTimer, is_youtube_url, validate_url
-from ytdlp_helper import download_youtube_video
+from utils import StageTimer, is_youtube_url, is_ytdlp_supported_url, validate_url
+from ytdlp_helper import download_media_video, download_youtube_video
 
 try:
     import cv2
@@ -222,14 +222,10 @@ class VideoAnalyzer:
         self.ASD_MODEL.eval()
         self.ASD_MODEL.cuda()
 
-        self.TALKNCE_MODEL = create_talknce_engine(
-            weight_path="/root/asd/weight/finetuning_TalkSet.model",
-            device="cuda" if torch.cuda.is_available() else "cpu",
-        )
-
+        self.TALKNCE_MODEL = None
         from reframer import AIReframe
         self.use_nvenc = AIReframe._probe_nvenc()
-        logger.info("Analyzer models loaded successfully (NVENC=%s, TalkNCE=Active).", self.use_nvenc)
+        logger.info("Analyzer models loaded successfully (NVENC=%s).", self.use_nvenc)
 
     @modal.method()
     def analyze_chunk(
@@ -256,8 +252,8 @@ class VideoAnalyzer:
         with tempfile.TemporaryDirectory() as tmpdir:
             v_input = video_url
             segment_offset = 0.0
-            if is_youtube_url(video_url):
-                v_input, segment_offset = download_youtube_video(
+            if is_ytdlp_supported_url(video_url):
+                v_input, segment_offset = download_media_video(
                     video_url,
                     tmpdir,
                     start_time=start_time,
@@ -311,16 +307,47 @@ class VideoAnalyzer:
 
             eff_start = start_time - segment_offset
 
+            # If downloaded video starts earlier than chunk (e.g. yt-dlp padding),
+            # pre-trim so frame 0 starts EXACTLY at start_time for frame-accurate tracking & audio sync
+            if eff_start > 0.0:
+                chunk_pretrim = os.path.join(tmpdir, f"chunk_pretrim_{chunk_idx}.mp4")
+                pretrim_codec = (
+                    ["h264_nvenc", "-preset", "p1"]
+                    if getattr(self, "use_nvenc", False)
+                    else ["libx264", "-preset", "ultrafast", "-crf", "18"]
+                )
+                try:
+                    subprocess.run(
+                        [
+                            "ffmpeg", "-y",
+                            "-i", v_input,
+                            "-ss", str(eff_start),
+                            "-t", str(duration),
+                            "-c:v", *pretrim_codec,
+                            "-c:a", "aac",
+                            "-b:a", "192k",
+                            "-avoid_negative_ts", "make_zero",
+                            chunk_pretrim,
+                            "-loglevel", "warning",
+                        ],
+                        check=True,
+                        timeout=300,
+                    )
+                    v_input = chunk_pretrim
+                    eff_start = 0.0
+                except Exception as trim_err:
+                    logger.warning("Chunk pre-trim failed, proceeding with seek offset: %s", trim_err)
+
             # Extract chunk audio (unless already extracted in combined download above)
-            if not is_youtube_url(video_url) and os.path.exists(os.path.join(tmpdir, "chunk_audio.aac")) and os.path.getsize(os.path.join(tmpdir, "chunk_audio.aac")) > 0:
+            if not is_ytdlp_supported_url(video_url) and os.path.exists(os.path.join(tmpdir, "chunk_audio.aac")) and os.path.getsize(os.path.join(tmpdir, "chunk_audio.aac")) > 0:
                 chunk_audio = os.path.join(tmpdir, "chunk_audio.aac")
                 logger.info("Using audio from combined download pass")
             else:
                 chunk_audio = os.path.join(tmpdir, "chunk_audio.aac")
                 ffmpeg_cmd = [
                     "ffmpeg", "-y",
-                    "-ss", str(eff_start),
                     "-i", v_input,
+                    "-ss", str(eff_start),
                     "-t", str(duration),
                     "-vn", "-c:a", "aac", "-b:a", "192k",
                     chunk_audio,
@@ -375,9 +402,9 @@ class VideoAnalyzer:
         with tempfile.TemporaryDirectory() as tmpdir:
             fps = 25.0
 
-            if is_youtube_url(vurl):
-                from ytdlp_helper import get_youtube_info
-                info_dict = get_youtube_info(vurl)
+            if is_ytdlp_supported_url(vurl):
+                from ytdlp_helper import get_media_info
+                info_dict = get_media_info(vurl)
                 full_duration = info_dict.get("duration") or (req_duration or 300.0)
                 fps = info_dict.get("fps") or 25.0
                 width = info_dict.get("width") or 1280
@@ -459,7 +486,7 @@ class VideoAnalyzer:
                         mask = (frames >= global_sf) & (frames <= global_ef)
                         if np.any(mask):
                             scene_tracks.append({
-                                "track": {"frame": frames[mask]},
+                                "track": {"frame": frames[mask] - global_sf},
                                 "proc_track": {
                                     "x": px[mask],
                                     "y": py[mask],
@@ -534,7 +561,7 @@ class VideoAnalyzer:
                 content_classification.recommended_crop_mode,
             )
 
-            if content_classification.recommended_crop_mode in ("screencast", "presentation", "gaming", "panel"):
+            if content_classification.recommended_crop_mode in ("screencast", "presentation", "gaming"):
                 for sl in scene_layouts:
                     if sl["recommended_layout"] == "reframe":
                         sl["recommended_layout"] = content_classification.recommended_crop_mode
@@ -667,4 +694,4 @@ class VideoAnalyzer:
         """Unified analysis endpoint: runs asynchronously if async_mode=True, else synchronously."""
         if getattr(req, "async_mode", False):
             return self.submit(req)
-        return self.run_full_analysis(req.model_dump())
+        return self.run_full_analysis.local(req.model_dump())
