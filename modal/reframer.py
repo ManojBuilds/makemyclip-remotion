@@ -1208,6 +1208,7 @@ class AIReframe:
         video_path: str | None = None,
         start_time_in_video: float = 0.0,
         audio_wav_path: str | None = None,
+        transcript: list | None = None,
     ):
         from collections import deque
 
@@ -1545,6 +1546,27 @@ class AIReframe:
             for sf, ef in scene_bounds:
                 scene_starts.add(sf)
 
+        # Precompute natural speech/breath pause frames for audio-driven camera cuts
+        pause_frames = set()
+        if transcript:
+            all_words = []
+            for block in transcript:
+                all_words.extend(block.get("words", []))
+            for i in range(len(all_words) - 1):
+                gap_start = all_words[i].get("end", 0.0)
+                gap_end = all_words[i + 1].get("start", 0.0)
+                if gap_end - gap_start >= 0.12:
+                    sf = int(gap_start * fps)
+                    ef = int(gap_end * fps)
+                    for f in range(sf, ef + 1):
+                        pause_frames.add(f)
+
+        if audio_rms is not None and len(audio_rms) > 0:
+            rms_threshold = float(np.percentile(audio_rms, 20))
+            for f, val in enumerate(audio_rms):
+                if val <= rms_threshold:
+                    pause_frames.add(f)
+
         # Unified persistent state dictionary across all frames for strategies
         render_state: dict[str, Any] = {
             "current_cx": None,
@@ -1555,6 +1577,8 @@ class AIReframe:
             "scene_median_s": scene_median_s,
             "scene_starts": scene_starts,
             "all_faces": faces,
+            "fps": fps,
+            "pause_frames": pause_frames,
         }
 
         # Visual scene cut synchronization engine:
@@ -2781,6 +2805,7 @@ class AIReframe:
                             video_path=clip_pretrim,
                             start_time_in_video=0.0,
                             audio_wav_path=clip_wav_for_punch,
+                            transcript=clip_req.transcript,
                         )
 
                         if not os.path.exists(local_orig) or os.path.getsize(local_orig) == 0:

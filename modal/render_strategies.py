@@ -94,8 +94,9 @@ class ReframeStrategy(RenderStrategy):
             current_target_cx = float(target_cx)
             current_target_cy = float(target_cy)
 
-        # Dead zones
-        DEAD_ZONE_PX = 15.0
+        # Dead zones (damped in close-up mode for rock-solid stability)
+        angle_mode_prev = state.get("angle_mode", "medium")
+        DEAD_ZONE_PX = 24.0 if angle_mode_prev == "closeup" else 15.0
         if target_cx - current_target_cx > DEAD_ZONE_PX:
             current_target_cx = float(target_cx - DEAD_ZONE_PX)
         elif current_target_cx - target_cx > DEAD_ZONE_PX:
@@ -119,19 +120,63 @@ class ReframeStrategy(RenderStrategy):
             current_cx += (current_target_cx - current_cx) * adaptive_alpha
             current_cy += (current_target_cy - current_cy) * (adaptive_alpha * 0.5)
 
+        # ── Dynamic 2-Camera Angle Switching ────────────────────────────────
+        # Simulates professional studio multi-camera cutting between:
+        # Angle 1: Medium shot (1.0x full vertical framing)
+        # Angle 2: Punch-in close-up shot (~1.22x framing focused on upper chest & eyes)
+        enable_dynamic_angles = state.get("enable_dynamic_angles", True)
+        fps = float(state.get("fps", 25.0))
+        angle_mode = state.get("angle_mode", "medium")
+        angle_hold_frames = state.get("angle_hold_frames", 0) + 1
+        pause_frames = state.get("pause_frames", set())
+
+        if enable_dynamic_angles:
+            MIN_ANGLE_HOLD_FRAMES = int(4.0 * fps)
+            MAX_ANGLE_HOLD_FRAMES = int(7.5 * fps)
+
+            # Switch triggers:
+            # 1. Scene start resets to Medium shot
+            # 2. Speaker switched triggers an immediate cut to the opposite angle
+            # 3. Holding an angle for >= MIN_ANGLE_HOLD_FRAMES and hitting a natural breath/speech pause
+            # 4. Fallback: holding an angle past MAX_ANGLE_HOLD_FRAMES triggers a cut
+            if is_scene_start:
+                angle_mode = "medium"
+                angle_hold_frames = 0
+            elif speaker_switched and angle_hold_frames >= int(2.0 * fps):
+                angle_mode = "closeup" if angle_mode == "medium" else "medium"
+                angle_hold_frames = 0
+            elif angle_hold_frames >= MIN_ANGLE_HOLD_FRAMES and (fidx in pause_frames or angle_hold_frames >= MAX_ANGLE_HOLD_FRAMES):
+                angle_mode = "closeup" if angle_mode == "medium" else "medium"
+                angle_hold_frames = 0
+
+        state["angle_mode"] = angle_mode
+        state["angle_hold_frames"] = angle_hold_frames
+
         # Framing calculations: Keep the full vertical shot with head and body intact
-        # For standard landscape (16:9) to vertical (9:16), use 100% full vertical height (y1=0, crop_h=img_h)
-        # to ensure 100% of headroom, hair, and posture are completely preserved without cutoff.
+        # For standard landscape (16:9) to vertical (9:16), Angle 1 uses full height (1.0x)
+        # while Angle 2 punches in slightly (1.22x) with cinematic upper-third headroom.
         img_h, img_w = img.shape[:2]
         target_aspect = float(self.target_w) / float(self.target_h)
         source_aspect = float(img_w) / float(img_h)
 
+        zoom_mult = 1.22 if (enable_dynamic_angles and angle_mode == "closeup") else 1.0
+
         if source_aspect >= target_aspect:
-            crop_h = float(img_h)
+            base_crop_h = float(img_h)
+            crop_h = base_crop_h / zoom_mult
             crop_w = crop_h * target_aspect
-            y1 = 0.0
+
+            if zoom_mult > 1.0:
+                # Close-up punch: position face center at ~42% from the top (upper-third eye line)
+                # leaving generous 10-12% headroom so hair never touches top frame border
+                src_cy = current_cy / scale if current_cy is not None else img_h * 0.35
+                y1 = max(0.0, min(src_cy - crop_h * 0.42, float(img_h) - crop_h))
+            else:
+                # Medium shot: preserve 100% full vertical height
+                y1 = 0.0
         else:
-            crop_w = float(img_w)
+            base_crop_w = float(img_w)
+            crop_w = (base_crop_w / zoom_mult)
             crop_h = crop_w / target_aspect
             src_cy = current_cy / scale if current_cy is not None else img_h * 0.35
             y1 = max(0.0, min(src_cy - crop_h * 0.30, float(img_h) - crop_h))
