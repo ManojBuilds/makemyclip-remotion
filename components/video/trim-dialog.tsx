@@ -378,7 +378,7 @@ export function EditClipDialog({
           {/* ── LEFT PANE: Video Player & Timeline Trim (lg:col-span-5) ── */}
           <div className="lg:col-span-5 flex flex-col justify-between border-r border-slate-200/70 bg-slate-50/60 p-4 sm:p-5 overflow-y-auto">
             {/* 9:16 Black Video Container */}
-            <div className="relative mx-auto flex aspect-[9/16] h-[360px] sm:h-[420px] max-h-[440px] w-auto items-center justify-center overflow-hidden rounded-2xl bg-slate-950 shadow-lg border border-slate-900">
+            <div className="relative mx-auto flex aspect-[9/16] h-[360px] sm:h-[420px] max-h-[440px] w-auto items-center justify-center overflow-hidden rounded-2xl">
               {videoUrl ? (
                 <video
                   ref={videoRef}
@@ -394,11 +394,6 @@ export function EditClipDialog({
                   No video preview available
                 </div>
               )}
-
-              {/* Top Timecode Badge */}
-              <div className="absolute top-2.5 left-1/2 -translate-x-1/2 rounded-md bg-black/60 px-2.5 py-0.5 text-[11px] font-mono font-medium text-white backdrop-blur-sm pointer-events-none">
-                {formatTimecode(currentTimeRel)} / {formatTimecode(clipDuration)}
-              </div>
 
               {/* Bottom Floating Play / Volume Controls */}
               <div className="absolute bottom-2.5 left-2.5 z-20">

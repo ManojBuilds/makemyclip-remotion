@@ -10,6 +10,7 @@ killed reliably; subprocess.run + timeout will SIGKILL a stuck yt-dlp).
 
 from __future__ import annotations
 
+import json as _json
 import logging
 import os
 import subprocess
@@ -20,6 +21,77 @@ logger = logging.getLogger("makemyclip.ytdlp")
 # Seconds of padding added to each side of a segment download range.
 # Shared with reframer.py so the ffmpeg seek offset stays in sync.
 SEGMENT_DOWNLOAD_PAD_S = 10.0
+
+
+def _probe_file_duration(path: str) -> float | None:
+    """Return the container duration (seconds) via ffprobe, or None on failure."""
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe", "-v", "error",
+                "-show_entries", "format=duration",
+                "-of", "json",
+                path,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        data = _json.loads(result.stdout)
+        return float(data["format"]["duration"])
+    except Exception as e:  # noqa: BLE001
+        logger.warning("ffprobe duration check failed for %s: %s", path, e)
+        return None
+
+
+def _adjust_segment_offset(
+    local_path: str,
+    seg_start: float,
+    seg_end: float,
+    actual_segment_offset: float,
+) -> float:
+    """Correct ``actual_segment_offset`` for HLS keyframe-alignment drift.
+
+    When yt-dlp downloads an HLS stream with ``-ss <seg_start> -c copy``,
+    ffmpeg seeks to the nearest keyframe/segment boundary **before** the
+    requested time.  The downloaded file therefore starts *earlier* than
+    ``seg_start``, making the returned ``actual_segment_offset`` too large.
+    Downstream code subtracts ``segment_offset`` from the desired clip
+    start-time to compute an ffmpeg ``-ss`` seek position inside the file;
+    an inflated offset means it seeks too early and the clip drifts.
+
+    Fix: probe the file's real duration, compare with the expected span
+    (``seg_end - seg_start``), and shift the offset backwards by the
+    surplus at the front.
+    """
+    actual_dur = _probe_file_duration(local_path)
+    if actual_dur is None:
+        return actual_segment_offset
+
+    expected_dur = seg_end - seg_start
+    surplus = actual_dur - expected_dur
+
+    if surplus > 0.5:  # more than 0.5 s extra → likely keyframe drift
+        # The surplus is split between front and back; HLS segments are
+        # usually aligned to identical boundaries, so the front gets
+        # roughly half.  However empirically the *front* accounts for
+        # most of the drift (ffmpeg always seeks to the keyframe BEFORE
+        # -ss), so attribute the full surplus to the front.
+        corrected = max(0.0, actual_segment_offset - surplus)
+        logger.info(
+            "⏱️  Segment offset correction: requested=%.2fs, "
+            "expected_dur=%.2fs, actual_dur=%.2fs, surplus=%.2fs → "
+            "offset adjusted from %.2f → %.2f",
+            seg_start,
+            expected_dur,
+            actual_dur,
+            surplus,
+            actual_segment_offset,
+            corrected,
+        )
+        return corrected
+
+    return actual_segment_offset
 
 
 def write_cookies_file(tmpdir: str) -> str | None:
@@ -404,22 +476,45 @@ def download_youtube_video(
     # it plays nicely with time-ranged (--download-sections style) downloads.
     format_sort = [f"res:{target_res}", "res:720", "proto:m3u8_native", "vcodec:h264", "quality"]
 
+    cleaned_url, platform = sanitize_source_url(vurl)
+
     actual_segment_offset = 0.0
     seg_start = 0.0
     seg_end = 0.0
-    if start_time is not None and end_time is not None:
-        seg_start = max(0.0, start_time - SEGMENT_DOWNLOAD_PAD_S)
-        seg_end = end_time + SEGMENT_DOWNLOAD_PAD_S
-        actual_segment_offset = seg_start
-        logger.info(
-            "Segment download enabled: %.1f–%.1f (padded from %.1f–%.1f)",
-            seg_start,
-            seg_end,
-            start_time,
-            end_time,
-        )
+    use_segment_download = False
 
-    cleaned_url, platform = sanitize_source_url(vurl)
+    # Maximum duration (seconds) to download full video instead of range download.
+    # 9000s = 2.5 hours.
+    # YouTube HLS range downloads suffer from fragment-boundary snapping and
+    # FFmpeg duplicate frame injection (~150 dup frames / 6.25s) at the front of
+    # the downloaded segment, distorting the file's timeline and causing clips to
+    # start several seconds off. Full-video download guarantees 100% frame-accurate
+    # cuts, zero HLS drift, and zero duplicate padding frames. In Modal's datacenter,
+    # downloading a full 720p 2-hour video takes only ~15-25 seconds.
+    MAX_FULL_DOWNLOAD_DURATION_S = 9000.0
+
+    if start_time is not None and end_time is not None:
+        if platform == "youtube" and end_time <= MAX_FULL_DOWNLOAD_DURATION_S:
+            logger.info(
+                "Full video download selected for %s (end_time=%.1fs <= 2.5h) "
+                "to ensure 100%% frame-accurate cuts and avoid HLS segment drift",
+                platform,
+                end_time,
+            )
+            use_segment_download = False
+            actual_segment_offset = 0.0
+        else:
+            use_segment_download = True
+            seg_start = max(0.0, start_time - SEGMENT_DOWNLOAD_PAD_S)
+            seg_end = end_time + SEGMENT_DOWNLOAD_PAD_S
+            actual_segment_offset = seg_start
+            logger.info(
+                "Segment download enabled: %.1f–%.1f (padded from %.1f–%.1f)",
+                seg_start,
+                seg_end,
+                start_time,
+                end_time,
+            )
 
     if platform == "youtube":
         strategies = [
@@ -492,6 +587,7 @@ def download_youtube_video(
                 "merge_output_format": "mp4",
                 "format_sort": format_sort,
                 "postprocessors": [{"key": "FFmpegVideoRemuxer", "preferedformat": "mp4"}],
+                "force_keyframes_at_cuts": True,  # NEW: forces exact -ss cut instead of nearest-keyframe snap
             }
 
             if strategy["player_client"]:
@@ -501,7 +597,7 @@ def download_youtube_video(
                     }
                 }
 
-            if start_time is not None and end_time is not None:
+            if use_segment_download:
                 ydl_opts["download_ranges"] = download_range_func(
                     None, [(seg_start, seg_end)]
                 )
@@ -587,6 +683,13 @@ def download_youtube_video(
                     # Check if resolution meets requirement
                     min_acceptable = min(target_res, quality_floor)
                     if dl_height >= min_acceptable or strat_idx == len(strategies) - 1:
+                        # Note: With force_keyframes_at_cuts=True set on ydl_opts, yt-dlp re-encodes
+                        # around the cut point using accurate input-seeking, so the downloaded file's
+                        # frame 0 reliably starts at seg_start. Any container-duration surplus now comes
+                        # from tail-side duplicate frames (e.g. inserted to bridge timestamp gaps from
+                        # stripped ads), not front drift, so correcting actual_segment_offset based on
+                        # total duration surplus is no longer valid and produces an incorrect (too-late)
+                        # clip start.
                         return local_path, actual_segment_offset
                     else:
                         logger.warning(

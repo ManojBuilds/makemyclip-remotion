@@ -508,7 +508,7 @@ export function UnifiedInput({
               {detectedPlatform !== "unsupported" && (
                 <div
                   title={PLATFORM_INFO[detectedPlatform].name}
-                  className="ml-1.5 mr-0.5 flex h-7 w-7 sm:h-8 sm:w-8 shrink-0 items-center justify-center rounded-lg bg-slate-50 border border-slate-200/80 shadow-2xs animate-in fade-in zoom-in-95 duration-150"
+                  className="ml-1.5 shrink-0 flex items-center justify-center animate-in fade-in zoom-in-95 duration-150"
                 >
                   <PlatformLogo platform={detectedPlatform} className="h-4 w-4 sm:h-4.5 sm:w-4.5" />
                 </div>
@@ -517,7 +517,10 @@ export function UnifiedInput({
                 ref={urlInputRef}
                 type="text"
                 placeholder={placeholder}
-                className="h-10 sm:h-11 w-full flex-1 border-0 bg-transparent px-2 sm:px-3 text-[14px] sm:text-[15px] font-normal text-slate-800 shadow-none placeholder:text-slate-400 focus:outline-none focus-visible:ring-0 focus-visible:ring-offset-0"
+                className={cn(
+                  "h-10 sm:h-11 w-full flex-1 border-0 bg-transparent text-[14px] sm:text-[15px] font-normal text-slate-800 shadow-none placeholder:text-slate-400 focus:outline-none focus-visible:ring-0 focus-visible:ring-offset-0",
+                  detectedPlatform !== "unsupported" ? "pl-2 pr-2 sm:pr-3" : "px-2 sm:px-3"
+                )}
                 value={youtubeUrl}
                 onChange={(e) => setYoutubeUrl(e.target.value)}
                 onKeyDown={(e) => {

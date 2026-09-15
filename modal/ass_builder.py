@@ -823,38 +823,39 @@ def _emit_events(
         pill_c = hex_to_ass_color(pill_color_hex or base.get("pillcolor", pill_default))
         pill_bgr = f"{pill_c.b:02X}{pill_c.g:02X}{pill_c.r:02X}"
         phrase_plain = " ".join(w["word"] for w in phrase_group)
+        pill_pad = (base.get("animation_metadata") or {}).get("pill_padding", {})
+        pad_x = pill_pad.get("x", 20)
+        pad_y = pill_pad.get("y", 10)
+        xbord = max(1, int(pad_x * SCALE_FACTOR))
+        ybord = max(1, int(pad_y * SCALE_FACTOR))
 
         for idx in range(len(phrase_group)):
             word = phrase_group[idx]
-            start = word["start"]
-            raw_word_end = word.get("end", start + 0.3)
-
+            start = p_start if idx == 0 else word["start"]
             if idx < len(phrase_group) - 1:
-                next_start = phrase_group[idx + 1]["start"]
-                end = min(next_start, max(start + MIN_WORD_DURATION_S, min(raw_word_end, start + MAX_WORD_HIGHLIGHT_S)))
-                if end <= start:
-                    end = min(next_start, start + 0.1)
+                end = phrase_group[idx + 1]["start"]
             else:
-                end = min(p_end, max(start + MIN_WORD_DURATION_S, min(raw_word_end, start + MAX_WORD_HIGHLIGHT_S)))
+                end = p_end
 
             if end <= start:
-                end = start + 0.1
+                end = start + 0.05
 
             # Build box layers (inactive words alpha=FF, active word alpha=00)
             box_words = []
             for w_idx, w in enumerate(phrase_group):
+                word_text = w["word"]
                 if w_idx == idx:
-                    box_words.append(rf"{{\alpha&H00&}}{w['word']}{{\alpha&HFF&}}")
+                    box_words.append(rf"{{\alpha&H00&}}{word_text}{{\alpha&HFF&}}")
                 else:
-                    box_words.append(rf"{{\alpha&HFF&}}{w['word']}")
+                    box_words.append(rf"{{\alpha&HFF&}}{word_text}")
             box_line = " ".join(box_words)
 
-            # Layer 0: Box shadow (subtle black drop/edge for the box)
+            # Layer 0: Box shadow (3D drop for the pill matching 3D text extrusion)
             subs.events.append(
                 pysubs2.SSAEvent(
                     start=pysubs2.make_time(s=start),
                     end=pysubs2.make_time(s=end),
-                    text=rf"{{\pos(540,{y-1})\an2\blur1\alpha&HFF&\3c&H000000&\c&H000000&\fscy88\xbord12\ybord1}}{box_line}",
+                    text=rf"{{\pos({CX},{y+5})\an2\blur1\alpha&HFF&\3c&H000000&\c&H000000&\xbord{xbord}\ybord{ybord}}}{box_line}",
                     style="BoxStyle",
                     layer=0,
                 )
@@ -864,32 +865,33 @@ def _emit_events(
                 pysubs2.SSAEvent(
                     start=pysubs2.make_time(s=start),
                     end=pysubs2.make_time(s=end),
-                    text=rf"{{\pos(540,{y-3})\an2\blur1\alpha&HFF&\3c&H{pill_bgr}&\c&H{pill_bgr}&\fscy88\xbord10\ybord0}}{box_line}",
+                    text=rf"{{\pos({CX},{y})\an2\blur1\alpha&HFF&\3c&H{pill_bgr}&\c&H{pill_bgr}&\xbord{xbord}\ybord{ybord}}}{box_line}",
                     style="BoxStyle",
                     layer=1,
                 )
             )
-            # Layer 2: 3D text extrusion (offsets 8, 6, 4, 2)
-            for dy in [8, 6, 4, 2]:
-                subs.events.append(
-                    pysubs2.SSAEvent(
-                        start=pysubs2.make_time(s=start),
-                        end=pysubs2.make_time(s=end),
-                        text=rf"{{\pos(540,{y+dy})\an2\xshad0\yshad0\blur0\c&H000000&\3c&H000000&\bord{stroke_bord}}}{phrase_plain}",
-                        style="Default",
-                        layer=2,
-                    )
-                )
-            # Layer 3: Top text layer
+
+        # Layer 2: 3D text extrusion (offsets 8, 6, 4, 2) continuous for whole phrase (zero blink)
+        for dy in [8, 6, 4, 2]:
             subs.events.append(
                 pysubs2.SSAEvent(
-                    start=pysubs2.make_time(s=start),
-                    end=pysubs2.make_time(s=end),
-                    text=rf"{{\pos(540,{y})\an2\xshad0\yshad0\blur0\c&HFFFFFF&\3c&H000000&\bord{stroke_bord}}}{phrase_plain}",
+                    start=pysubs2.make_time(s=p_start),
+                    end=pysubs2.make_time(s=p_end),
+                    text=rf"{{\pos({CX},{y+dy})\an2\xshad0\yshad0\blur0\c&H000000&\3c&H000000&\bord{stroke_bord}}}{phrase_plain}",
                     style="Default",
-                    layer=3,
+                    layer=2,
                 )
             )
+        # Layer 3: Top text layer continuous for whole phrase (zero blink)
+        subs.events.append(
+            pysubs2.SSAEvent(
+                start=pysubs2.make_time(s=p_start),
+                end=pysubs2.make_time(s=p_end),
+                text=rf"{{\pos({CX},{y})\an2\xshad0\yshad0\blur0\c&HFFFFFF&\3c&H000000&\bord{stroke_bord}}}{phrase_plain}",
+                style="Default",
+                layer=3,
+            )
+        )
         return
 
     for idx in range(len(phrase_group)):
@@ -1007,10 +1009,18 @@ def generate_ass(
         base["fontsize"] = int(base["fontsize"] * scale_mod)
 
     subs.styles["Default"] = _build_style(base, overrides, template, preset=preset)
-    if preset in ("unbox", "sara") or base.get("pillcolor"):
+    if preset in ("unbox", "sara", "badge") or base.get("pillcolor"):
         box_style = _build_style(base, overrides, template, preset=preset)
-        box_style.borderstyle = 3 if preset == "badge" else 1
-        pill_c = hex_to_ass_color(base.get("pillcolor", "#e13a06"))
+        box_style.borderstyle = 3
+        pill_val = (
+            template.get("pill_color")
+            or template.get("pillColor")
+            or template.get("badgeBg")
+            or template.get("badge_bg")
+            or base.get("pillcolor")
+            or ("#e13a06" if preset == "sara" else "#e004fe")
+        )
+        pill_c = hex_to_ass_color(pill_val)
         box_style.outlinecolor = pill_c
         box_style.primarycolor = pill_c
         box_style.backcolor = pill_c
@@ -1089,7 +1099,13 @@ def generate_ass(
             )
         else:
             group_h_color = h_color_hex
-            group_pill_color = base.get("pillcolor")
+            group_pill_color = (
+                template.get("pill_color")
+                or template.get("pillColor")
+                or template.get("badgeBg")
+                or template.get("badge_bg")
+                or base.get("pillcolor")
+            )
 
         p_start = group[0]["start"]
         p_end_raw = group[-1]["end"]

@@ -914,6 +914,18 @@ export const batchReframeProject = inngest.createFunction(
             .where(eq(projects.id, projectId))
 
           if (!data) throw new Error("Project or user not found")
+
+          if (
+            event.data?.removeSilence !== undefined &&
+            data.project.removeSilence !== event.data.removeSilence
+          ) {
+            await db
+              .update(projects)
+              .set({ removeSilence: event.data.removeSilence })
+              .where(eq(projects.id, projectId))
+            data.project.removeSilence = event.data.removeSilence
+          }
+
           return {
             project: data.project,
             userPlan: data.userPlan,
@@ -956,10 +968,54 @@ export const batchReframeProject = inngest.createFunction(
         const planLimit = getPlanLimit(userPlan)
         const isFree = planLimit.name === "Free"
 
+        const effectiveRemoveSilence =
+          event.data?.removeSilence !== undefined
+            ? Boolean(event.data.removeSilence)
+            : project.removeSilence ?? true
+
+        // Fetch raw transcription words for this project so Modal always receives un-cut timestamps
+        const [rawTranscription] = await db
+          .select()
+          .from(transcriptions)
+          .where(eq(transcriptions.projectId, projectId))
+          .limit(1)
+
+        const totalWords = (rawTranscription?.words as WordTimestamp[]) || []
+
         const clipsPayload = projectClips.map((clip) => {
           const stylingPayload = {
             preset: clip.captionStyle || "impact",
             word_highlight: clip.wordHighlight ?? true,
+          }
+
+          let clipCaptions = clip.captions
+          // If raw words exist, reconstruct raw un-remapped timestamps for this clip window
+          // so Modal can accurately detect silent pauses from the raw video timeline
+          if (totalWords.length > 0) {
+            const clipWords = totalWords
+              .filter((w) => w.end >= clip.startTime && w.start <= clip.endTime)
+              .map((w) => ({
+                word: w.word.replace(/[.,!?]$/, "").toLowerCase(),
+                punctuated_word: w.word,
+                start: Math.max(0, w.start - clip.startTime),
+                end: Math.max(0, w.end - clip.startTime),
+                confidence: w.confidence || 0.99,
+                speaker: w.speaker?.toString() || "0",
+              }))
+
+            if (clipWords.length > 0) {
+              clipCaptions = [
+                {
+                  id: (clip.captions?.[0] as any)?.id || "captions",
+                  transcript: clipWords.map((w) => w.punctuated_word).join(" "),
+                  start: 0,
+                  end: Math.max(0, clip.endTime - clip.startTime),
+                  confidence: 0.99,
+                  channel: 0,
+                  words: clipWords,
+                },
+              ]
+            }
           }
 
           return {
@@ -967,10 +1023,10 @@ export const batchReframeProject = inngest.createFunction(
             start_time: clip.startTime,
             end_time: clip.endTime,
             crop_mode: clip.cropMode || project.videoFormat || "auto",
-            transcript: clip.captions,
+            transcript: clipCaptions,
             styling: stylingPayload,
             show_watermark: isFree,
-            remove_silence: project.removeSilence ?? true,
+            remove_silence: effectiveRemoveSilence,
           }
         })
 
