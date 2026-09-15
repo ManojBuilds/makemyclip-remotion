@@ -173,21 +173,24 @@ export const MARKETING_ASSETS = {
         title: "Start by uploading a video",
         description:
           "Simply paste a link to your YouTube video, or upload a video file into Kivio. Our AI transcribes and analyzes the full context in seconds.",
-        videoSrc: `${R2_PUBLIC_URL}/landing_page_assets/marquee_interview_deepdive.webm`,
+        videoSrc: `${R2_PUBLIC_URL}/landing_page_assets/how_it_works_step1.webm`,
+        posterSrc: `${R2_PUBLIC_URL}/landing_page_assets/how_it_works_step1.jpg`,
       },
       {
         step: "02",
         title: "Let Kivio's AI magically create vertical videos for you",
         description:
           "Just sit back and relax, while Kivio does all the work for you. In a matter of minutes, we will give you multiple viral-worthy clips from your original video with dynamic captions and speaker reframing.",
-        videoSrc: `${R2_PUBLIC_URL}/landing_page_assets/marquee_dual_split.webm`,
+        videoSrc: `${R2_PUBLIC_URL}/landing_page_assets/how_it_works_step2.webm`,
+        posterSrc: `${R2_PUBLIC_URL}/landing_page_assets/how_it_works_step2.jpg`,
       },
       {
         step: "03",
         title: "Trim, edit captions, and export in 1080p",
         description:
           "Fine-tune your video length with precision trimming, edit transcript words, switch dynamic caption styles, and export crisp high-definition clips in one click.",
-        videoSrc: `${R2_PUBLIC_URL}/landing_page_assets/marquee_export_hd.webm`,
+        videoSrc: `${R2_PUBLIC_URL}/landing_page_assets/how_it_works_step3.webm`,
+        posterSrc: `${R2_PUBLIC_URL}/landing_page_assets/how_it_works_step3.jpg`,
       },
     ],
   },

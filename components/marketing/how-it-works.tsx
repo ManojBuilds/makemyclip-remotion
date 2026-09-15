@@ -8,6 +8,7 @@ interface StepItem {
   title: string
   description: string
   videoSrc: string
+  posterSrc?: string
 }
 
 function StepCard({ item }: { item: StepItem }) {
@@ -50,14 +51,15 @@ function StepCard({ item }: { item: StepItem }) {
     >
       {/* Outer rounded gray container matching Klap.app */}
       <div className="relative mb-5 overflow-hidden rounded-[24px] sm:rounded-[28px] bg-[#ECEEF1] p-3 sm:p-4 transition-all duration-300 group-hover:bg-[#E3E6EB]">
-        <div className="relative overflow-hidden rounded-[16px] sm:rounded-[20px] bg-white border border-slate-200/70 shadow-sm aspect-[16/10.5]">
+        <div className="relative overflow-hidden rounded-[16px] sm:rounded-[20px] bg-white border border-slate-200/70 shadow-sm aspect-video">
           <video
             ref={videoRef}
             src={item.videoSrc}
+            poster={item.posterSrc}
             loop
             muted
             playsInline
-            preload="auto"
+            preload="metadata"
             className="pointer-events-none h-full w-full object-cover transition-transform duration-500 group-hover:scale-[1.02]"
           />
         </div>
