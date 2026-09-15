@@ -1660,6 +1660,8 @@ class AIReframe:
                     render_state["current_target_cx"] = None
                     render_state["current_cy_reframe"] = None
                     render_state["current_target_cy_reframe"] = None
+                    render_state.pop("split_track_top", None)
+                    render_state.pop("split_track_bottom", None)
 
                 scale = 1920 / img.shape[0]
 
@@ -1681,6 +1683,12 @@ class AIReframe:
                     render_state.pop("split_target_cx_bottom", None)
                     render_state.pop("split_target_cy_bottom", None)
                     render_state.pop("split_target_s_bottom", None)
+                    render_state.pop("split_track_top", None)
+                    render_state.pop("split_track_bottom", None)
+                    render_state.pop("split_sc_top", None)
+                    render_state.pop("split_sc_bottom", None)
+                    render_state.pop("split_dim_top", None)
+                    render_state.pop("split_dim_bottom", None)
 
                 # --- Look-ahead Interjection Filter ---
                 look_ahead_frames = 8

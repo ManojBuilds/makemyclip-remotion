@@ -96,25 +96,27 @@ class ReframeStrategy(RenderStrategy):
 
         # Dead zones (damped in close-up mode for rock-solid stability)
         angle_mode_prev = state.get("angle_mode", "medium")
-        DEAD_ZONE_PX = 24.0 if angle_mode_prev == "closeup" else 15.0
+        # Dead-zone threshold: micro-movements under DEAD_ZONE_PX do NOT pan the camera at all
+        # Kept tight (8.0px in 1080 canvas = ~3px in 720p) so camera immediately tracks leans and gestures
+        DEAD_ZONE_PX = 8.0
         if target_cx - current_target_cx > DEAD_ZONE_PX:
             current_target_cx = float(target_cx - DEAD_ZONE_PX)
         elif current_target_cx - target_cx > DEAD_ZONE_PX:
             current_target_cx = float(target_cx + DEAD_ZONE_PX)
 
-        DEAD_ZONE_Y = 15.0
+        DEAD_ZONE_Y = 10.0
         if abs(target_cy - current_target_cy) > DEAD_ZONE_Y:
             current_target_cy = float(target_cy)
 
-        # Adaptive pan easing
+        # Responsive & fluid pan easing (72% faster tracking to prevent head clipping)
         dist_x = abs(current_target_cx - current_cx)
-        if dist_x < 15.0:
+        if dist_x < 5.0:
             adaptive_alpha = 0.0
         else:
-            sigmoid_factor = 1.0 / (1.0 + math.exp(-0.025 * (dist_x - 150.0)))
+            sigmoid_factor = 1.0 / (1.0 + math.exp(-0.035 * (dist_x - 50.0)))
             velocity = abs(current_target_cx - (prev_target_cx or current_target_cx)) if prev_target_cx is not None else 0.0
-            velocity_boost = min(0.12, velocity / 500.0)
-            adaptive_alpha = 0.05 + (0.35 + velocity_boost) * sigmoid_factor
+            velocity_boost = min(0.20, velocity / 200.0)
+            adaptive_alpha = 0.14 + (0.36 + velocity_boost) * sigmoid_factor
 
         if adaptive_alpha > 0.0:
             current_cx += (current_target_cx - current_cx) * adaptive_alpha
@@ -123,7 +125,7 @@ class ReframeStrategy(RenderStrategy):
         # ── Dynamic 2-Camera Angle Switching ────────────────────────────────
         # Simulates professional studio multi-camera cutting between:
         # Angle 1: Medium shot (1.0x full vertical framing)
-        # Angle 2: Punch-in close-up shot (~1.22x framing focused on upper chest & eyes)
+        # Angle 2: Punch-in close-up shot (~1.15x framing focused on upper chest & eyes with generous side margin)
         enable_dynamic_angles = state.get("enable_dynamic_angles", True)
         fps = float(state.get("fps", 25.0))
         angle_mode = state.get("angle_mode", "medium")
@@ -154,12 +156,12 @@ class ReframeStrategy(RenderStrategy):
 
         # Framing calculations: Keep the full vertical shot with head and body intact
         # For standard landscape (16:9) to vertical (9:16), Angle 1 uses full height (1.0x)
-        # while Angle 2 punches in slightly (1.22x) with cinematic upper-third headroom.
+        # while Angle 2 punches in comfortably (1.15x) to guarantee head & shoulder breathing room.
         img_h, img_w = img.shape[:2]
         target_aspect = float(self.target_w) / float(self.target_h)
         source_aspect = float(img_w) / float(img_h)
 
-        zoom_mult = 1.22 if (enable_dynamic_angles and angle_mode == "closeup") else 1.0
+        zoom_mult = 1.15 if (enable_dynamic_angles and angle_mode == "closeup") else 1.0
 
         if source_aspect >= target_aspect:
             base_crop_h = float(img_h)
@@ -167,10 +169,10 @@ class ReframeStrategy(RenderStrategy):
             crop_w = crop_h * target_aspect
 
             if zoom_mult > 1.0:
-                # Close-up punch: position face center at ~42% from the top (upper-third eye line)
-                # leaving generous 10-12% headroom so hair never touches top frame border
+                # Close-up punch: position face center at ~40% from the top (upper-third eye line)
+                # leaving generous 12-14% headroom and ample horizontal margins
                 src_cy = current_cy / scale if current_cy is not None else img_h * 0.35
-                y1 = max(0.0, min(src_cy - crop_h * 0.42, float(img_h) - crop_h))
+                y1 = max(0.0, min(src_cy - crop_h * 0.40, float(img_h) - crop_h))
             else:
                 # Medium shot: preserve 100% full vertical height
                 y1 = 0.0
@@ -206,7 +208,7 @@ class ReframeStrategy(RenderStrategy):
 
 
 class SplitStrategy(RenderStrategy):
-    """Dynamic 2-speaker split-screen layout with active speaker highlight."""
+    """Dynamic 2-speaker split-screen layout with active speaker highlight and studio framing."""
 
     def render_frame(
         self,
@@ -221,11 +223,36 @@ class SplitStrategy(RenderStrategy):
 
         min_face_sep = float(img.shape[1]) * 0.18
 
-        if faces_fidx and len(faces_fidx) >= 2:
-            sorted_lr = sorted(faces_fidx, key=lambda f: f.get("x", 0))
-            if abs(sorted_lr[0].get("x", 0) - sorted_lr[-1].get("x", 0)) >= min_face_sep:
-                face_top = sorted_lr[0]
-                face_bottom = sorted_lr[-1]
+        # --- Track ID Pinning (Zero-Swapping Speaker Continuity) ---
+        pinned_top_track = state.get("split_track_top")
+        pinned_bottom_track = state.get("split_track_bottom")
+
+        if faces_fidx:
+            # 1. Attempt track-locked lookup if tracks have been pinned
+            if pinned_top_track is not None:
+                face_top = next((f for f in faces_fidx if f.get("tidx") == pinned_top_track), None)
+            if pinned_bottom_track is not None:
+                face_bottom = next((f for f in faces_fidx if f.get("tidx") == pinned_bottom_track), None)
+
+            # 2. If tracks not yet established or both unassigned, initialize from spatial separation
+            if (face_top is None or face_bottom is None) and len(faces_fidx) >= 2:
+                sorted_lr = sorted(faces_fidx, key=lambda f: f.get("x", 0))
+                if abs(sorted_lr[0].get("x", 0) - sorted_lr[-1].get("x", 0)) >= min_face_sep:
+                    if face_top is None and face_bottom is None:
+                        face_top = sorted_lr[0]
+                        face_bottom = sorted_lr[-1]
+                        if face_top.get("tidx") is not None:
+                            state["split_track_top"] = face_top.get("tidx")
+                        if face_bottom.get("tidx") is not None:
+                            state["split_track_bottom"] = face_bottom.get("tidx")
+                    elif face_top is None and face_bottom is not None:
+                        rem = [f for f in sorted_lr if f.get("tidx") != face_bottom.get("tidx")]
+                        if rem:
+                            face_top = rem[0]
+                    elif face_bottom is None and face_top is not None:
+                        rem = [f for f in sorted_lr if f.get("tidx") != face_top.get("tidx")]
+                        if rem:
+                            face_bottom = rem[-1]
 
         # Look-ahead: If faces are missing on the initial transition frame into split,
         # inspect the next 1-15 frames so we never flash a 1-frame fallback glitch.
@@ -240,6 +267,10 @@ class SplitStrategy(RenderStrategy):
                         if abs(sorted_fut[0].get("x", 0) - sorted_fut[-1].get("x", 0)) >= min_face_sep:
                             face_top = sorted_fut[0]
                             face_bottom = sorted_fut[-1]
+                            if face_top.get("tidx") is not None:
+                                state["split_track_top"] = face_top.get("tidx")
+                            if face_bottom.get("tidx") is not None:
+                                state["split_track_bottom"] = face_bottom.get("tidx")
                             break
 
         # Persistence: If we already have established split-screen cameras from previous frames,
@@ -280,19 +311,36 @@ class SplitStrategy(RenderStrategy):
                     state[s_key] += (state[ts_key] - state[s_key]) * SPLIT_ALPHA
 
         final_frame = np.zeros((self.target_h, self.target_w, 3), dtype=np.uint8)
-        score_top = face_top.get("score", 0.0) if face_top else 0.0
-        score_bottom = face_bottom.get("score", 0.0) if face_bottom else 0.0
-        active_th = 0.5
+
+        # --- Smooth Active Speaker Filtering (Zero Strobe / Zero Flicker) ---
+        raw_sc_top = float(face_top.get("score", 0.0)) if face_top else 0.0
+        raw_sc_bottom = float(face_bottom.get("score", 0.0)) if face_bottom else 0.0
+
+        state["split_sc_top"] = state.get("split_sc_top", 0.0) * 0.85 + raw_sc_top * 0.15
+        state["split_sc_bottom"] = state.get("split_sc_bottom", 0.0) * 0.85 + raw_sc_bottom * 0.15
+
+        smooth_sc_top = state["split_sc_top"]
+        smooth_sc_bottom = state["split_sc_bottom"]
+
+        target_alpha_top = 1.0
+        target_alpha_bottom = 1.0
+        if smooth_sc_top > 0.45 and smooth_sc_top > smooth_sc_bottom + 0.10:
+            target_alpha_bottom = 0.88
+        elif smooth_sc_bottom > 0.45 and smooth_sc_bottom > smooth_sc_top + 0.10:
+            target_alpha_top = 0.88
+
+        cur_alpha_top = state.get("split_dim_top", 1.0)
+        cur_alpha_bottom = state.get("split_dim_bottom", 1.0)
+
+        state["split_dim_top"] = cur_alpha_top + (target_alpha_top - cur_alpha_top) * 0.08
+        state["split_dim_bottom"] = cur_alpha_bottom + (target_alpha_bottom - cur_alpha_bottom) * 0.08
 
         for is_top, y_start in [(True, 0), (False, 960)]:
             p_prefix = "top" if is_top else "bottom"
             cx = state.get(f"split_cx_{p_prefix}")
             cy = state.get(f"split_cy_{p_prefix}")
-
-            if is_top:
-                is_active = (score_top > active_th and score_top >= score_bottom)
-            else:
-                is_active = (score_bottom > active_th and score_bottom > score_top)
+            fs = state.get(f"split_s_{p_prefix}", 50.0)
+            dim_alpha = state.get(f"split_dim_{p_prefix}", 1.0)
 
             sub_h, sub_w = img.shape[:2]
             if cx is None:
@@ -302,22 +350,34 @@ class SplitStrategy(RenderStrategy):
                 cx_rel = max(0.0, min(float(cx), float(sub_w)))
                 cy_rel = max(0.0, min(float(cy) if cy is not None else sub_h * 0.25, float(sub_h)))
 
-            crop_w = float(sub_w) * 0.46
-            crop_h = crop_w / 1.125
-            crop_w = min(crop_w, float(sub_w))
-            crop_h = min(crop_h, float(sub_h))
+            # --- Adaptive Face-Scale Normalization (Balanced Studio Framing) ---
+            min_crop_h = float(sub_h) * 0.40
+            max_crop_h = float(sub_h) * 0.85
+            adaptive_h = max(min_crop_h, min(float(fs) * 2.85, max_crop_h))
+            adaptive_w = adaptive_h * 1.125
+
+            if adaptive_w > float(sub_w):
+                adaptive_w = float(sub_w)
+                adaptive_h = adaptive_w / 1.125
+
+            crop_w = adaptive_w
+            crop_h = adaptive_h
 
             x1 = max(0.0, min(cx_rel - crop_w / 2.0, sub_w - crop_w))
-            y1 = max(0.0, min(cy_rel - crop_h * 0.28, sub_h - crop_h))
+            # Upper-Third Cinematography Rule for 9:8 split panel (10%-12% clean headroom)
+            y1 = max(0.0, min(cy_rel - crop_h * 0.38, sub_h - crop_h))
 
             crop = img[int(y1) : int(y1 + crop_h), int(x1) : int(x1 + crop_w)]
             if crop.shape[0] > 0 and crop.shape[1] > 0:
                 resized = cv2.resize(crop, (1080, 960), interpolation=cv2.INTER_AREA)
-                if not is_active and (score_top > active_th or score_bottom > active_th):
-                    resized = cv2.convertScaleAbs(resized, alpha=0.88, beta=0)
+                if dim_alpha < 0.99:
+                    resized = cv2.convertScaleAbs(resized, alpha=float(dim_alpha), beta=0)
                 final_frame[y_start : y_start + 960, 0:1080] = resized
 
-        final_frame[958:962, :] = (40, 40, 40)
+        # --- Broadcast Studio Divider Line (Clean 8px Beveled Divider) ---
+        final_frame[955:957, :] = (32, 32, 36)  # Subtle top bevel
+        final_frame[957:963, :] = (16, 16, 18)  # Core dark divider band
+        final_frame[963:965, :] = (24, 24, 28)  # Subtle bottom shadow
         return final_frame
 
 
