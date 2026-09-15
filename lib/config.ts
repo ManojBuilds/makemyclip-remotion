@@ -173,9 +173,9 @@ const R2_PUBLIC_URL =
 // Preview asset paths (rendered on demo portrait image at position 75%, hosted on Cloudflare R2)
 export const PREVIEW_IMAGES: Record<string, string> = {
   aliabdlal: `${R2_PUBLIC_URL}/previews/caption_aliabdlal_v2.jpg`,
-  unbox: `${R2_PUBLIC_URL}/previews/caption_unbox_v2.jpg`,
+  unbox: `${R2_PUBLIC_URL}/previews/caption_unbox_v3.jpg`,
   billy: `${R2_PUBLIC_URL}/previews/caption_billy_v2.jpg`,
-  sara: `${R2_PUBLIC_URL}/previews/caption_sara_v2.jpg`,
+  sara: `${R2_PUBLIC_URL}/previews/caption_sara_v3.jpg`,
   fred: `${R2_PUBLIC_URL}/previews/caption_fred_v2.jpg`,
   casey: `${R2_PUBLIC_URL}/previews/caption_casey_v2.jpg`,
   tom: `${R2_PUBLIC_URL}/previews/caption_tom_v2.jpg`,
@@ -198,9 +198,9 @@ export const PREVIEW_IMAGES: Record<string, string> = {
 // Hover video preview paths (~100-120KB WebM loops hosted on Cloudflare R2)
 export const PREVIEW_VIDEOS: Record<string, string> = {
   aliabdlal: `${R2_PUBLIC_URL}/previews/caption_aliabdlal_v2.webm`,
-  unbox: `${R2_PUBLIC_URL}/previews/caption_unbox_v2.webm`,
+  unbox: `${R2_PUBLIC_URL}/previews/caption_unbox_v3.webm`,
   billy: `${R2_PUBLIC_URL}/previews/caption_billy_v2.webm`,
-  sara: `${R2_PUBLIC_URL}/previews/caption_sara_v2.webm`,
+  sara: `${R2_PUBLIC_URL}/previews/caption_sara_v3.webm`,
   fred: `${R2_PUBLIC_URL}/previews/caption_fred_v2.webm`,
   casey: `${R2_PUBLIC_URL}/previews/caption_casey_v2.webm`,
   tom: `${R2_PUBLIC_URL}/previews/caption_tom_v2.webm`,

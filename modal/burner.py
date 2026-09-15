@@ -140,7 +140,7 @@ _QUALITY_PRESETS = {
         "crf": "23",
         "r2_prefix": "previews",
         "file_prefix": "prev",
-        "audio": ["-c:a", "aac", "-b:a", "128k"],
+        "audio": ["-c:a", "aac", "-b:a", "192k"],
     },
     "export_free": {
         "scale": "scale=720:-2",
@@ -148,7 +148,7 @@ _QUALITY_PRESETS = {
         "crf": "23",
         "r2_prefix": "renders",
         "file_prefix": "cap",
-        "audio": ["-c:a", "aac", "-b:a", "128k"],
+        "audio": ["-c:a", "aac", "-b:a", "192k"],
     },
     "export": {
         "scale": None,
@@ -156,7 +156,7 @@ _QUALITY_PRESETS = {
         "crf": "22",
         "r2_prefix": "renders",
         "file_prefix": "cap",
-        "audio": ["-c:a", "aac", "-b:a", "128k"],
+        "audio": ["-c:a", "aac", "-b:a", "192k"],
     },
 }
 

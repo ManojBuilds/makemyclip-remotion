@@ -2,7 +2,7 @@
 
 import { useState } from "react"
 import Link from "next/link"
-import { Video, Loader2 } from "lucide-react"
+import { Video } from "lucide-react"
 import type { Project } from "@/lib/types"
 
 function getYouTubeId(url?: string | null) {
@@ -32,8 +32,6 @@ export function ProjectListItem({ project }: { project: Project }) {
         ? project.sourceUrl
         : null)
     : null
-
-  const isReady = project.status === "ready"
 
   return (
     <Link
@@ -78,13 +76,6 @@ export function ProjectListItem({ project }: { project: Project }) {
           </div>
         )}
 
-        {/* Processing State (only when not ready) */}
-        {!isReady && (
-          <div className="absolute bottom-2 left-2 flex items-center gap-1 rounded-md bg-black/60 px-1.5 py-0.5 text-[10px] font-medium text-amber-300 backdrop-blur-sm">
-            <Loader2 className="size-2.5 animate-spin" />
-            <span className="capitalize">{project.status || "Processing"}</span>
-          </div>
-        )}
       </div>
 
       {/* Video Title */}

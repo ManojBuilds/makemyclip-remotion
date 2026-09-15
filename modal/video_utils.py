@@ -115,13 +115,19 @@ def mux_audio_video(
     output_path: str,
     fps: float,
     use_nvenc: bool = False,
+    normalize_audio: bool = True,
 ) -> None:
-    """Mux video + audio into a final MP4 with sync correction."""
+    """Mux video + audio into a final MP4 with sync correction and broadcast loudness normalization."""
     video_codec = (
         ["h264_nvenc", "-preset", "p4", "-cq", "22"]
         if use_nvenc
         else ["libx264", "-preset", "ultrafast", "-crf", "22"]
     )
+
+    af_filters = ["aresample=async=1000:min_hard_comp=0.100000:first_pts=0"]
+    if normalize_audio:
+        # EBU R128 / ITU-R BS.1770-4 broadcast loudness standard: -14 LUFS, -1.0 dB True Peak
+        af_filters.append("loudnorm=I=-14:LRA=11:TP=-1.0")
 
     cmd = [
         "ffmpeg",
@@ -135,8 +141,8 @@ def mux_audio_video(
         "-pix_fmt", "yuv420p",
         "-profile:v", "high",
         "-c:a", "aac",
-        "-b:a", "128k",
-        "-af", "aresample=async=1000:min_hard_comp=0.100000:first_pts=0",
+        "-b:a", "192k",
+        "-af", ",".join(af_filters),
         "-movflags", "+faststart",
         output_path,
         "-loglevel", "panic",

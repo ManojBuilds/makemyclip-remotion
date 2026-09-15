@@ -216,7 +216,7 @@ export function NativeVideoPreview({
         <Eye className="size-3 text-emerald-400" /> Preview
       </span>
       <span className="inline-flex items-center rounded-full bg-black/60 px-2.5 py-1 text-[10px] font-bold text-white/95 backdrop-blur-md border border-white/10 shadow-sm">
-        540p
+        720p
       </span>
     </div>
   )
@@ -709,54 +709,54 @@ function ClipCardBase({
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end" className="w-56 p-1.5 shadow-xl rounded-xl">
-                <DropdownMenuItem
-                  className="flex items-center justify-between gap-3 px-3 py-2.5 text-xs font-semibold cursor-pointer rounded-lg hover:bg-slate-50 focus:bg-slate-50"
-                  onClick={() => onDownload(clip, { withoutCaptions: false })}
-                >
-                  <div className="flex items-center gap-2">
-                    <ClosedCaption className="size-4 text-slate-700" />
-                    <span>With Captions</span>
-                  </div>
-                  <span className="text-[10px] font-bold text-emerald-600 uppercase tracking-wider bg-emerald-50 px-1.5 py-0.5 rounded">
-                    {isFree ? "720p" : "1080p HD"}
-                  </span>
-                </DropdownMenuItem>
+              <DropdownMenuItem
+                className="flex items-center justify-between gap-3 px-3 py-2.5 text-xs font-semibold cursor-pointer rounded-lg hover:bg-slate-50 focus:bg-slate-50"
+                onClick={() => onDownload(clip, { withoutCaptions: false })}
+              >
+                <div className="flex items-center gap-2">
+                  <ClosedCaption className="size-4 text-slate-700" />
+                  <span>With Captions</span>
+                </div>
+                <span className="text-[10px] font-bold text-emerald-600 uppercase tracking-wider bg-emerald-50 px-1.5 py-0.5 rounded">
+                  {isFree ? "720p" : "1080p HD"}
+                </span>
+              </DropdownMenuItem>
 
-                <DropdownMenuItem
-                  className="flex items-center justify-between gap-3 px-3 py-2.5 text-xs font-semibold cursor-pointer rounded-lg hover:bg-slate-50 focus:bg-slate-50"
-                  onClick={() => onDownload(clip, { withoutCaptions: true })}
-                >
-                  <div className="flex items-center gap-2">
-                    <Video className="size-4 text-slate-700" />
-                    <span>Without Captions</span>
-                  </div>
-                  <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">
-                    Clean
-                  </span>
-                </DropdownMenuItem>
+              <DropdownMenuItem
+                className="flex items-center justify-between gap-3 px-3 py-2.5 text-xs font-semibold cursor-pointer rounded-lg hover:bg-slate-50 focus:bg-slate-50"
+                onClick={() => onDownload(clip, { withoutCaptions: true })}
+              >
+                <div className="flex items-center gap-2">
+                  <Video className="size-4 text-slate-700" />
+                  <span>Without Captions</span>
+                </div>
+                <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">
+                  Clean
+                </span>
+              </DropdownMenuItem>
 
-                {isFree && (
-                  <>
-                    <div className="my-1 h-px bg-slate-100" />
-                    <DropdownMenuItem
-                      className="flex items-center justify-between gap-3 px-3 py-2.5 text-xs font-semibold cursor-pointer rounded-lg hover:bg-slate-50 focus:bg-slate-50 text-slate-900"
-                      onClick={() => {
-                        trackCheckoutInitiated({ planId: "pro_upgrade" })
-                        setShowUpgradeModal(true)
-                      }}
-                    >
-                      <div className="flex items-center gap-2">
-                        <Sparkles className="size-4 text-amber-500 fill-amber-100" />
-                        <span>Remove Watermark</span>
-                      </div>
-                      <span className="text-[10px] font-bold text-amber-600 bg-amber-50 px-1.5 py-0.5 rounded uppercase">
-                        Pro
-                      </span>
-                    </DropdownMenuItem>
-                  </>
-                )}
-              </DropdownMenuContent>
-            </DropdownMenu>
+              {isFree && (
+                <>
+                  <div className="my-1 h-px bg-slate-100" />
+                  <DropdownMenuItem
+                    className="flex items-center justify-between gap-3 px-3 py-2.5 text-xs font-semibold cursor-pointer rounded-lg hover:bg-slate-50 focus:bg-slate-50 text-slate-900"
+                    onClick={() => {
+                      trackCheckoutInitiated({ planId: "pro_upgrade" })
+                      setShowUpgradeModal(true)
+                    }}
+                  >
+                    <div className="flex items-center gap-2">
+                      <Sparkles className="size-4 text-amber-500 fill-amber-100" />
+                      <span>Remove Watermark</span>
+                    </div>
+                    <span className="text-[10px] font-bold text-amber-600 bg-amber-50 px-1.5 py-0.5 rounded uppercase">
+                      Pro
+                    </span>
+                  </DropdownMenuItem>
+                </>
+              )}
+            </DropdownMenuContent>
+          </DropdownMenu>
         </div>
       </div>
 

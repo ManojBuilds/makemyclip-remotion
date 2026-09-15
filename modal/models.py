@@ -49,9 +49,10 @@ class ReframeRequest(BaseModel):
     show_watermark: bool = False
     watermark: Optional[WatermarkSpec] = None
     crop_mode: str = "reframe"
-    quality: str = "preview"  # "preview" (fast, 540p, smaller file) or "export" (full 1080p)
+    quality: str = "preview"  # "preview" (fast, 720p, smaller file) or "export" (full 1080p)
     analysis_url: Optional[str] = None
     remove_silence: bool = False
+    normalize_audio: bool = True
 
 
 class BurnCaptionsRequest(BaseModel):
@@ -61,9 +62,10 @@ class BurnCaptionsRequest(BaseModel):
     show_watermark: bool = False
     watermark: Optional[WatermarkSpec] = None
     crop_mode: Optional[str] = "reframe"
-    quality: str = "export"  # "preview" (fast, 540p) or "export" (full 1080p)
+    quality: str = "export"  # "preview" (fast, 720p) or "export" (full 1080p)
     plan: str = "free"  # "free", "creator", or "power" — controls export resolution
     remove_silence: bool = False
+    normalize_audio: bool = True
 
 
 class BatchClipItem(BaseModel):
@@ -77,6 +79,7 @@ class BatchClipItem(BaseModel):
     show_watermark: bool = False
     watermark: Optional[WatermarkSpec] = None
     remove_silence: bool = False
+    normalize_audio: bool = True
 
 
 

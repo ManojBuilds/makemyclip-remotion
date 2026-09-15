@@ -2178,7 +2178,7 @@ class AIReframe:
             #    truth for ALL future renders — both preview burns and HD exports.
             #    It MUST always be full 1080x1920 quality, regardless of the
             #    request's quality parameter.  The preview quality reduction
-            #    (540p, higher CRF) is handled by the caption burner, not here.
+            #    (720p, higher CRF) is handled by the caption burner, not here.
             synced_output = local_orig.replace(".mp4", "_synced.mp4")
             mux_audio_video(
                 video_path=local_orig,
@@ -2186,6 +2186,7 @@ class AIReframe:
                 output_path=synced_output,
                 fps=fps,
                 use_nvenc=self.use_nvenc,
+                normalize_audio=getattr(req, "normalize_audio", True),
             )
             os.replace(synced_output, local_orig)
 
@@ -2867,6 +2868,7 @@ class AIReframe:
                             output_path=synced,
                             fps=fps,
                             use_nvenc=self.use_nvenc,
+                            normalize_audio=getattr(clip_req, "normalize_audio", True),
                         )
                         os.replace(synced, local_orig)
 
@@ -3015,6 +3017,7 @@ class AIReframe:
                                 output_path=synced,
                                 fps=fps,
                                 use_nvenc=self.use_nvenc,
+                                normalize_audio=getattr(clip_req, "normalize_audio", True),
                             )
                             os.replace(synced, local_orig)
 
