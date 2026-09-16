@@ -5,6 +5,9 @@ import { ArrowLeft } from "lucide-react"
 export const metadata: Metadata = {
   title: "Privacy Policy",
   description: "Privacy Policy for Kivio AI video clipping service.",
+  alternates: {
+    canonical: "/privacy",
+  },
 }
 
 export default function PrivacyPage() {

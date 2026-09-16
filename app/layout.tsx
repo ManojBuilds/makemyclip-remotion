@@ -1,4 +1,4 @@
-import { Geist_Mono, TikTok_Sans, Google_Sans, Poppins } from "next/font/google"
+import { Geist_Mono, Poppins } from "next/font/google"
 import type { Metadata } from "next"
 import { ClerkProvider } from "@clerk/nextjs"
 
@@ -7,16 +7,15 @@ import { Toaster } from "sonner"
 import { ThemeProvider } from "@/components/theme-provider"
 import { PostHogProvider } from "@/components/providers/posthog-provider"
 import { DashboardProvider } from "@/components/dashboard-context"
+import { WebsiteJsonLd } from "@/components/seo/json-ld"
 import { cn } from "@/lib/utils"
 
 const siteName = "Kivio #1 AI Video Clipping Agent"
 const siteDescription =
-  "AI Agent that transforms your long videos into viral social clips with intelligent editing, captions, reframing, and more"
+  "AI Agent that transforms your long videos and podcasts into viral social clips with intelligent editing, captions, and 9:16 vertical auto-reframing."
 
-const metadataBase =
-  process.env.NEXT_PUBLIC_APP_URL && process.env.NEXT_PUBLIC_APP_URL.length > 0
-    ? new URL(process.env.NEXT_PUBLIC_APP_URL)
-    : new URL("http://localhost:3000")
+const appUrl = process.env.NEXT_PUBLIC_APP_URL || "https://kivio.pro"
+const metadataBase = new URL(appUrl)
 
 export const metadata: Metadata = {
   metadataBase,
@@ -24,6 +23,8 @@ export const metadata: Metadata = {
   manifest: "/site.webmanifest",
   appleWebApp: {
     title: "Kivio",
+    statusBarStyle: "default",
+    capable: true,
   },
   icons: {
     icon: [
@@ -40,8 +41,44 @@ export const metadata: Metadata = {
     template: `%s | Kivio`,
   },
   description: siteDescription,
+  keywords: [
+    "AI video clipping",
+    "video clipping agent",
+    "viral clip generator",
+    "YouTube shorts generator",
+    "TikTok clips maker",
+    "Instagram reels generator",
+    "auto captions generator",
+    "video reframing AI",
+    "podcast video clips",
+    "Kivio",
+    "AI video editor",
+  ],
+  authors: [{ name: "Kivio Team", url: appUrl }],
+  creator: "Kivio",
+  publisher: "Kivio",
+  category: "technology",
+  alternates: {
+    canonical: "/",
+  },
+  robots: {
+    index: true,
+    follow: true,
+    googleBot: {
+      index: true,
+      follow: true,
+      "max-video-preview": -1,
+      "max-image-preview": "large",
+      "max-snippet": -1,
+    },
+  },
+  verification: {
+    google: "WIuA8iRZtBfH9F9Hvl_p71gecHMUMfjMn0Hh5Gm0gEQ",
+  },
   openGraph: {
     type: "website",
+    locale: "en_US",
+    url: appUrl,
     siteName: "Kivio",
     title: siteName,
     description: siteDescription,
@@ -50,7 +87,7 @@ export const metadata: Metadata = {
         url: "https://res.cloudinary.com/dc6yzmwrq/image/upload/v1786372287/ChatGPT_Image_Aug_10_2026_07_43_43_PM_1_jrlmgz.png",
         width: 1200,
         height: 630,
-        alt: "Kivio Logo",
+        alt: "Kivio - #1 AI Video Clipping Agent",
       },
     ],
   },
@@ -58,14 +95,15 @@ export const metadata: Metadata = {
     card: "summary_large_image",
     title: siteName,
     description: siteDescription,
-    images: ["https://res.cloudinary.com/dc6yzmwrq/image/upload/v1786372287/ChatGPT_Image_Aug_10_2026_07_43_43_PM_1_jrlmgz.png"],
+    images: [
+      "https://res.cloudinary.com/dc6yzmwrq/image/upload/v1786372287/ChatGPT_Image_Aug_10_2026_07_43_43_PM_1_jrlmgz.png",
+    ],
   },
-  isReadOnly: true, // not a standard Next metadata property, just keeping user changes if any
-} as any
+}
 
 const inter = Poppins({
   subsets: ["latin"],
-  weight: ["300", "400", "500"],
+  weight: ["300", "400", "500", "600", "700"],
   variable: "--font-sans",
 })
 
@@ -92,6 +130,7 @@ export default function RootLayout({
         )}
       >
         <body>
+          <WebsiteJsonLd />
           <PostHogProvider>
             <ThemeProvider defaultTheme="light">
               <DashboardProvider>{children}</DashboardProvider>
@@ -103,4 +142,3 @@ export default function RootLayout({
     </ClerkProvider>
   )
 }
-

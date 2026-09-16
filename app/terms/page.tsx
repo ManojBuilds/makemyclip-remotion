@@ -5,6 +5,9 @@ import { ArrowLeft } from "lucide-react"
 export const metadata: Metadata = {
   title: "Terms of Service",
   description: "Terms of Service for Kivio AI video clipping service.",
+  alternates: {
+    canonical: "/terms",
+  },
 }
 
 export default function TermsPage() {
