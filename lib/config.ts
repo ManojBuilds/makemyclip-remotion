@@ -172,6 +172,7 @@ const R2_PUBLIC_URL =
 
 // Preview asset paths (rendered on demo portrait image at position 75%, hosted on Cloudflare R2)
 export const PREVIEW_IMAGES: Record<string, string> = {
+  hormozi: `${R2_PUBLIC_URL}/previews/caption_hormozi_v2.jpg`,
   aliabdlal: `${R2_PUBLIC_URL}/previews/caption_aliabdlal_v2.jpg`,
   unbox: `${R2_PUBLIC_URL}/previews/caption_unbox_v3.jpg`,
   billy: `${R2_PUBLIC_URL}/previews/caption_billy_v2.jpg`,
@@ -191,12 +192,12 @@ export const PREVIEW_IMAGES: Record<string, string> = {
   sticker: `${R2_PUBLIC_URL}/previews/caption_sticker_v2.jpg`,
   coral: `${R2_PUBLIC_URL}/previews/caption_coral_v2.jpg`,
   growth: `${R2_PUBLIC_URL}/previews/caption_growth_v2.jpg`,
-  hormozi: `${R2_PUBLIC_URL}/previews/caption_hormozi_v2.jpg`,
   impact: `${R2_PUBLIC_URL}/previews/caption_impact_v2.jpg`,
 }
 
 // Hover video preview paths (~100-120KB WebM loops hosted on Cloudflare R2)
 export const PREVIEW_VIDEOS: Record<string, string> = {
+  hormozi: `${R2_PUBLIC_URL}/previews/caption_hormozi_v2.webm`,
   aliabdlal: `${R2_PUBLIC_URL}/previews/caption_aliabdlal_v2.webm`,
   unbox: `${R2_PUBLIC_URL}/previews/caption_unbox_v3.webm`,
   billy: `${R2_PUBLIC_URL}/previews/caption_billy_v2.webm`,
@@ -216,6 +217,5 @@ export const PREVIEW_VIDEOS: Record<string, string> = {
   sticker: `${R2_PUBLIC_URL}/previews/caption_sticker_v2.webm`,
   coral: `${R2_PUBLIC_URL}/previews/caption_coral_v2.webm`,
   growth: `${R2_PUBLIC_URL}/previews/caption_growth_v2.webm`,
-  hormozi: `${R2_PUBLIC_URL}/previews/caption_hormozi_v2.webm`,
   impact: `${R2_PUBLIC_URL}/previews/caption_impact_v2.webm`,
 }
